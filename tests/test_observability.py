@@ -94,9 +94,15 @@ class TestResolveLogLevel:
         root = logging.getLogger()
         handlers_before = list(root.handlers)
         try:
+            # Force the clean "no handlers" precondition this test actually
+            # needs: under normal pytest ordering an earlier test may have
+            # already installed a root handler (e.g. via configure_logging()
+            # elsewhere in the session), which would make the bug this test
+            # guards against invisible even if it regressed.
+            root.handlers.clear()
             with patch.dict("os.environ", {"LOG_LEVEL": "NOT_A_REAL_LEVEL"}):
                 _resolve_log_level()
-            assert root.handlers == handlers_before
+            assert root.handlers == []
         finally:
             root.handlers = handlers_before
 

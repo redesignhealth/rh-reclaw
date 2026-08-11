@@ -148,6 +148,28 @@ class TestExtractUpstreamClaims:
         assert claims is None
         mock_logger.error.assert_called_once()
 
+    async def test_non_dict_payload_returns_none_and_logs_error(self) -> None:
+        # A payload segment that base64-decodes to valid-but-non-dict JSON
+        # (e.g. a JSON array) must not reach `payload[k]`-style dict access
+        # -- that would raise instead of failing closed. Mirrors the header
+        # guard's ``test_non_dict_header_returns_none_and_logs_error`` above.
+        proxy = _build_proxy()
+        valid_header = (
+            base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+            .decode()
+            .rstrip("=")
+        )
+        non_dict_payload = (
+            base64.urlsafe_b64encode(json.dumps(["sub", "x"]).encode()).decode().rstrip("=")
+        )
+        id_token = f"{valid_header}.{non_dict_payload}.sig"
+
+        with patch("auth.logger") as mock_logger:
+            claims = await proxy._extract_upstream_claims({"id_token": id_token})
+
+        assert claims is None
+        mock_logger.error.assert_called_once()
+
     async def test_alg_none_id_token_returns_none_and_logs_error(self) -> None:
         # Defense-in-depth guard: even though signature verification is the
         # parent OIDCProxy's job, an alg=none header must be rejected here

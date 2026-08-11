@@ -39,6 +39,12 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 USER app
 
+# EXPOSE is documentation-only and reflects only the DEFAULT MCP_PORT
+# (8080). If MCP_PORT is overridden at runtime (e.g. `docker run -e
+# MCP_PORT=9000`), this line does not change with it -- `docker run -P`
+# (auto-publish-all-exposed-ports) would then publish the wrong port. Use
+# an explicit `-p` mapping (or docker-compose.yml's parameterized ports:
+# block, which already handles this) instead of relying on `-P`.
 EXPOSE 8080
 
 # Distinguishes a crashed/unhealthy container from a healthy one during

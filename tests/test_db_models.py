@@ -158,7 +158,10 @@ class TestSchema:
         assert cols["created_at"] == "timestamp with time zone"
         assert cols["display_name"] == "character varying"
         max_length = await _column_max_length(engine, "agents", "display_name")
-        assert max_length == MAX_DISPLAY_NAME_LENGTH
+        assert max_length == MAX_DISPLAY_NAME_LENGTH, (
+            "agents.display_name character_maximum_length is None or wrong "
+            "-- has migration 18f2d7735523 been applied?"
+        )
 
     async def test_agents_accepted_types_check_constraint(self, engine: AsyncEngine) -> None:
         # DB-level backstop (migrations/versions/18f2d7735523...) capping

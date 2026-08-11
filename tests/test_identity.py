@@ -1,19 +1,23 @@
 """Tests for identity.py's rh-auth-detection + email-resolution helpers.
 
 Unit-tests ``try_resolve_email`` directly against constructed claims dicts
-(no DB, no MCP tool stack). Exercises the ``_is_rh_auth_token`` fail-closed
-behavior only indirectly, through ``try_resolve_email``'s observable
-behavior (which claim it resolves identity from) rather than by calling the
-private helper directly — mirrors ``tests/test_scopes.py``'s
-``TestIsInteractiveToken`` pattern, which is the scopes.py counterpart to
-the ``iss is None`` fail-closed guard tested here.
+(no DB, no MCP tool stack), AND unit-tests the private ``_is_rh_auth_token``
+helper directly (``TestIsRhAuthToken`` below) — mirroring
+``tests/test_scopes.py``'s ``TestIsInteractiveToken`` pattern, which is the
+scopes.py counterpart to the ``iss is None`` fail-closed guard tested here.
+Direct coverage of ``_is_rh_auth_token`` is deliberately kept alongside the
+indirect ``try_resolve_email``-based coverage: this function is the
+identity-routing gate that determines whether an ``email`` claim is trusted
+as the caller's identity, and a future refactor of how ``try_resolve_email``
+composes with it could otherwise silently break its own fail-closed
+contract without either layer's tests catching it.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from identity import RH_AUTH_ISSUER, try_resolve_email, validate_sub_shape
+from identity import RH_AUTH_ISSUER, _is_rh_auth_token, try_resolve_email, validate_sub_shape
 
 
 def _fake_token(claims: dict[str, object]) -> MagicMock:
@@ -99,6 +103,37 @@ class TestTryResolveEmail:
     def test_whitespace_sub_fails_closed_to_none(self) -> None:
         token = _fake_token({"iss": RH_AUTH_ISSUER, "sub": "   "})
         assert try_resolve_email(token) is None
+
+
+class TestIsRhAuthToken:
+    """Direct unit tests for the private ``_is_rh_auth_token`` gate.
+
+    Complements ``TestTryResolveEmail`` above (which exercises this
+    function only indirectly through ``try_resolve_email``'s observable
+    behavior): these tests pin down this function's own fail-closed
+    contract in isolation, mirroring ``tests/test_scopes.py``'s
+    ``TestIsInteractiveToken`` for the sibling ``is_interactive_token``.
+    """
+
+    def test_rh_auth_issuer_is_rh_auth_token(self) -> None:
+        assert _is_rh_auth_token({"iss": RH_AUTH_ISSUER, "sub": "svc-1"}) is True
+
+    def test_okta_issuer_is_not_rh_auth_token(self) -> None:
+        token_claims = {
+            "iss": "https://redesignhealth.okta.com/oauth2/default",
+            "sub": "00u1234okta",
+        }
+        assert _is_rh_auth_token(token_claims) is False
+
+    def test_missing_iss_claim_fails_closed_to_true(self) -> None:
+        # No `iss` claim at all must NOT fall through to the "not rh-auth"
+        # (email-trusting) branch -- fail closed by treating it as rh-auth.
+        assert _is_rh_auth_token({"sub": "svc-1"}) is True
+
+    def test_explicit_none_iss_fails_closed_to_true(self) -> None:
+        # Same fail-closed guard as the missing-key case above, but with an
+        # explicit `iss: None` claim rather than an absent key.
+        assert _is_rh_auth_token({"iss": None, "sub": "svc-1"}) is True
 
 
 class TestValidateSubShape:
