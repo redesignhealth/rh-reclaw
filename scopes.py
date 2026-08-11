@@ -74,12 +74,17 @@ def is_interactive_token(token: AccessToken | None) -> bool:
 
     A missing token (None) is treated as NON-interactive so the middleware
     fails closed if FastMCP ever dispatches a tool call without an auth
-    context.
+    context. A missing/``None`` ``iss`` claim is treated the same way — an
+    absent issuer must not fall through to the interactive (scope-bypass)
+    branch by default; it should only rely on upstream verification as a
+    second line of defense, not the sole one.
     """
     if token is None:
         return False
     issuer = token.claims.get("iss")
-    return issuer != RH_AUTH_ISSUER
+    if issuer is None:
+        return False
+    return bool(issuer != RH_AUTH_ISSUER)
 
 
 def required_scope_for(tool_name: str) -> str | None:

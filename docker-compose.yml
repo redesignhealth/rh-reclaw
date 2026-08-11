@@ -40,7 +40,7 @@ services:
       # the `reclaw-comms-mcp` service's DATABASE_URL above, which reaches
       # this container by service name on the Docker network) stays on the
       # standard 5432. See README.md's "Local development" section.
-      - "55432:5432"
+      - "127.0.0.1:55432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

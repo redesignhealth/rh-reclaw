@@ -8,7 +8,7 @@ import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import ResourceError, ToolError
 
 _MOCK_OIDC_CONFIG = MagicMock()
 
@@ -245,6 +245,125 @@ class TestScopeEnforcementMiddleware:
             tool="not_a_real_tool",
             reason="tool_not_enrolled",
             client_id="test-client",
+            required_scope=None,
+        )
+
+
+class TestReadResourceMiddleware:
+    """Fail-closed behavior of ScopeEnforcementMiddleware.on_read_resource.
+
+    Mirrors ``TestScopeEnforcementMiddleware``'s tool-path tests. This
+    service registers no resources today (``scopes.RESOURCE_SCOPES`` is
+    empty), so every URI is "unenrolled" by default — a real exercise of
+    the fail-closed default rather than a contrived case.
+    """
+
+    def _make_context(self, uri: str) -> MagicMock:
+        ctx = MagicMock()
+        ctx.message.uri = uri
+        return ctx
+
+    def _make_token(
+        self,
+        *,
+        iss: str | None,
+        scopes: list[str] | None,
+        client_id: str = "test-client",
+        sub: str = "test-svc",
+    ) -> MagicMock:
+        token = MagicMock()
+        claims: dict[str, object] = {}
+        if iss is not None:
+            claims["iss"] = iss
+        if iss == "rh-auth":
+            claims["sub"] = sub
+        claims["scopes"] = scopes or []
+        token.claims = claims
+        token.scopes = []
+        token.client_id = client_id
+        return token
+
+    def _middleware(self) -> object:
+        main = _import_main()
+        return main.ScopeEnforcementMiddleware()  # type: ignore[attr-defined]
+
+    def test_interactive_okta_token_bypasses_scope_check(self) -> None:
+        middleware = self._middleware()
+        context = self._make_context("resource://some-resource")
+        call_next = AsyncMock(return_value=MagicMock())
+        okta_token = self._make_token(iss="https://example.okta.com/oauth2/default", scopes=[])
+
+        with patch("main.get_access_token", return_value=okta_token):
+            asyncio.run(middleware.on_read_resource(context, call_next))
+
+        call_next.assert_awaited_once()
+
+    def test_missing_token_is_rejected(self) -> None:
+        middleware = self._middleware()
+        context = self._make_context("resource://some-resource")
+        call_next = AsyncMock()
+
+        with patch("main.get_access_token", return_value=None):
+            with pytest.raises(ResourceError, match="requires elevated permissions"):
+                asyncio.run(middleware.on_read_resource(context, call_next))
+
+        call_next.assert_not_called()
+
+    def test_unenrolled_resource_is_rejected_fail_closed(self) -> None:
+        """No resource is in ``RESOURCE_SCOPES`` today — every rh-auth read
+        must be denied by default, even with a broadly-scoped token."""
+        middleware = self._middleware()
+        context = self._make_context("resource://not-enrolled-anywhere")
+        call_next = AsyncMock()
+        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read", "comms:write"])
+
+        with patch("main.get_access_token", return_value=bot_token):
+            with pytest.raises(ResourceError, match="requires elevated permissions"):
+                asyncio.run(middleware.on_read_resource(context, call_next))
+
+        call_next.assert_not_called()
+
+    def test_missing_scope_is_rejected(self) -> None:
+        """A resource that IS enrolled still denies a token lacking the
+        specific required scope."""
+        middleware = self._middleware()
+        context = self._make_context("resource://enrolled-resource")
+        call_next = AsyncMock()
+        bot_token = self._make_token(iss="rh-auth", scopes=["comms:write"])
+
+        with patch("main.required_scope_for_resource", return_value="comms:read"):
+            with patch("main.get_access_token", return_value=bot_token):
+                with pytest.raises(ResourceError, match="requires elevated permissions"):
+                    asyncio.run(middleware.on_read_resource(context, call_next))
+
+        call_next.assert_not_called()
+
+    def test_matching_scope_passes(self) -> None:
+        middleware = self._middleware()
+        context = self._make_context("resource://enrolled-resource")
+        call_next = AsyncMock(return_value=MagicMock())
+        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read"])
+
+        with patch("main.required_scope_for_resource", return_value="comms:read"):
+            with patch("main.get_access_token", return_value=bot_token):
+                asyncio.run(middleware.on_read_resource(context, call_next))
+
+        call_next.assert_awaited_once()
+
+    def test_denial_emits_structured_scope_denial_event_with_uri_as_tool(self) -> None:
+        middleware = self._middleware()
+        context = self._make_context("resource://some-resource")
+        bot_token = self._make_token(iss="rh-auth", scopes=[], client_id="ea-agent-svc")
+
+        with patch("main.get_access_token", return_value=bot_token):
+            with patch("main.log_scope_denial") as mock_denial:
+                with pytest.raises(ResourceError):
+                    asyncio.run(middleware.on_read_resource(context, AsyncMock()))
+
+        mock_denial.assert_called_once_with(
+            tool="resource://some-resource",
+            reason="resource_not_enrolled",
+            client_id="ea-agent-svc",
             required_scope=None,
         )
 

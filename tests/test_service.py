@@ -43,14 +43,17 @@ from service import (
     accept_invite,
     decline_invite,
     get_conversation,
+    inbox,
+    invite,
     leave,
+    list_agents,
     post_message,
     register_agent,
     start_conversation,
 )
 
 SERVICE_ROOT = Path(__file__).parent.parent
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
 
 
 def _test_database_url() -> str:
@@ -185,6 +188,10 @@ def _counter_proposal_payload() -> dict[str, Any]:
             }
         ]
     }
+
+
+def _needs_clarification_payload(about_seq: int) -> dict[str, Any]:
+    return {"about_seq": about_seq}
 
 
 async def _audit_actions(session: AsyncSession, conversation_id: uuid.UUID) -> list[str]:
@@ -430,6 +437,147 @@ class TestAcceptDeclineInvite:
         assert str(exc_info.value) == str(nonmember_exc.value)
 
 
+# --- invite --------------------------------------------------------------------
+
+
+class TestInvite:
+    async def _active_owner_and_conversation(
+        self, session: AsyncSession, owner_sub: str, target_sub: str
+    ) -> Any:
+        owner = await _register(session, owner_sub)
+        target = await _register(session, target_sub)
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="scheduling.availability",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        return owner, target, conversation
+
+    async def test_happy_path(self, session: AsyncSession) -> None:
+        owner, _target, conversation = await self._active_owner_and_conversation(
+            session, "inv-owner-1", "inv-target-1"
+        )
+        new_agent = await _register(session, "inv-new-1")
+
+        participant = await invite(
+            session,
+            actor_sub=owner.sub,
+            inviter_agent_id=owner.id,
+            conversation_id=conversation.id,
+            target_agent_id=new_agent.id,
+        )
+        assert participant.status == "invited"
+        assert participant.role == "member"
+        assert participant.invited_by == owner.id
+
+        row = await session.get(Participant, (conversation.id, new_agent.id))
+        assert row is not None
+        assert row.status == "invited"
+
+    async def test_denied_already_participant_declined_row_not_overridable(
+        self, session: AsyncSession
+    ) -> None:
+        """DESIGN.md §4: a declined row must never be overridable by
+        another member — re-inviting a previously-declined agent is
+        rejected, not silently reset to a fresh invite."""
+        owner, target, conversation = await self._active_owner_and_conversation(
+            session, "inv-owner-2", "inv-target-2"
+        )
+        await decline_invite(
+            session, actor_sub=target.sub, agent_id=target.id, conversation_id=conversation.id
+        )
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await invite(
+                session,
+                actor_sub=owner.sub,
+                inviter_agent_id=owner.id,
+                conversation_id=conversation.id,
+                target_agent_id=target.id,
+            )
+        assert str(exc_info.value) == "access_denied: conversation requires active membership"
+        assert exc_info.value.reason == "denied.already_participant"
+
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.already_participant" in actions
+
+        # The declined row itself must be untouched by the rejected attempt.
+        row = await session.get(Participant, (conversation.id, target.id))
+        assert row is not None
+        assert row.status == "declined"
+
+    async def test_denied_unknown_agent(self, session: AsyncSession) -> None:
+        owner, _target, conversation = await self._active_owner_and_conversation(
+            session, "inv-owner-3", "inv-target-3"
+        )
+        bogus_target_id = uuid.uuid4()
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await invite(
+                session,
+                actor_sub=owner.sub,
+                inviter_agent_id=owner.id,
+                conversation_id=conversation.id,
+                target_agent_id=bogus_target_id,
+            )
+        assert exc_info.value.reason == "denied.unknown_agent"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.unknown_agent" in actions
+
+    async def test_denied_type_not_accepted(self, session: AsyncSession) -> None:
+        owner, _target, conversation = await self._active_owner_and_conversation(
+            session, "inv-owner-4", "inv-target-4"
+        )
+        wrong_type_agent = await _register(session, "inv-wrong-type-4")
+        wrong_type_agent.accepted_types = []
+        await session.commit()
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await invite(
+                session,
+                actor_sub=owner.sub,
+                inviter_agent_id=owner.id,
+                conversation_id=conversation.id,
+                target_agent_id=wrong_type_agent.id,
+            )
+        assert exc_info.value.reason == "denied.type_not_accepted"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.type_not_accepted" in actions
+
+    async def test_denied_bad_state_when_conversation_not_active(
+        self, session: AsyncSession
+    ) -> None:
+        owner, _target, conversation = await self._active_owner_and_conversation(
+            session, "inv-owner-5", "inv-target-5"
+        )
+        await post_message(
+            session,
+            actor_sub=owner.sub,
+            sender_agent_id=owner.id,
+            conversation_id=conversation.id,
+            message_type="confirm",
+            payload=_confirm_payload(),
+        )
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.state == "completed"
+
+        new_agent = await _register(session, "inv-new-5")
+        with pytest.raises(InvalidConversationStateError):
+            await invite(
+                session,
+                actor_sub=owner.sub,
+                inviter_agent_id=owner.id,
+                conversation_id=conversation.id,
+                target_agent_id=new_agent.id,
+            )
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.bad_state" in actions
+
+
 # --- get_conversation ----------------------------------------------------------
 
 
@@ -662,6 +810,43 @@ class TestPostMessage:
         assert final is not None
         assert final.state == "canceled", "all non-owners declining must cascade to canceled"
 
+    async def test_needs_clarification_out_of_range_about_seq_denied(
+        self, session: AsyncSession
+    ) -> None:
+        """``about_seq`` must reference a prior message in the SAME
+        conversation — an ``about_seq`` >= the next seq to be assigned
+        (i.e. not yet posted) fails the referential check in the service
+        layer (schemas.py only enforces ``>= 1``)."""
+        owner, target, conversation = await self._active_pair(session, "nc-owner-1", "nc-target-1")
+        # Only seq 1 (the initial availability_request) exists so far —
+        # the next message to be posted would be seq 2, so about_seq=2 is
+        # out of range (references a message that doesn't exist yet).
+        with pytest.raises(PayloadValidationError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=target.sub,
+                sender_agent_id=target.id,
+                conversation_id=conversation.id,
+                message_type="needs_clarification",
+                payload=_needs_clarification_payload(about_seq=2),
+            )
+        assert "does not reference a prior message in this conversation" in str(exc_info.value)
+
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.bad_schema" in actions
+
+        # about_seq=1 (the actual prior message) is accepted.
+        message = await post_message(
+            session,
+            actor_sub=owner.sub,
+            sender_agent_id=owner.id,
+            conversation_id=conversation.id,
+            message_type="needs_clarification",
+            payload=_needs_clarification_payload(about_seq=1),
+        )
+        assert message.seq == 2
+        assert message.payload["about_seq"] == 1
+
 
 # --- seq race-safety -----------------------------------------------------------
 
@@ -874,3 +1059,133 @@ class TestAuditCompleteness:
         assert "denied.bad_schema" in final_actions
         assert "denied.rate_limited" in final_actions
         assert "message.post" in final_actions
+
+
+# --- list_agents -------------------------------------------------------------------
+
+
+class TestListAgents:
+    async def test_pagination_cursor_and_has_more(self, session: AsyncSession) -> None:
+        for i in range(5):
+            await _register(session, f"la-agent-{i:02d}")
+
+        first_page = await list_agents(session, limit=2)
+        assert len(first_page["agents"]) == 2
+        assert first_page["has_more"] is True
+        assert first_page["next_cursor"] == first_page["agents"][-1]["sub"]
+        # total_count reflects the real row COUNT(*), not the trimmed page.
+        assert first_page["total_count"] == 5
+
+        second_page = await list_agents(session, limit=2, cursor=first_page["next_cursor"])
+        assert len(second_page["agents"]) == 2
+        assert second_page["has_more"] is True
+        assert second_page["total_count"] == 5
+
+        third_page = await list_agents(session, limit=2, cursor=second_page["next_cursor"])
+        assert len(third_page["agents"]) == 1
+        assert third_page["has_more"] is False
+        assert third_page["next_cursor"] is None
+        assert third_page["total_count"] == 5
+
+        all_subs = {a["sub"] for a in first_page["agents"]}
+        all_subs |= {a["sub"] for a in second_page["agents"]}
+        all_subs |= {a["sub"] for a in third_page["agents"]}
+        assert all_subs == {f"la-agent-{i:02d}" for i in range(5)}
+
+    async def test_total_count_is_real_count_not_page_length(self, session: AsyncSession) -> None:
+        for i in range(3):
+            await _register(session, f"la-count-{i}")
+
+        page = await list_agents(session, limit=1)
+        assert len(page["agents"]) == 1
+        assert page["total_count"] == 3
+
+
+# --- inbox -------------------------------------------------------------------------
+
+
+class TestInbox:
+    async def test_empty_state_shape(self, session: AsyncSession) -> None:
+        agent = await _register(session, "inbox-empty-1")
+        result = await inbox(session, caller_agent_id=agent.id)
+        assert result == {"unread": [], "pending_invites": [], "total_count": 0}
+
+    async def test_unread_across_multiple_conversations(self, session: AsyncSession) -> None:
+        agent = await _register(session, "inbox-unread-1")
+        senders = [await _register(session, f"inbox-sender-{i}") for i in range(2)]
+        conversation_ids = []
+        for sender in senders:
+            conversation = await start_conversation(
+                session,
+                actor_sub=sender.sub,
+                initiator_agent_id=sender.id,
+                conversation_type="scheduling.availability",
+                target_agent_ids=[agent.id],
+                initial_message=_request_payload(),
+            )
+            await accept_invite(
+                session, actor_sub=agent.sub, agent_id=agent.id, conversation_id=conversation.id
+            )
+            conversation_ids.append(conversation.id)
+
+        result = await inbox(session, caller_agent_id=agent.id)
+        assert result["pending_invites"] == []
+        assert {u["conversation_id"] for u in result["unread"]} == {
+            str(cid) for cid in conversation_ids
+        }
+        assert all(u["unread_count"] == 1 for u in result["unread"])
+        assert result["total_count"] == 2
+
+    async def test_pending_invite_only(self, session: AsyncSession) -> None:
+        agent = await _register(session, "inbox-pending-1")
+        sender = await _register(session, "inbox-pending-sender-1")
+        conversation = await start_conversation(
+            session,
+            actor_sub=sender.sub,
+            initiator_agent_id=sender.id,
+            conversation_type="scheduling.availability",
+            target_agent_ids=[agent.id],
+            initial_message=_request_payload(),
+        )
+
+        result = await inbox(session, caller_agent_id=agent.id)
+        assert result["unread"] == []
+        assert len(result["pending_invites"]) == 1
+        assert result["pending_invites"][0]["conversation_id"] == str(conversation.id)
+        assert result["total_count"] == 1
+
+    async def test_both_unread_and_pending_invite(self, session: AsyncSession) -> None:
+        agent = await _register(session, "inbox-both-1")
+        active_sender = await _register(session, "inbox-both-active-sender")
+        pending_sender = await _register(session, "inbox-both-pending-sender")
+
+        active_conversation = await start_conversation(
+            session,
+            actor_sub=active_sender.sub,
+            initiator_agent_id=active_sender.id,
+            conversation_type="scheduling.availability",
+            target_agent_ids=[agent.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session,
+            actor_sub=agent.sub,
+            agent_id=agent.id,
+            conversation_id=active_conversation.id,
+        )
+
+        pending_conversation = await start_conversation(
+            session,
+            actor_sub=pending_sender.sub,
+            initiator_agent_id=pending_sender.id,
+            conversation_type="scheduling.availability",
+            target_agent_ids=[agent.id],
+            initial_message=_request_payload(),
+        )
+
+        result = await inbox(session, caller_agent_id=agent.id)
+        assert len(result["unread"]) == 1
+        assert result["unread"][0]["conversation_id"] == str(active_conversation.id)
+        assert len(result["pending_invites"]) == 1
+        assert result["pending_invites"][0]["conversation_id"] == str(pending_conversation.id)
+        assert result["total_count"] == 2

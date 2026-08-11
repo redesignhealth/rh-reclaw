@@ -17,16 +17,30 @@ sys.path.insert(0, str(SERVICE_ROOT))
 
 
 @pytest.fixture(autouse=True)
-def _auth_env(tmp_path: Path) -> None:
+def _auth_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Point token storage at a temp dir and default the required auth env.
 
     The FileTree sanitization strategies call os.pathconf on the storage
     directory at construction time, so the path must exist.
+
+    Uses ``monkeypatch.setenv`` (function-scoped, same as this fixture's
+    own default scope — no widening/narrowing tension) instead of mutating
+    ``os.environ`` directly, so pytest automatically restores the prior
+    environment after each test rather than these vars accumulating across
+    the session. ``setdefault``-style "only if unset" semantics are
+    preserved via an explicit ``os.environ.get(...)`` check before each
+    ``setenv`` call (``monkeypatch`` has no built-in ``setdefault``).
     """
-    os.environ["MCP_TOKEN_STORAGE_PATH"] = str(tmp_path)
-    os.environ.setdefault("OKTA_ISSUER_URL", "https://example.okta.com/oauth2/default")
-    os.environ.setdefault("OKTA_CLIENT_ID", "test-client-id")
-    os.environ.setdefault("OKTA_CLIENT_SECRET", "test-client-secret")
-    os.environ.setdefault("BASE_URL", "http://localhost:8080")
-    os.environ.setdefault("MCP_JWT_SECRET", "test-jwt-secret-for-unit-tests-only")
-    os.environ.setdefault("RH_AUTH_SECRET", "test-rh-auth-secret-long-enough-for-hs256")
+    monkeypatch.setenv("MCP_TOKEN_STORAGE_PATH", str(tmp_path))
+    _setdefault(monkeypatch, "OKTA_ISSUER_URL", "https://example.okta.com/oauth2/default")
+    _setdefault(monkeypatch, "OKTA_CLIENT_ID", "test-client-id")
+    _setdefault(monkeypatch, "OKTA_CLIENT_SECRET", "test-client-secret")
+    _setdefault(monkeypatch, "BASE_URL", "http://localhost:8080")
+    _setdefault(monkeypatch, "MCP_JWT_SECRET", "test-jwt-secret-for-unit-tests-only")
+    _setdefault(monkeypatch, "RH_AUTH_SECRET", "test-rh-auth-secret-long-enough-for-hs256")
+
+
+def _setdefault(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    """``monkeypatch.setenv`` equivalent of ``os.environ.setdefault``."""
+    if name not in os.environ:
+        monkeypatch.setenv(name, value)

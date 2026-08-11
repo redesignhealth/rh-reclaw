@@ -53,12 +53,30 @@ import structlog
 SERVICE_NAME = "reclaw-comms-mcp"
 
 
+def _resolve_log_level() -> int:
+    """Resolve the numeric logging level from ``LOG_LEVEL`` (default ``INFO``).
+
+    Extracted into its own function so both ``logging.basicConfig`` and
+    structlog's filtering wrapper use the SAME computed level (previously
+    only ``logging.basicConfig`` read ``LOG_LEVEL``; structlog's
+    ``make_filtering_bound_logger`` was hardcoded to ``logging.INFO``, so
+    ``LOG_LEVEL=DEBUG`` silently had no effect on structlog output). Falls
+    back to ``INFO`` for an unset or invalid value rather than raising.
+    """
+    name = os.environ.get("LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, name, None)
+    if not isinstance(level, int):
+        return logging.INFO
+    return level
+
+
 def configure_logging() -> None:
     """Configure stdlib + structlog for JSON output to stdout.
 
     Idempotent — safe to call from both ``main`` and tests.
     """
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
+    level = _resolve_log_level()
+    logging.basicConfig(level=level)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -66,7 +84,7 @@ def configure_logging() -> None:
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.JSONRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(logging.INFO),
+        wrapper_class=structlog.make_filtering_bound_logger(level),
     )
 
 
@@ -126,7 +144,7 @@ def log_auth_flow(
     try:
         obs_log.info("auth_flow", auth_type=auth_type)
     except Exception:
-        _fallback_logger.warning("log_auth_flow failed to emit event", exc_info=False)
+        _fallback_logger.warning("log_auth_flow failed to emit event", exc_info=True)
 
 
 def log_auth_rejected(

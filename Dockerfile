@@ -2,7 +2,11 @@
 # (topics/09-security.md): pinned slim base, non-root runtime user,
 # no secrets in the image.
 
-FROM python:3.12-slim AS builder
+# Pinned by digest (not the mutable `3.12-slim` tag) so the base image is
+# reproducible and can't drift underfoot between builds. Resolved via
+# `docker buildx imagetools inspect python:3.12-slim` on 2026-08-11
+# (tag was 3.12.13-slim-trixie at resolution time).
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36 AS builder
 
 WORKDIR /app
 
@@ -18,13 +22,15 @@ RUN uv sync --frozen --no-dev --no-install-project
 # Copy service code
 COPY . .
 
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
 
 WORKDIR /app
 
 RUN addgroup --system app && adduser --system --ingroup app app
 
 COPY --from=builder --chown=app:app /app /app
+COPY --chown=app:app entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # The venv is fully baked at build time; run its interpreter directly so
 # the container never re-contacts a package index at startup (the Tailscale
@@ -35,4 +41,13 @@ USER app
 
 EXPOSE 8080
 
-CMD ["python", "main.py"]
+# Distinguishes a crashed/unhealthy container from a healthy one during
+# ECS Fargate rolling deploys, hitting the same /health endpoint the
+# service exposes on MCP_PORT (default 8080, see main.py).
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
+
+# Runs pending Alembic migrations before starting the server (see
+# entrypoint.sh) — no automated migration mechanism otherwise runs inside
+# the container.
+CMD ["./entrypoint.sh"]

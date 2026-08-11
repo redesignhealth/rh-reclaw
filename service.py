@@ -91,7 +91,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
@@ -596,9 +596,10 @@ async def list_agents(
     rows = list((await session.execute(stmt)).scalars().all())
     has_more = len(rows) > limit
     rows = rows[:limit]
+    total_count = (await session.execute(select(func.count()).select_from(Agent))).scalar_one()
     return {
         "agents": [_agent_public(a) for a in rows],
-        "total_count": len(rows),
+        "total_count": total_count,
         "has_more": has_more,
         "next_cursor": rows[-1].sub if has_more and rows else None,
     }
@@ -735,6 +736,7 @@ async def start_conversation(
             message_type=message_type,
             exc=exc,
         )
+        raise AssertionError("unreachable") from exc
 
     now = _now()
     conversation = Conversation(
@@ -898,10 +900,11 @@ async def invite(
         await _deny(
             session,
             actor_sub=actor_sub,
-            action="denied.not_member",
+            action="denied.invite_not_allowed",
             agent_id=inviter_agent_id,
             conversation_id=conversation.id,
         )
+        raise AssertionError("unreachable")
     if conversation.state != "active":
         await _deny_bad_state(
             session,
@@ -1125,6 +1128,7 @@ async def post_message(
             message_type=message_type,
             exc=exc,
         )
+        raise AssertionError("unreachable") from exc
 
     next_seq = (
         await session.execute(
@@ -1148,6 +1152,7 @@ async def post_message(
                     "reference a prior message in this conversation"
                 ),
             )
+            raise AssertionError("unreachable")
 
     message = Message(
         conversation_id=conversation.id,
@@ -1328,15 +1333,29 @@ async def inbox(session: AsyncSession, *, caller_agent_id: uuid.UUID) -> dict[st
         )
     ).all()
 
-    unread: list[dict[str, Any]] = []
-    for conversation, last_read_seq, max_seq, unread_count in unread_rows:
-        latest, sender_sub = (
+    # Fetch every unread conversation's latest message + sender sub in a
+    # single round trip (instead of one SELECT per conversation in a Python
+    # loop): join Message/Agent against the exact (conversation_id, max_seq)
+    # pairs already computed above via a composite-tuple IN.
+    latest_by_conversation_id: dict[uuid.UUID, tuple[Message, str]] = {}
+    conversation_seq_pairs = [
+        (conversation.id, max_seq) for conversation, _, max_seq, _ in unread_rows
+    ]
+    if conversation_seq_pairs:
+        latest_rows = (
             await session.execute(
                 select(Message, Agent.sub)
                 .join(Agent, Agent.id == Message.sender_id)
-                .where(Message.conversation_id == conversation.id, Message.seq == max_seq)
+                .where(tuple_(Message.conversation_id, Message.seq).in_(conversation_seq_pairs))
             )
-        ).one()
+        ).all()
+        latest_by_conversation_id = {
+            message.conversation_id: (message, sender_sub) for message, sender_sub in latest_rows
+        }
+
+    unread: list[dict[str, Any]] = []
+    for conversation, last_read_seq, _max_seq, unread_count in unread_rows:
+        latest, sender_sub = latest_by_conversation_id[conversation.id]
         unread.append(
             {
                 **_conversation_dict(conversation),

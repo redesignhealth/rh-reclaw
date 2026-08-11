@@ -36,7 +36,7 @@ import uuid
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
@@ -48,7 +48,7 @@ from db import get_session_factory
 from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
 from identity import try_resolve_email
 from models import Agent
-from schemas import PayloadValidationError
+from schemas import MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
 from scopes import is_interactive_token, scopes_for_token
 
 comms_server: FastMCP[Any] = FastMCP("comms")
@@ -109,10 +109,17 @@ async def _map_service_errors() -> AsyncIterator[None]:
     ``AccessDeniedError``'s message is the fixed, uniform, anti-enumeration
     string (exceptions.py) and is passed through verbatim — no prefix, no
     detail, nothing that could distinguish denial causes to the caller.
-    The other three shapes are already client-safe/specific by design
+    The next three shapes are already client-safe/specific by design
     (state-machine violations, rate limits, and payload validation are not
     enumeration risks — see exceptions.py's module docstring), so their
     messages pass through unwrapped too.
+
+    A bare ``ValueError`` is different: the service layer raises it for
+    internal parameter-shape problems (e.g. an unrecognized
+    ``conversation_type``) and its message text can embed internal
+    schema/config detail (allowed-value lists, etc.). Those are not
+    client-safe, so they are mapped to a single generic, non-leaking
+    message instead of being forwarded verbatim.
     """
     try:
         yield
@@ -122,9 +129,10 @@ async def _map_service_errors() -> AsyncIterator[None]:
         InvalidConversationStateError,
         RateLimitExceededError,
         PayloadValidationError,
-        ValueError,
     ) as exc:
         raise ToolError(str(exc)) from None
+    except ValueError:
+        raise ToolError("invalid_request: the request could not be processed") from None
 
 
 # --- Parsing helpers --------------------------------------------------------------
@@ -198,9 +206,17 @@ async def register(display_name: str, accepted_types: list[str]) -> dict[str, An
       caller's own resolved identity (self-owned — e.g. a human calling
       this directly, or an agent token with no distinct owner claim).
     - ``owner_email``: the token's ``owner_email`` claim if present, else
-      its (Okta-verified) ``email`` claim, else the caller's own identity
-      as a last resort so the column is always populated with something
-      attributable rather than a placeholder.
+      — ONLY for interactive (Okta) callers — its upstream-verified
+      ``email`` claim, else the caller's own identity as a last resort so
+      the column is always populated with something attributable rather
+      than a placeholder.
+
+      The ``email`` claim fallback is gated on ``is_interactive_token``
+      the same way ``identity.try_resolve_email`` gates identity
+      resolution: an rh-auth (agent) token's extra claims are
+      caller-supplied and unverified (the ``rh-auth issue`` CLI accepts
+      arbitrary ``--sub`` and extra claims), so ``email`` must never be
+      trusted as an ``owner_email`` fallback for those tokens.
 
     Calling again with the same caller identity re-binds ``display_name``/
     ``accepted_types`` in place (see ``service.register_agent``).
@@ -208,7 +224,8 @@ async def register(display_name: str, accepted_types: list[str]) -> dict[str, An
     token = _require_token()
     sub = _require_identity(token)
     owner_sub = str(token.claims.get("owner_sub") or sub)
-    owner_email = str(token.claims.get("owner_email") or token.claims.get("email") or sub)
+    upstream_email = token.claims.get("email") if is_interactive_token(token) else None
+    owner_email = str(token.claims.get("owner_email") or upstream_email or sub)
 
     async with get_session_factory()() as session, _map_service_errors():
         agent = await service.register_agent(
@@ -252,17 +269,27 @@ async def start_conversation(
     initial_message: dict[str, Any],
     message_type: str = "availability_request",
     expires_at: str | None = None,
+    schema_version: Literal[1] = 1,
 ) -> dict[str, Any]:
     """Open a conversation with N other agents, posting the seq-1 message.
 
     ``target_agent_ids`` are agent ids (UUID strings, e.g. from
-    ``comms_list_agents``). The caller becomes the ``owner`` participant;
-    every target is added as ``invited`` (not visible until they call
-    ``comms_accept``). ``expires_at``, if given, must be a timezone-aware
-    ISO 8601 datetime string; omit it to use the default 7-day TTL.
+    ``comms_list_agents``), capped at ``schemas.MAX_PARTICIPANTS_PER_CONVERSATION``
+    entries — a caller submitting more is rejected outright rather than
+    paying for an unbounded number of participant inserts and audit-log
+    writes. The caller becomes the ``owner`` participant; every target is
+    added as ``invited`` (not visible until they call ``comms_accept``).
+    ``expires_at``, if given, must be a timezone-aware ISO 8601 datetime
+    string; omit it to use the default 7-day TTL. ``schema_version`` is
+    explicit rather than an invisible default — only ``1`` exists today.
     """
     token = _require_token()
     sub = _require_identity(token)
+    if len(target_agent_ids) > MAX_PARTICIPANTS_PER_CONVERSATION:
+        raise ToolError(
+            "invalid_request: target_agent_ids exceeds the participant cap "
+            f"({MAX_PARTICIPANTS_PER_CONVERSATION})"
+        )
     target_uuids = _parse_uuids("target_agent_ids", target_agent_ids)
     expires_dt = _parse_expires_at(expires_at)
 
@@ -278,6 +305,7 @@ async def start_conversation(
                 initial_message=initial_message,
                 message_type=message_type,
                 expires_at=expires_dt,
+                schema_version=schema_version,
             )
 
     return {
@@ -296,6 +324,7 @@ async def post_message(
     conversation_id: str,
     message_type: str,
     payload: dict[str, Any],
+    schema_version: Literal[1] = 1,
 ) -> dict[str, Any]:
     """Post a typed, schema-validated message to an active conversation.
 
@@ -304,7 +333,8 @@ async def post_message(
     the caller was never invited, is still ``invited``, or has
     left/declined). ``confirm`` completes the conversation; ``decline``
     marks the sender declined and may cancel the conversation if every
-    other member has also declined.
+    other member has also declined. ``schema_version`` is explicit rather
+    than an invisible default — only ``1`` exists today.
     """
     token = _require_token()
     sub = _require_identity(token)
@@ -320,6 +350,7 @@ async def post_message(
                 conversation_id=conv_id,
                 message_type=message_type,
                 payload=payload,
+                schema_version=schema_version,
             )
 
     return {
@@ -340,22 +371,35 @@ async def get_conversation(conversation_id: str, since_seq: int = 0) -> dict[str
     message content, and ``since_seq`` is ignored. An ``active`` caller
     gets full history from ``since_seq`` onward, and their read cursor
     advances. Non-members (and left/declined former members) get the
-    uniform denial, identical to a non-existent conversation.
+    uniform denial, identical to a non-existent conversation. ``since_seq``
+    must be non-negative — a negative value would silently widen the
+    result window in an unintended way.
+
+    The returned ``messages_returned`` count is the size of the returned
+    (post-``since_seq``-filter) slice, NOT the conversation's total
+    message count — deliberately not named ``total_count`` to avoid
+    implying otherwise.
     """
     token = _require_token()
     sub = _require_identity(token)
     conv_id = _parse_uuid("conversation_id", conversation_id)
+    if since_seq < 0:
+        raise ToolError("invalid_request: since_seq must be >= 0")
 
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)
         async with _map_service_errors():
-            return await service.get_conversation(
+            result = await service.get_conversation(
                 session,
                 actor_sub=sub,
                 caller_agent_id=caller.id,
                 conversation_id=conv_id,
                 since_seq=since_seq,
             )
+
+    if "total_count" in result:
+        result["messages_returned"] = result.pop("total_count")
+    return result
 
 
 @comms_server.tool

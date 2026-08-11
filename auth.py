@@ -85,7 +85,16 @@ class OktaOIDCProxy(OIDCProxy):
     """
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
-        """Decode the Okta ID token and extract identity claims."""
+        """Decode the Okta ID token and extract identity claims.
+
+        SECURITY (call-ordering dependency): this decodes the id_token
+        payload WITHOUT verifying its signature. That is safe ONLY because
+        the parent ``OIDCProxy`` has already verified the token earlier in
+        the OAuth exchange (this hook runs downstream of that verification,
+        not before it) — if that call ordering ever changes, this becomes a
+        forgeable trust boundary (an attacker-controlled payload would be
+        trusted as identity claims).
+        """
         id_token = idp_tokens.get("id_token")
         if not id_token:
             return None

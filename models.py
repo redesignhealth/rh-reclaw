@@ -30,12 +30,15 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    String,
     Text,
     UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from schemas import MAX_DISPLAY_NAME_LENGTH
 
 # Closed vocabularies (CHECK-constrained). Conversation/message *types* are
 # open vocabularies owned by schemas.py.
@@ -84,7 +87,7 @@ class Agent(Base):
     sub: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     owner_sub: Mapped[str] = mapped_column(Text, nullable=False)
     owner_email: Mapped[str] = mapped_column(Text, nullable=False)
-    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str] = mapped_column(String(MAX_DISPLAY_NAME_LENGTH), nullable=False)
     accepted_types: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
     # Not one of DESIGN.md §5's five listed columns, but an additive,
@@ -103,6 +106,7 @@ class Conversation(Base):
     __table_args__ = (
         CheckConstraint(f"state IN {CONVERSATION_STATES!r}", name="ck_conversations_state"),
         Index("idx_conversations_state_expires_at", "state", "expires_at"),
+        Index("idx_conversations_created_by_created_at", "created_by", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
@@ -158,6 +162,12 @@ class Message(Base):
     __table_args__ = (
         # Doubles as the (conversation_id, seq) read index.
         UniqueConstraint("conversation_id", "seq", name="uq_messages_conversation_id_seq"),
+        Index(
+            "idx_messages_conversation_id_sender_id_created_at",
+            "conversation_id",
+            "sender_id",
+            "created_at",
+        ),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()

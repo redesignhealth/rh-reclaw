@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 SERVICE_ROOT = Path(__file__).parent.parent
 
 # Same default as docker-compose.yml's `postgres` service.
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
 
 
 def _test_database_url() -> str:

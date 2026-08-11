@@ -22,6 +22,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 
 from auth import build_auth_provider
+from db import database_url
 from identity import RH_AUTH_ISSUER, try_resolve_email
 from observability import (
     configure_logging,
@@ -257,6 +258,13 @@ mcp.mount(comms_server, namespace="comms")
 
 
 if __name__ == "__main__":
+    # Fail fast on a missing/malformed DATABASE_URL at process start rather
+    # than lazily on the first tool call that touches the DB (db.get_engine
+    # builds the engine lazily so DB-less unit tests can import this module
+    # freely). This does not open a connection — it only validates the URL
+    # is present and well-formed via db.database_url()'s require_env check.
+    database_url()
+
     # Default host matches rh-mcp: on ECS the Tailscale sidecar shares the
     # task's network namespace, so the server binds loopback only. Local
     # docker-compose overrides MCP_HOST=0.0.0.0 to reach the port mapping.

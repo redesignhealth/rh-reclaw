@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from collections.abc import AsyncIterator
@@ -38,7 +39,7 @@ from sqlalchemy.ext.asyncio import (
 )
 
 SERVICE_ROOT = Path(__file__).parent.parent
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
 
 _MOCK_OIDC_CONFIG = MagicMock()
 _OIDC_PATCH = patch(
@@ -676,7 +677,9 @@ class TestMembershipTools:
         )
         assert decline_result["status"] == "declined"
 
-        with pytest.raises(ToolError):
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: conversation requires active membership")
+        ):
             await _call(
                 main,
                 test_session_factory,
@@ -691,7 +694,9 @@ class TestMembershipTools:
         )
         assert leave_result["status"] == "left"
 
-        with pytest.raises(ToolError):
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: conversation requires active membership")
+        ):
             await _call(
                 main,
                 test_session_factory,
@@ -749,3 +754,193 @@ class TestScopesUnaffected:
         token = _token("scope-test-agent-2", scopes=["comms:read", "comms:write"])
         with pytest.raises(ToolError, match="requires elevated permissions"):
             await _call(main, test_session_factory, token, "comms_not_a_real_tool")
+
+
+# --- availability_response's none_available branch, end-to-end -------------------
+
+
+class TestAvailabilityResponseNoneAvailable:
+    async def test_none_available_with_reason_accepted_and_round_trips(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "na-owner")
+        await _register(main, test_session_factory, "na-target")
+        token_owner = _token("na-owner")
+        token_target = _token("na-target")
+
+        list_result = await _call(main, test_session_factory, token_owner, "comms_list_agents")
+        target_id = next(a["agent_id"] for a in list_result["agents"] if a["sub"] == "na-target")
+
+        started = await _call(
+            main,
+            test_session_factory,
+            token_owner,
+            "comms_start_conversation",
+            {
+                "conversation_type": "scheduling.availability",
+                "target_agent_ids": [target_id],
+                "initial_message": _availability_request(),
+            },
+        )
+        conversation_id = started["conversation_id"]
+        await _call(
+            main,
+            test_session_factory,
+            token_target,
+            "comms_accept",
+            {"conversation_id": conversation_id},
+        )
+
+        posted = await _call(
+            main,
+            test_session_factory,
+            token_target,
+            "comms_post_message",
+            {
+                "conversation_id": conversation_id,
+                "message_type": "availability_response",
+                "payload": {"none_available": True, "reason": "no_overlap"},
+            },
+        )
+        assert posted["payload"]["none_available"] is True
+        assert posted["payload"]["reason"] == "no_overlap"
+        assert posted["payload"].get("slots") is None
+
+        view = await _call(
+            main,
+            test_session_factory,
+            token_owner,
+            "comms_get_conversation",
+            {"conversation_id": conversation_id},
+        )
+        response_message = next(m for m in view["messages"] if m["type"] == "availability_response")
+        assert response_message["payload"]["none_available"] is True
+        assert response_message["payload"]["reason"] == "no_overlap"
+
+
+# --- lazy expiry, end-to-end -----------------------------------------------------
+
+
+class TestLazyExpiryEndToEnd:
+    async def test_get_conversation_reflects_expired_state(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        await _register(main, test_session_factory, "exp-owner")
+        await _register(main, test_session_factory, "exp-target")
+        token_owner = _token("exp-owner")
+        token_target = _token("exp-target")
+
+        list_result = await _call(main, test_session_factory, token_owner, "comms_list_agents")
+        target_id = next(a["agent_id"] for a in list_result["agents"] if a["sub"] == "exp-target")
+
+        past = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+        started = await _call(
+            main,
+            test_session_factory,
+            token_owner,
+            "comms_start_conversation",
+            {
+                "conversation_type": "scheduling.availability",
+                "target_agent_ids": [target_id],
+                "initial_message": _availability_request(),
+                "expires_at": past,
+            },
+        )
+        conversation_id = started["conversation_id"]
+        await _call(
+            main,
+            test_session_factory,
+            token_target,
+            "comms_accept",
+            {"conversation_id": conversation_id},
+        )
+
+        view = await _call(
+            main,
+            test_session_factory,
+            token_owner,
+            "comms_get_conversation",
+            {"conversation_id": conversation_id},
+        )
+        assert view["conversation"]["state"] == "expired"
+
+
+# --- concurrent seq assignment, exercised through the full tool stack ------------
+
+
+class TestConcurrentPostMessageToolLayer:
+    async def test_concurrent_posts_get_distinct_contiguous_seqs(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        # ``_call``'s module-level ``_OIDC_PATCH``/``_ENV_PATCH``/``patch(...)``
+        # context managers are singleton objects that raise "Patch is already
+        # started" if entered twice concurrently, so ``asyncio.gather`` over
+        # several ``_call`` invocations is not viable here. Instead, patch
+        # ``get_access_token`` ONCE (outside the gather) with a resolver keyed
+        # off a ``contextvars.ContextVar`` — asyncio.Task copies the calling
+        # context at creation, so each gathered task's own ``.set()`` is
+        # invisible to its siblings, giving per-task caller identity under
+        # true concurrency without re-entering any patch.
+        import contextvars
+
+        await _register(main, test_session_factory, "race-owner")
+        member_subs = [f"race-member-{i}" for i in range(4)]
+        for sub in member_subs:
+            await _register(main, test_session_factory, sub)
+
+        token_owner = _token("race-owner")
+        list_result = await _call(main, test_session_factory, token_owner, "comms_list_agents")
+        ids_by_sub = {a["sub"]: a["agent_id"] for a in list_result["agents"]}
+        member_ids = [ids_by_sub[sub] for sub in member_subs]
+
+        started = await _call(
+            main,
+            test_session_factory,
+            token_owner,
+            "comms_start_conversation",
+            {
+                "conversation_type": "scheduling.availability",
+                "target_agent_ids": member_ids,
+                "initial_message": _availability_request(),
+            },
+        )
+        conversation_id = started["conversation_id"]
+
+        for sub in member_subs:
+            await _call(
+                main,
+                test_session_factory,
+                _token(sub),
+                "comms_accept",
+                {"conversation_id": conversation_id},
+            )
+
+        current_token: contextvars.ContextVar[MagicMock] = contextvars.ContextVar("current_token")
+
+        async def _post(sub: str) -> int:
+            current_token.set(_token(sub))
+            async with Client(main.mcp) as client:
+                result = await client.call_tool(
+                    "comms_post_message",
+                    {
+                        "conversation_id": conversation_id,
+                        "message_type": "availability_response",
+                        "payload": _availability_response(),
+                    },
+                )
+            seq: int = result.data["seq"]
+            return seq
+
+        with (
+            _OIDC_PATCH,
+            _ENV_PATCH,
+            patch("main.get_access_token", side_effect=current_token.get),
+            patch("providers.comms.get_access_token", side_effect=current_token.get),
+            patch("providers.comms.get_session_factory", return_value=test_session_factory),
+        ):
+            seqs = await asyncio.gather(*[_post(sub) for sub in member_subs])
+
+        assert sorted(seqs) == [2, 3, 4, 5]
+        assert len(set(seqs)) == len(seqs)

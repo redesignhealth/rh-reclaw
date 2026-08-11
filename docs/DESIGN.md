@@ -159,7 +159,8 @@ explicit empty states.
 | `comms_get_conversation` | comms:read | combined read: conversation + participants + messages since seq. Advances caller's last_read_seq. For an `invited` (not yet accepted) caller, returns metadata only: no messages |
 | `comms_inbox` | comms:read | active conversations with unread messages, **plus pending invites awaiting accept/decline** |
 | `comms_accept` | comms:write | flips caller's participant status `invited → active`. Grants history read and posting rights from this point |
-| `comms_invite` / `comms_leave` | comms:write | membership changes. `invite` adds a target as `invited` (not `active`). `leave` covers already-active members. Declining a pending invite is a distinct action (`comms_decline_invite`), which keeps the audit trail clean |
+| `comms_decline_invite` | comms:write | declines a pending invite: terminal, no access is ever granted. Requires caller to currently be `invited`. Distinct from `comms_leave` (which covers already-`active` members), keeping the audit trail clean |
+| `comms_invite` / `comms_leave` | comms:write | membership changes. `invite` adds a target as `invited` (not `active`). `leave` covers already-active members |
 
 ## 8. Security invariants
 

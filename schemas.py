@@ -43,6 +43,7 @@ once mutual exclusivity is enforced by the validator.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from pydantic import (
@@ -58,6 +59,15 @@ from pydantic import (
 # validate ``agents.accepted_types`` at bind time and ``conversations.type``
 # at start time.
 CONVERSATION_TYPES: frozenset[str] = frozenset({"scheduling.availability"})
+
+# Shared size/count limits (DESIGN.md §8 "message size caps" invariant).
+# Defined once here so the tool boundary (providers/comms.py), the service
+# layer (service.py), and the DB model (models.py) all reference the same
+# values rather than three independently-drifting literals.
+MAX_PARTICIPANTS_PER_CONVERSATION = 50
+MAX_DISPLAY_NAME_LENGTH = 255
+MAX_ACCEPTED_TYPES = 20
+MAX_PAYLOAD_BYTES = 65536
 
 # Message types known to the board (v1: all under scheduling.availability).
 # Mirrors the DB CHECK-free, code-owned open vocabulary described in
@@ -268,7 +278,13 @@ def validate_payload(
     Returns the JSON-mode dump of the validated model (datetimes as ISO
     strings) — this normalized form is what gets stored in
     ``messages.payload``.
+
+    Enforces ``MAX_PAYLOAD_BYTES`` (DESIGN.md §8 "message size caps"
+    security invariant) on both the raw input payload and the normalized
+    dump — checked here, once, so every message type is covered uniformly
+    without each schema class needing its own size validator.
     """
+    _check_payload_size(payload)
     schema_cls = get_schema(conversation_type, message_type, schema_version)
     try:
         model = schema_cls.model_validate(payload)
@@ -279,7 +295,19 @@ def validate_payload(
         )
         raise PayloadValidationError(f"payload failed schema validation: {summary}") from exc
     dumped: dict[str, Any] = model.model_dump(mode="json")
+    _check_payload_size(dumped)
     return dumped
+
+
+def _check_payload_size(payload: dict[str, Any]) -> None:
+    """Raise ``PayloadValidationError`` if ``payload``'s JSON encoding exceeds
+    ``MAX_PAYLOAD_BYTES``."""
+    size = len(json.dumps(payload, default=str).encode("utf-8"))
+    if size > MAX_PAYLOAD_BYTES:
+        raise PayloadValidationError(
+            f"payload failed schema validation: payload is {size} bytes, "
+            f"exceeding the {MAX_PAYLOAD_BYTES}-byte cap"
+        )
 
 
 __all__ = [
