@@ -211,16 +211,23 @@ async def register(display_name: str, accepted_types: list[str]) -> dict[str, An
       the column is always populated with something attributable rather
       than a placeholder.
 
-      The ``email`` claim fallback is gated on ``is_interactive_token``,
-      which fails closed the same way ``identity``'s internal
-      ``_is_rh_auth_token`` does: both treat a token whose ``iss`` is
-      ``"rh-auth"`` OR missing/``None`` as non-interactive/rh-auth-like
-      (only an ``iss`` that is present AND not ``"rh-auth"`` is trusted as
-      interactive/Okta). An rh-auth (agent) token's extra claims are
-      caller-supplied and unverified (the ``rh-auth issue`` CLI accepts
-      arbitrary ``--sub`` and extra claims), so ``email`` must never be
-      trusted as an ``owner_email`` fallback for those tokens — nor for a
-      token with no ``iss`` at all.
+      The ``email`` claim fallback is gated on ``is_interactive_token``
+      (``scopes.py``). For a token with no ``iss`` at all, that check and
+      ``identity``'s internal ``_is_rh_auth_token`` both land on "don't
+      trust the ``email`` claim" — but via different mechanisms, not a
+      shared rule: ``is_interactive_token`` treats missing/``None`` ``iss``
+      as simply "not confirmed interactive" (an unknown/deny outcome — it
+      only decides whether to bypass scope checks, making no claim about
+      identity), whereas ``_is_rh_auth_token`` affirmatively treats
+      missing/``None`` ``iss`` as rh-auth-like (an assume-rh-auth outcome —
+      it feeds identity resolution, so it conservatively pins the caller's
+      identity to ``sub`` and never trusts ``email``/``preferred_username``).
+      Do not "harmonize" these two checks into one shared helper on the
+      assumption that they encode the same rule — an rh-auth (agent)
+      token's extra claims are caller-supplied and unverified (the
+      ``rh-auth issue`` CLI accepts arbitrary ``--sub`` and extra claims),
+      so ``email`` must never be trusted as an ``owner_email`` fallback for
+      those tokens, regardless of which check is used to detect them.
 
     Calling again with the same caller identity re-binds ``display_name``/
     ``accepted_types`` in place (see ``service.register_agent``).

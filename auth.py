@@ -107,7 +107,10 @@ class OktaOIDCProxy(OIDCProxy):
         try:
             header_b64 = id_token.split(".")[0]
             header_b64 += "=" * (-len(header_b64) % 4)  # base64 padding
-            header: dict[str, Any] = json.loads(base64.urlsafe_b64decode(header_b64))
+            header = json.loads(base64.urlsafe_b64decode(header_b64))
+            if not isinstance(header, dict):
+                logger.error("Rejecting Okta id_token with non-object header")
+                return None
             if str(header.get("alg", "")).lower() == "none":
                 logger.error("Rejecting Okta id_token with alg=none")
                 return None

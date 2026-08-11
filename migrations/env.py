@@ -37,7 +37,8 @@ target_metadata = Base.metadata
 # only needs to be unique to this service so it doesn't collide with some
 # other advisory lock use in the same database. Derived from the service
 # name so it's easy to recognize in `pg_locks` if it's ever inspected.
-_MIGRATION_LOCK_KEY = 0x5245_434C  # "RECL" in hex, well within int4 range
+# "RECL" in ASCII hex; pg_advisory_xact_lock() takes bigint — any int8 value is valid.
+_MIGRATION_LOCK_KEY = 0x5245_434C
 
 
 def _url() -> str:

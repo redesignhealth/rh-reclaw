@@ -28,6 +28,8 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from schemas import MAX_DISPLAY_NAME_LENGTH
+
 SERVICE_ROOT = Path(__file__).parent.parent
 
 # Same default as docker-compose.yml's `postgres` service.
@@ -102,6 +104,19 @@ async def _columns(engine: AsyncEngine, table: str) -> dict[str, str]:
         return {row.column_name: row.data_type for row in result}
 
 
+async def _column_max_length(engine: AsyncEngine, table: str, column: str) -> int | None:
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            text(
+                "SELECT character_maximum_length FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = :table "
+                "AND column_name = :column"
+            ),
+            {"table": table, "column": column},
+        )
+        return result.scalar_one()
+
+
 async def _indexes(engine: AsyncEngine, table: str) -> set[str]:
     async with engine.connect() as conn:
         result = await conn.execute(
@@ -142,6 +157,8 @@ class TestSchema:
         assert cols["accepted_types"] == "ARRAY"
         assert cols["created_at"] == "timestamp with time zone"
         assert cols["display_name"] == "character varying"
+        max_length = await _column_max_length(engine, "agents", "display_name")
+        assert max_length == MAX_DISPLAY_NAME_LENGTH
 
     async def test_conversations_columns(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "conversations")

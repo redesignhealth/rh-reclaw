@@ -12,6 +12,7 @@ services:
       # Bind 0.0.0.0 inside the container so the port mapping works
       # (prod binds loopback behind the Tailscale sidecar).
       MCP_HOST: 0.0.0.0
+      MCP_PORT: ${MCP_PORT:-8080}
       BASE_URL: http://localhost:8080
       MCP_TOKEN_STORAGE_PATH: /data/fastmcp-tokens
       OKTA_ISSUER_URL: ${OKTA_ISSUER_URL}

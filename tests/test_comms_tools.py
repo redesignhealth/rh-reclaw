@@ -443,6 +443,11 @@ class TestFullNegotiationFlow:
         )
         assert c_view["invited"] is True
         assert c_view["messages"] == []
+        # Metadata-only path: no message-count field at all (neither the
+        # renamed ``messages_returned`` nor the original ``total_count``),
+        # unlike the active-member path asserted above.
+        assert "messages_returned" not in c_view
+        assert "total_count" not in c_view
 
         # B posts an availability_response.
         b_response = await _call(

@@ -62,9 +62,14 @@ def _resolve_log_level() -> int:
     ``make_filtering_bound_logger`` was hardcoded to ``logging.INFO``, so
     ``LOG_LEVEL=DEBUG`` silently had no effect on structlog output). Falls
     back to ``INFO`` for an unset or invalid value rather than raising, and
-    logs a warning (via stdlib ``logging`` — structlog isn't configured
-    yet at this point) so a typo'd env var doesn't silently produce the
-    wrong level with no diagnostic trail.
+    logs a warning (via the module-scoped ``_fallback_logger`` — structlog
+    isn't configured yet at this point, and the bare ``logging.warning()``
+    convenience function must NOT be used here: it implicitly calls
+    ``logging.basicConfig()`` the first time it's invoked if the root
+    logger has no handlers yet, which would make the real,
+    intentional ``logging.basicConfig(level=level)`` call in
+    ``configure_logging`` a no-op) so a typo'd env var doesn't silently
+    produce the wrong level with no diagnostic trail.
 
     ``NOTSET`` (``logging.NOTSET == 0``) is treated as invalid too: it's an
     ``isinstance(level, int)``-passing integer, but it's a sentinel meaning
@@ -77,7 +82,9 @@ def _resolve_log_level() -> int:
     name = os.environ.get("LOG_LEVEL", "INFO").upper()
     level = getattr(logging, name, None)
     if not isinstance(level, int) or level == logging.NOTSET:
-        logging.warning("Invalid LOG_LEVEL=%r; falling back to INFO", os.environ.get("LOG_LEVEL"))
+        _fallback_logger.warning(
+            "Invalid LOG_LEVEL=%r; falling back to INFO", os.environ.get("LOG_LEVEL")
+        )
         return logging.INFO
     return level
 

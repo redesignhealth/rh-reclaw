@@ -64,9 +64,9 @@ class TestResolveLogLevel:
 
     def test_invalid_value_logs_a_warning(self) -> None:
         with patch.dict("os.environ", {"LOG_LEVEL": "DBG"}):
-            with patch.object(logging, "warning") as mock_warning:
+            with patch.object(observability._fallback_logger, "warning") as mock_warning:
                 _resolve_log_level()
-        mock_warning.assert_called_once()
+        mock_warning.assert_called_once_with("Invalid LOG_LEVEL=%r; falling back to INFO", "DBG")
 
     def test_notset_falls_back_to_info(self) -> None:
         """LOG_LEVEL=NOTSET resolves via getattr to 0, which passes a naive
@@ -78,9 +78,25 @@ class TestResolveLogLevel:
 
     def test_notset_logs_a_warning(self) -> None:
         with patch.dict("os.environ", {"LOG_LEVEL": "NOTSET"}):
-            with patch.object(logging, "warning") as mock_warning:
+            with patch.object(observability._fallback_logger, "warning") as mock_warning:
                 _resolve_log_level()
-        mock_warning.assert_called_once()
+        mock_warning.assert_called_once_with("Invalid LOG_LEVEL=%r; falling back to INFO", "NOTSET")
+
+    def test_invalid_value_does_not_pollute_root_logger_handlers(self) -> None:
+        """Regression test for the bug this round fixed: the bare
+        ``logging.warning()`` convenience function implicitly calls
+        ``logging.basicConfig()`` (installing a root handler) the first
+        time it's invoked if the root logger has no handlers yet -- which
+        would make the later, real ``logging.basicConfig(level=level)`` in
+        ``configure_logging`` a no-op. Routing the fallback warning through
+        the module-scoped ``_fallback_logger`` instead must not trigger that
+        side effect, even with no patch around the warning call itself."""
+        root = logging.getLogger()
+        had_handlers_before = bool(root.handlers)
+        with patch.dict("os.environ", {"LOG_LEVEL": "NOT_A_REAL_LEVEL"}):
+            _resolve_log_level()
+        if not had_handlers_before:
+            assert not root.handlers
 
     def test_configure_logging_applies_debug_level_to_structlog(self) -> None:
         """LOG_LEVEL=DEBUG must reach structlog's filtering wrapper, not just

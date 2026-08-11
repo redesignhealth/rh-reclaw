@@ -244,6 +244,22 @@ class TestRegisterAgent:
                 accepted_types=["scheduling.availability"] * 21,
             )
 
+    async def test_accepted_types_at_max_count_accepted(self, session: AsyncSession) -> None:
+        """Exactly ``schemas.MAX_ACCEPTED_TYPES`` (20) entries is still
+        accepted — the inclusive boundary of the ``len() > 20`` check in
+        ``register_agent``. The count check runs against the raw list
+        (before dedup), so 20 repeats of the only valid v1 conversation
+        type (``scheduling.availability``) exercise this boundary without
+        tripping the "unknown type" check; ``register_agent`` then
+        dedupes/sorts, so the persisted ``accepted_types`` collapses to a
+        single entry."""
+        agent = await _register(
+            session,
+            "agent-max-types",
+            accepted_types=["scheduling.availability"] * 20,
+        )
+        assert agent.accepted_types == ["scheduling.availability"]
+
 
 # --- start_conversation --------------------------------------------------------
 

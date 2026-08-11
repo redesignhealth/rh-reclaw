@@ -116,12 +116,34 @@ class TestExtractUpstreamClaims:
 
     async def test_truncated_base64_payload_returns_none(self) -> None:
         proxy = _build_proxy()
-        # Well-formed 3-segment shape, but the payload segment is not valid
-        # base64/JSON once decoded.
-        truncated = "aGVhZGVy.not-valid-base64-json!!!.sig"
+        # Well-formed, valid-JSON header (so the alg=none guard's JSON
+        # parse succeeds and execution reaches the payload-decode step),
+        # but the payload segment is not valid base64/JSON once decoded.
+        valid_header = (
+            base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+            .decode()
+            .rstrip("=")
+        )
+        truncated = f"{valid_header}.not-valid-base64-json!!!.sig"
 
         with patch("auth.logger") as mock_logger:
             claims = await proxy._extract_upstream_claims({"id_token": truncated})
+
+        assert claims is None
+        mock_logger.error.assert_called_once()
+
+    async def test_non_dict_header_returns_none_and_logs_error(self) -> None:
+        # A header segment that base64-decodes to valid-but-non-dict JSON
+        # (e.g. a JSON array) must not reach `header.get(...)` — that would
+        # raise an unhandled AttributeError instead of failing closed.
+        proxy = _build_proxy()
+        non_dict_header = (
+            base64.urlsafe_b64encode(json.dumps(["alg", "RS256"]).encode()).decode().rstrip("=")
+        )
+        id_token = f"{non_dict_header}.eyJzdWIiOiJ4In0.sig"
+
+        with patch("auth.logger") as mock_logger:
+            claims = await proxy._extract_upstream_claims({"id_token": id_token})
 
         assert claims is None
         mock_logger.error.assert_called_once()
