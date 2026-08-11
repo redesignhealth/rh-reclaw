@@ -26,7 +26,12 @@ FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142
 
 WORKDIR /app
 
-RUN addgroup --system app && adduser --system --ingroup app app
+# UID/GID pinned (not left to adduser's next-free-system-id allocation) so
+# they're a stable target for the EFS access point's POSIX ownership
+# (infrastructure/environments/{dev,prod}/reclaw_comms.tf's
+# aws_efs_access_point.reclaw_comms) -- an unpinned uid could drift on a
+# future base-image change and silently break EFS write access again.
+RUN addgroup --system --gid 10001 app && adduser --system --uid 10001 --gid 10001 app
 
 COPY --from=builder --chown=app:app /app /app
 COPY --chown=app:app entrypoint.sh /app/entrypoint.sh
