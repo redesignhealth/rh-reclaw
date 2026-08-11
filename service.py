@@ -96,7 +96,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
 from models import Agent, AuditLog, Conversation, Message, Participant
-from schemas import CONVERSATION_TYPES, PayloadValidationError, validate_payload
+from schemas import (
+    CONVERSATION_TYPES,
+    MAX_ACCEPTED_TYPES,
+    MAX_DISPLAY_NAME_LENGTH,
+    PayloadValidationError,
+    validate_payload,
+)
 from state_machine import is_message_legal, resulting_conversation_state
 
 # --- Policy constants --------------------------------------------------------
@@ -525,7 +531,10 @@ async def register_agent(
 
     Raises ``ValueError`` (not ``AccessDeniedError``) for malformed input — this
     is a data-validation failure, not an authorization decision (the
-    caller has not claimed a resource yet).
+    caller has not claimed a resource yet). This includes an empty or
+    over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``, and
+    an empty, unknown-typed, or over-count (``schemas.MAX_ACCEPTED_TYPES``)
+    ``accepted_types``.
     """
     sub = sub.strip()
     if not sub:
@@ -533,12 +542,16 @@ async def register_agent(
     display_name = display_name.strip()
     if not display_name:
         raise ValueError("display_name must be non-empty")
+    if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
+        raise ValueError(f"display_name exceeds {MAX_DISPLAY_NAME_LENGTH} characters")
     unknown_types = sorted(set(accepted_types) - CONVERSATION_TYPES)
     if not accepted_types or unknown_types:
         raise ValueError(
             "accepted_types must be a non-empty subset of "
             f"{sorted(CONVERSATION_TYPES)} (got unknown: {unknown_types})"
         )
+    if len(accepted_types) > MAX_ACCEPTED_TYPES:
+        raise ValueError(f"accepted_types exceeds {MAX_ACCEPTED_TYPES} entries")
     normalized_types = sorted(set(accepted_types))
 
     existing = (await session.execute(select(Agent).where(Agent.sub == sub))).scalar_one_or_none()
@@ -736,7 +749,6 @@ async def start_conversation(
             message_type=message_type,
             exc=exc,
         )
-        raise AssertionError("unreachable") from exc
 
     now = _now()
     conversation = Conversation(
@@ -904,7 +916,6 @@ async def invite(
             agent_id=inviter_agent_id,
             conversation_id=conversation.id,
         )
-        raise AssertionError("unreachable")
     if conversation.state != "active":
         await _deny_bad_state(
             session,
@@ -1128,7 +1139,6 @@ async def post_message(
             message_type=message_type,
             exc=exc,
         )
-        raise AssertionError("unreachable") from exc
 
     next_seq = (
         await session.execute(
@@ -1152,7 +1162,6 @@ async def post_message(
                     "reference a prior message in this conversation"
                 ),
             )
-            raise AssertionError("unreachable")
 
     message = Message(
         conversation_id=conversation.id,

@@ -38,7 +38,7 @@ def _build_proxy() -> OktaOIDCProxy:
         return build_okta_provider()
 
 
-def _fake_id_token(payload: dict[str, object]) -> str:
+def _fake_id_token(payload: dict[str, object], alg: str = "RS256") -> str:
     """Build a well-formed-but-unsigned JWT string carrying ``payload``.
 
     ``_extract_upstream_claims`` decodes the id_token payload WITHOUT
@@ -47,13 +47,18 @@ def _fake_id_token(payload: dict[str, object]) -> str:
     added next to the real implementation), so the signature segment here
     is an arbitrary placeholder; only the header/payload base64 segments
     need to be well-formed.
+
+    ``alg`` defaults to ``"RS256"`` (Okta's real signing algorithm) rather
+    than ``"none"`` — the ``alg: none`` guard in ``_extract_upstream_claims``
+    now rejects tokens outright, so the "happy path" fixtures need a
+    realistic header. Pass ``alg="none"`` explicitly to exercise that guard.
     """
 
     def _b64(data: dict[str, object] | bytes) -> str:
         raw = data if isinstance(data, bytes) else json.dumps(data).encode()
         return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
-    header = _b64({"alg": "none", "typ": "JWT"})
+    header = _b64({"alg": alg, "typ": "JWT"})
     body = _b64(payload)
     return f"{header}.{body}.fake-signature"
 
@@ -120,6 +125,27 @@ class TestExtractUpstreamClaims:
 
         assert claims is None
         mock_logger.error.assert_called_once()
+
+    async def test_alg_none_id_token_returns_none_and_logs_error(self) -> None:
+        # Defense-in-depth guard: even though signature verification is the
+        # parent OIDCProxy's job, an alg=none header must be rejected here
+        # rather than have its claims extracted and trusted.
+        proxy = _build_proxy()
+        id_token = _fake_id_token({"sub": "attacker-controlled"}, alg="none")
+
+        with patch("auth.logger") as mock_logger:
+            claims = await proxy._extract_upstream_claims({"id_token": id_token})
+
+        assert claims is None
+        mock_logger.error.assert_called_once()
+
+    async def test_alg_none_case_insensitive_returns_none(self) -> None:
+        proxy = _build_proxy()
+        id_token = _fake_id_token({"sub": "attacker-controlled"}, alg="None")
+
+        claims = await proxy._extract_upstream_claims({"id_token": id_token})
+
+        assert claims is None
 
     async def test_id_token_with_no_recognized_claims_returns_none(self) -> None:
         """Every claim key present but none of them in ``_UPSTREAM_CLAIM_KEYS``

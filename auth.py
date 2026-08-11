@@ -94,11 +94,23 @@ class OktaOIDCProxy(OIDCProxy):
         not before it) — if that call ordering ever changes, this becomes a
         forgeable trust boundary (an attacker-controlled payload would be
         trusted as identity claims).
+
+        Defense-in-depth only (does not replace the ordering dependency
+        above): reject ``alg: none`` tokens outright rather than extracting
+        claims from them. This protects a misconfigured dev/test
+        environment where the parent-class verification hasn't actually
+        run yet — it is not a substitute for that verification.
         """
         id_token = idp_tokens.get("id_token")
         if not id_token:
             return None
         try:
+            header_b64 = id_token.split(".")[0]
+            header_b64 += "=" * (-len(header_b64) % 4)  # base64 padding
+            header: dict[str, Any] = json.loads(base64.urlsafe_b64decode(header_b64))
+            if str(header.get("alg", "")).lower() == "none":
+                logger.error("Rejecting Okta id_token with alg=none")
+                return None
             # Decode the JWT payload without verification — the upstream
             # provider already validated the token during the auth flow.
             payload_b64 = id_token.split(".")[1]

@@ -36,7 +36,7 @@ from sqlalchemy.ext.asyncio import (
 
 from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
 from models import Agent, AuditLog, Participant
-from schemas import PayloadValidationError
+from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
     MAX_CONVERSATION_STARTS_PER_HOUR,
     MAX_MESSAGES_PER_CONVERSATION_PER_HOUR,
@@ -220,6 +220,29 @@ class TestRegisterAgent:
 
         rows = (await session.execute(select(Agent).where(Agent.sub == "agent-a"))).scalars().all()
         assert len(rows) == 1
+
+    async def test_display_name_over_max_length_rejected(self, session: AsyncSession) -> None:
+        """A display_name over ``schemas.MAX_DISPLAY_NAME_LENGTH`` (255, the
+        DB column's ``VARCHAR`` cap) must be rejected here as a clean
+        ``ValueError`` — never allowed to reach the DB write and surface as
+        an unmapped ``DataError``/``StringDataRightTruncation``."""
+        with pytest.raises(ValueError, match="display_name exceeds 255 characters"):
+            await _register(session, "agent-long-name", display_name="x" * 256)
+
+        # Exactly at the cap is still accepted.
+        agent = await _register(session, "agent-max-name", display_name="x" * 255)
+        assert len(agent.display_name) == 255
+
+    async def test_accepted_types_over_max_count_rejected(self, session: AsyncSession) -> None:
+        """More than ``schemas.MAX_ACCEPTED_TYPES`` (20) entries in
+        ``accepted_types`` is rejected outright, even if every entry is a
+        known, valid conversation type (v1 has only one)."""
+        with pytest.raises(ValueError, match="accepted_types exceeds 20 entries"):
+            await _register(
+                session,
+                "agent-too-many-types",
+                accepted_types=["scheduling.availability"] * 21,
+            )
 
 
 # --- start_conversation --------------------------------------------------------
@@ -846,6 +869,39 @@ class TestPostMessage:
         )
         assert message.seq == 2
         assert message.payload["about_seq"] == 1
+
+    async def test_payload_exceeding_max_bytes_denied(self, session: AsyncSession) -> None:
+        """A payload whose JSON encoding exceeds ``schemas.MAX_PAYLOAD_BYTES``
+        (65536) is rejected with ``PayloadValidationError`` before schema
+        validation even runs — ``_check_payload_size`` is the first check
+        ``validate_payload`` performs."""
+        owner, target, conversation = await self._active_pair(session, "sz-owner-1", "sz-target-1")
+        oversized_payload = {"reason": "owner_declined", "padding": "x" * (MAX_PAYLOAD_BYTES + 100)}
+
+        with pytest.raises(PayloadValidationError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=target.sub,
+                sender_agent_id=target.id,
+                conversation_id=conversation.id,
+                message_type="decline",
+                payload=oversized_payload,
+            )
+        assert "exceeding the 65536-byte cap" in str(exc_info.value)
+
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.bad_schema" in actions
+
+        # A conforming payload well under the cap still succeeds.
+        message = await post_message(
+            session,
+            actor_sub=owner.sub,
+            sender_agent_id=owner.id,
+            conversation_id=conversation.id,
+            message_type="decline",
+            payload=_decline_payload(),
+        )
+        assert message.type == "decline"
 
 
 # --- seq race-safety -----------------------------------------------------------

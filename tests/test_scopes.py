@@ -78,6 +78,17 @@ class TestIsInteractiveToken:
         token = _fake_access_token({"iss": "https://reclaw-comms.example/mcp"})
         assert is_interactive_token(token) is True
 
+    def test_missing_iss_claim_is_not_interactive(self) -> None:
+        # A present token with no `iss` claim at all must fail closed rather
+        # than falling through to the interactive (scope-bypass) branch.
+        token = _fake_access_token({"sub": "bot-1"})
+        assert is_interactive_token(token) is False
+
+    def test_none_iss_claim_is_not_interactive(self) -> None:
+        # Same guard, explicit `iss: None` rather than an absent key.
+        token = _fake_access_token({"iss": None, "sub": "bot-1"})
+        assert is_interactive_token(token) is False
+
 
 class TestScopesForToken:
     """``scopes_for_token`` reads the rh-auth ``scopes`` LIST claim."""

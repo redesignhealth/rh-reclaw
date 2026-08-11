@@ -28,7 +28,7 @@ def _auth_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ``os.environ`` directly, so pytest automatically restores the prior
     environment after each test rather than these vars accumulating across
     the session. ``setdefault``-style "only if unset" semantics are
-    preserved via an explicit ``os.environ.get(...)`` check before each
+    preserved via an explicit ``name not in os.environ`` check before each
     ``setenv`` call (``monkeypatch`` has no built-in ``setdefault``).
     """
     monkeypatch.setenv("MCP_TOKEN_STORAGE_PATH", str(tmp_path))

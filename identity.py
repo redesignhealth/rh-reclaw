@@ -62,8 +62,21 @@ def validate_sub_shape(claims: dict[str, Any]) -> None:
 
 def _is_rh_auth_token(claims: dict[str, Any]) -> bool:
     """rh-auth tokens are identified by ``iss``, cryptographically verified
-    upstream by the JWTVerifier before the token reaches this module."""
-    return claims.get("iss") == RH_AUTH_ISSUER
+    upstream by the JWTVerifier before the token reaches this module.
+
+    A missing/``None`` ``iss`` claim must NOT fall through to the "not
+    rh-auth" branch — that branch trusts the token's ``email`` /
+    ``preferred_username`` claims (the Okta/interactive path), and an absent
+    issuer must not be treated as safely-interactive by default. This
+    mirrors the fail-closed ``iss is None`` guard in
+    ``scopes.is_interactive_token``, but here the stakes are higher: this
+    value feeds ``try_resolve_email``, which becomes ``actor_sub`` — the
+    identity key for every tool call — not just a scope-bypass decision.
+    """
+    issuer = claims.get("iss")
+    if issuer is None:
+        return True
+    return bool(issuer == RH_AUTH_ISSUER)
 
 
 def try_resolve_email(token: Any) -> str | None:

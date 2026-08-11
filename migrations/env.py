@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -30,6 +31,13 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+
+# Stable lock key for the Postgres advisory lock that serializes concurrent
+# `alembic upgrade` runs (see do_run_migrations below). Fixed and arbitrary —
+# only needs to be unique to this service so it doesn't collide with some
+# other advisory lock use in the same database. Derived from the service
+# name so it's easy to recognize in `pg_locks` if it's ever inspected.
+_MIGRATION_LOCK_KEY = 0x5245_434C  # "RECL" in hex, well within int4 range
 
 
 def _url() -> str:
@@ -60,6 +68,18 @@ def run_migrations_offline() -> None:
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata)
     with context.begin_transaction():
+        # Serialize concurrent `alembic upgrade head` invocations (e.g. two
+        # ECS tasks starting simultaneously during a rolling deploy) so the
+        # second one blocks here rather than racing the first through the
+        # same DDL and crashing on "relation already exists" /
+        # "value too long" mid-migration. pg_advisory_xact_lock is held for
+        # the lifetime of this transaction — which spans the whole
+        # migration run — and releases automatically at commit/rollback, so
+        # a slower-starting task blocks, wakes once the transaction ends,
+        # observes the revision is already at head, and exits cleanly.
+        connection.execute(
+            sa.text("SELECT pg_advisory_xact_lock(:key)"), {"key": _MIGRATION_LOCK_KEY}
+        )
         context.run_migrations()
 
 

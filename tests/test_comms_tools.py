@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -316,6 +317,29 @@ class TestRegister:
         # No owner_sub/owner_email claims on the token — self-owned fallback.
         assert result["owner_email"] == "agent-self-owned"
 
+    async def test_register_rh_auth_forged_email_claim_not_trusted(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """An rh-auth (agent) token's ``email`` claim is caller-supplied and
+        unverified (the ``rh-auth issue`` CLI accepts arbitrary extra
+        claims) — it must never be trusted as ``owner_email``, even when
+        present. This is the negative case the existing "no email claim at
+        all" tests don't cover: here the token DOES carry an ``email``
+        claim, and it must still be ignored in favor of the sub-derived
+        self-owned fallback."""
+        token = _token("agent-forged-email")
+        token.claims["email"] = "forged@attacker.com"
+
+        result = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {"display_name": "Forged", "accepted_types": ["scheduling.availability"]},
+        )
+        assert result["owner_email"] != "forged@attacker.com"
+        assert result["owner_email"] == "agent-forged-email"
+
 
 # --- AXI empty-state / shape spot checks --------------------------------------------
 
@@ -402,6 +426,12 @@ class TestFullNegotiationFlow:
         )
         assert b_view["invited"] is False
         assert [m["type"] for m in b_view["messages"]] == ["availability_request"]
+        # Tool-boundary rename: the count key is ``messages_returned``, not
+        # ``total_count`` (which would misleadingly imply the conversation's
+        # total message count rather than this since_seq-filtered slice).
+        assert "messages_returned" in b_view
+        assert b_view["messages_returned"] == 1
+        assert "total_count" not in b_view
 
         # C never accepts — metadata-only, no message content.
         c_view = await _call(
@@ -616,6 +646,51 @@ class TestRateLimitAndSchemaErrors:
         message = str(exc_info.value)
         assert "payload failed schema validation" in message
         assert message != "access_denied: conversation requires active membership"
+
+    async def test_negative_since_seq_rejected(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "neg-seq-owner")
+        token_owner = _token("neg-seq-owner")
+
+        # No conversation needs to exist yet — this is a pure input-shape
+        # check the tool boundary performs before ever touching the DB.
+        with pytest.raises(ToolError, match=re.escape("invalid_request: since_seq must be >= 0")):
+            await _call(
+                main,
+                test_session_factory,
+                token_owner,
+                "comms_get_conversation",
+                {"conversation_id": str(uuid.uuid4()), "since_seq": -1},
+            )
+
+    async def test_target_agent_ids_over_participant_cap_rejected(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from schemas import MAX_PARTICIPANTS_PER_CONVERSATION
+
+        await _register(main, test_session_factory, "cap-owner")
+        token_owner = _token("cap-owner")
+        too_many_ids = [str(uuid.uuid4()) for _ in range(MAX_PARTICIPANTS_PER_CONVERSATION + 1)]
+
+        with pytest.raises(
+            ToolError,
+            match=re.escape(
+                "invalid_request: target_agent_ids exceeds the participant cap "
+                f"({MAX_PARTICIPANTS_PER_CONVERSATION})"
+            ),
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                token_owner,
+                "comms_start_conversation",
+                {
+                    "conversation_type": "scheduling.availability",
+                    "target_agent_ids": too_many_ids,
+                    "initial_message": _availability_request(),
+                },
+            )
 
 
 # --- Membership mutation tools: invite / leave / decline_invite ---------------------

@@ -141,6 +141,7 @@ class TestSchema:
             assert expected in cols, f"agents.{expected} missing"
         assert cols["accepted_types"] == "ARRAY"
         assert cols["created_at"] == "timestamp with time zone"
+        assert cols["display_name"] == "character varying"
 
     async def test_conversations_columns(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "conversations")
@@ -229,10 +230,14 @@ class TestSchema:
 
         conversation_indexes = await _indexes(engine, "conversations")
         assert "idx_conversations_state_expires_at" in conversation_indexes
+        assert "idx_conversations_created_by_created_at" in conversation_indexes
 
         audit_indexes = await _indexes(engine, "audit_log")
         assert "idx_audit_log_conversation_id" in audit_indexes
         assert "idx_audit_log_at" in audit_indexes
+
+        message_indexes = await _indexes(engine, "messages")
+        assert "idx_messages_conversation_id_sender_id_created_at" in message_indexes
 
     async def test_messages_seq_unique_per_conversation(self, engine: AsyncEngine) -> None:
         async with engine.connect() as conn:

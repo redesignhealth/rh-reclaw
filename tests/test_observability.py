@@ -62,20 +62,42 @@ class TestResolveLogLevel:
         with patch.dict("os.environ", {"LOG_LEVEL": "NOT_A_REAL_LEVEL"}):
             assert _resolve_log_level() == logging.INFO
 
+    def test_invalid_value_logs_a_warning(self) -> None:
+        with patch.dict("os.environ", {"LOG_LEVEL": "DBG"}):
+            with patch.object(logging, "warning") as mock_warning:
+                _resolve_log_level()
+        mock_warning.assert_called_once()
+
+    def test_notset_falls_back_to_info(self) -> None:
+        """LOG_LEVEL=NOTSET resolves via getattr to 0, which passes a naive
+        isinstance(level, int) check but is structlog's "log everything"
+        sentinel, not a real filtering threshold -- must fall back to INFO
+        rather than disabling filtering entirely."""
+        with patch.dict("os.environ", {"LOG_LEVEL": "NOTSET"}):
+            assert _resolve_log_level() == logging.INFO
+
+    def test_notset_logs_a_warning(self) -> None:
+        with patch.dict("os.environ", {"LOG_LEVEL": "NOTSET"}):
+            with patch.object(logging, "warning") as mock_warning:
+                _resolve_log_level()
+        mock_warning.assert_called_once()
+
     def test_configure_logging_applies_debug_level_to_structlog(self) -> None:
         """LOG_LEVEL=DEBUG must reach structlog's filtering wrapper, not just
         stdlib logging.basicConfig (the bug this round fixed)."""
-        with patch.dict("os.environ", {"LOG_LEVEL": "DEBUG"}):
+        try:
+            with patch.dict("os.environ", {"LOG_LEVEL": "DEBUG"}):
+                configure_logging()
+            # ``structlog.get_logger()`` returns a lazy proxy; ``.bind()``
+            # resolves it against the just-applied configuration so
+            # ``is_enabled_for`` reflects the real filtering level.
+            bound_logger = structlog.get_logger().bind()
+            assert bound_logger.is_enabled_for(logging.DEBUG)
+        finally:
+            # Restore INFO so later tests (and the module-level default) are
+            # not left running at DEBUG even if the assertion above fails --
+            # structlog's configuration is process-global, not per-test.
             configure_logging()
-        # ``structlog.get_logger()`` returns a lazy proxy; ``.bind()``
-        # resolves it against the just-applied configuration so
-        # ``is_enabled_for`` reflects the real filtering level.
-        bound_logger = structlog.get_logger().bind()
-        assert bound_logger.is_enabled_for(logging.DEBUG)
-
-        # Restore INFO so later tests (and the module-level default) are
-        # not left running at DEBUG.
-        configure_logging()
 
 
 class TestFallbackLoggerPaths:

@@ -44,8 +44,8 @@ EXPOSE 8080
 # Distinguishes a crashed/unhealthy container from a healthy one during
 # ECS Fargate rolling deploys, hitting the same /health endpoint the
 # service exposes on MCP_PORT (default 8080, see main.py).
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+  CMD ["sh", "-c", "python -c \"import os, urllib.request; urllib.request.urlopen('http://localhost:' + os.environ.get('MCP_PORT', '8080') + '/health')\" || exit 1"]
 
 # Runs pending Alembic migrations before starting the server (see
 # entrypoint.sh) — no automated migration mechanism otherwise runs inside
