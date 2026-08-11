@@ -1,0 +1,330 @@
+"""EA provider -- the MCP tool surface over ``reclaw_ea.orchestrator.Negotiator``
+(TECH-5065). Mounted under the ``ea`` namespace in main.py.
+
+Tool surface (exactly the 5 named in TECH-5065, plus ``ea_whoami`` for fleet
+parity with reclaw-comms-mcp): ``ea_negotiate``, ``ea_react_to_conversation``,
+``ea_check_completion``, ``ea_request_booking``, ``ea_respond_to_approval``.
+The LLM-driven caller (TECH-5084's agent run-loop host) never touches
+``Negotiator`` internals directly -- only these tools.
+
+Every tool follows the same shape:
+
+1. Resolve ``owner_identity`` via ``identity.require_owner_identity`` --
+   NEVER from a tool argument (TECH-5065's auth invariant: a bug here would
+   let one owner's agent read/spend another owner's ledger or approval
+   history). This is stricter than reclaw-comms-mcp's identity resolution,
+   which is best-effort/observability-only -- see ``require_owner_identity``'s
+   docstring for why.
+2. Look up (or lazily create) that owner's ``Negotiator`` via
+   ``_negotiator_for`` -- one multi-tenant process, one ``Negotiator`` per
+   owner, matching TECH-5065's "one multi-tenant service, not one process
+   per person."
+3. Call exactly one ``Negotiator`` method against the shared board.
+4. Return a plain dict -- no ``Negotiator`` objects, wire-schema objects, or
+   scheduler_mcp dataclasses cross the tool boundary directly.
+
+Known interim gaps, each already tracked rather than silently shipped:
+
+* **Board**: ``_board`` is a single process-wide ``FakeBoard``, not a real
+  ``reclaw-comms-mcp`` client. This works for a same-process internal pilot
+  pair (every owner's ``Negotiator`` in this service shares the same board
+  instance) but does not span processes/services. TECH-5055 (in progress)
+  owns building the real client; when it lands, swap ``_board`` for it --
+  no tool signature here needs to change, since ``BoardTransport`` is
+  already the abstraction ``Negotiator`` depends on.
+* **Persistence**: ``_negotiator_for`` builds each ``Negotiator`` with the
+  default in-memory ``Ledger``/``ApprovalSurface``/``OutcomeStore`` --
+  state does not survive a process restart. TECH-5083 tracks real
+  Postgres-backed stores.
+* **Rules**: no owner-authored rule UI exists (by design -- see
+  ``scheduler_mcp.rules``'s own module docstring: rule-writing is
+  exclusively an EA tool-call concern, never a form). ``_rules_for`` seeds
+  each owner with the shipped defaults (``rules.apply_defaults``) on first
+  use and never lets a caller edit them. A real rule-authoring path is
+  unticketed as of this writing -- the EA's own judgment (TECH-5084's
+  run-loop host) is expected to write rules via ``scheduler_mcp.rules``
+  directly once that host exists, not through this provider.
+* **Booking**: ``ea_request_booking``'s ``on_book`` callback does not write
+  a real calendar event -- there is no calendar integration in this
+  service. It records the deterministic booking discipline (ledger
+  promotion, autonomy gate, approval hold) and returns the confirmed slot
+  to the caller, which is expected to create the actual calendar invite
+  itself (e.g. via ``rh-google-mcp``) and is responsible for retrying
+  ``ea_request_booking`` if that invite creation fails -- ``_do_book``'s
+  own docstring is explicit that ``on_book`` failing leaves nothing
+  mutated, so a retry is always safe.
+
+Registration reminder (fail-closed ``TOOL_SCOPES``, see scopes.py): every
+tool added here MUST be enrolled in ``scopes.TOOL_SCOPES`` under its
+mounted name (``ea_<tool>``) in the same change.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, time
+from typing import Any
+
+from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.dependencies import get_access_token
+from pydantic import BaseModel, ConfigDict, Field
+from reclaw_ea.fake_board import FakeBoard
+from reclaw_ea.ledger import Ledger
+from reclaw_ea.orchestrator import Negotiator
+from reclaw_ea.scorer import Incumbent, SlotContext
+from reclaw_ea.tiers import Tier
+from reclaw_ea.wire import AvailabilityRequest, Modality
+from scheduler_mcp.negotiation.schema import CandidateSlot
+from scheduler_mcp.rules import InMemoryRuleStore, Rule, Situation, apply_defaults
+
+from identity import require_owner_identity
+from scopes import is_interactive_token, scopes_for_token
+
+ea_server: FastMCP[Any] = FastMCP("ea")
+
+
+# --- Per-owner state (see module docstring's "Known interim gaps") --------
+
+# One process-wide board: EVERY owner's `Negotiator` in this service shares
+# it (matches TECH-5065's "one multi-tenant service"). Two owners
+# negotiating with each other therefore both resolve to conversation state
+# on this SAME instance -- this is what makes a same-process pilot pair
+# actually work end-to-end today, ahead of TECH-5055's real board client.
+_board = FakeBoard()
+
+_negotiators: dict[str, Negotiator] = {}
+_rule_store = InMemoryRuleStore()
+_rules_seeded: set[str] = set()
+
+
+def _negotiator_for(owner_identity: str) -> Negotiator:
+    negotiator = _negotiators.get(owner_identity)
+    if negotiator is None:
+        negotiator = Negotiator(identity=owner_identity, ledger=Ledger())
+        _negotiators[owner_identity] = negotiator
+    return negotiator
+
+
+def _rules_for(owner_identity: str) -> list[Rule]:
+    """Return `owner_identity`'s rules, seeding the shipped defaults on
+    first use. See module docstring's "Rules" gap -- there is no edit path
+    here by design."""
+    if owner_identity not in _rules_seeded:
+        apply_defaults(_rule_store, owner_identity)
+        _rules_seeded.add(owner_identity)
+    rules: list[Rule] = _rule_store.get_rules_for_owner(owner_identity)
+    return rules
+
+
+def _require_identity() -> str:
+    token = get_access_token()
+    if token is None:
+        raise ToolError("no access token provided")
+    return require_owner_identity(token)
+
+
+# --- Pydantic mirrors for scorer.SlotContext / scorer.Incumbent -----------
+#
+# CandidateSlot, Situation, and Rule are already Pydantic models
+# (scheduler_mcp) and cross the tool boundary directly. SlotContext and
+# Incumbent are plain dataclasses (scorer.py) with no JSON-schema of their
+# own, so this provider defines thin Pydantic mirrors and converts to the
+# dataclasses internally -- the dataclasses themselves are not part of the
+# wire contract and can keep evolving independently.
+
+
+class IncumbentIn(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    exists: bool = False
+    organizer_is_owner: bool | None = None
+    attendee_count: int | None = None
+
+    def to_incumbent(self) -> Incumbent:
+        return Incumbent(
+            exists=self.exists,
+            organizer_is_owner=self.organizer_is_owner,
+            attendee_count=self.attendee_count,
+        )
+
+
+class SlotContextIn(BaseModel):
+    """Mirrors `reclaw_ea.scorer.SlotContext` -- see that class's docstring
+    for what each field means and how it's scored."""
+
+    model_config = ConfigDict(frozen=True)
+
+    start: datetime
+    end: datetime
+    situation: Situation
+    incumbent: IncumbentIn = Field(default_factory=IncumbentIn)
+    adjacent_free_minutes: int | None = None
+    energy_peak_start: time | None = None
+    energy_peak_end: time | None = None
+    buffer_before_minutes: int | None = None
+    buffer_after_minutes: int | None = None
+    within_counterparty_window: bool | None = None
+    tier: Tier = Tier.TIER_3
+
+    def to_slot_context(self) -> SlotContext:
+        energy_peak = (
+            (self.energy_peak_start, self.energy_peak_end)
+            if self.energy_peak_start is not None and self.energy_peak_end is not None
+            else None
+        )
+        return SlotContext(
+            start=self.start,
+            end=self.end,
+            situation=self.situation,
+            incumbent=self.incumbent.to_incumbent(),
+            adjacent_free_minutes=self.adjacent_free_minutes,
+            energy_peak=energy_peak,
+            buffer_before_minutes=self.buffer_before_minutes,
+            buffer_after_minutes=self.buffer_after_minutes,
+            within_counterparty_window=self.within_counterparty_window,
+            tier=self.tier,
+        )
+
+
+def _slot_to_dict(slot: CandidateSlot) -> dict[str, str]:
+    return {"start": slot.start.isoformat(), "end": slot.end.isoformat()}
+
+
+# --- Tools -----------------------------------------------------------------
+
+
+@ea_server.tool
+async def whoami() -> dict[str, Any]:
+    """Return the authenticated caller's identity, issuer, caller type, and
+    scopes -- diagnostic tool for verifying auth/scope wiring, matching
+    reclaw-comms-mcp's `comms_whoami`."""
+    token = get_access_token()
+    if token is None:
+        raise ToolError("no access token provided")
+    interactive = is_interactive_token(token)
+    return {
+        "identity": require_owner_identity(token) if not interactive else None,
+        "issuer": token.claims.get("iss"),
+        "caller_type": "interactive" if interactive else "service",
+        "scopes": scopes_for_token(token),
+    }
+
+
+@ea_server.tool
+async def negotiate(
+    to_agent_identity: str,
+    window: CandidateSlot,
+    duration_minutes: int,
+    modality: Modality,
+    priority: int = 3,
+) -> dict[str, Any]:
+    """Open a new negotiation with `to_agent_identity`, posting the initial
+    `AvailabilityRequest`. Returns the `conversation_id` both sides use for
+    every subsequent `ea_react_to_conversation`/`ea_check_completion` call.
+
+    `priority` is a hint, never an instruction (docs/DESIGN.md §2.2 point
+    6) -- the receiving EA computes its own tier from its own rules."""
+    owner_identity = _require_identity()
+    negotiator = _negotiator_for(owner_identity)
+    request = AvailabilityRequest(
+        window=window, duration_minutes=duration_minutes, modality=modality, priority=priority
+    )
+    conversation_id = negotiator.open_negotiation(
+        _board, to_agent_identity=to_agent_identity, request=request
+    )
+    return {"conversation_id": conversation_id}
+
+
+@ea_server.tool
+async def react_to_conversation(
+    conversation_id: str, my_candidates: list[SlotContextIn]
+) -> dict[str, Any]:
+    """Process the counterparty's latest message on `conversation_id` and
+    take exactly one action (propose, confirm, or decline) -- a no-op if
+    it isn't this owner's turn or the negotiation is already terminal.
+    `my_candidates` are this owner's own scored candidate slots for this
+    meeting (sourced from real calendar + judgment upstream of this
+    service -- see module docstring's "Rules" and TECH-5084); rules are
+    resolved internally, never accepted as input."""
+    owner_identity = _require_identity()
+    negotiator = _negotiator_for(owner_identity)
+    contexts = [c.to_slot_context() for c in my_candidates]
+    negotiator.react(
+        _board,
+        conversation_id,
+        my_candidates=contexts,
+        rules=_rules_for(owner_identity),
+    )
+    state = negotiator.state_for(conversation_id)
+    return {
+        "conversation_id": conversation_id,
+        "round": state.round if state is not None else None,
+        "is_terminal": state.is_terminal if state is not None else None,
+        "outcome": state.outcome.value if state is not None else None,
+    }
+
+
+@ea_server.tool
+async def check_completion(conversation_id: str) -> dict[str, Any]:
+    """Return the agreed slot for `conversation_id` if every active
+    participant's latest message is a matching `Confirm`, else `None`."""
+    owner_identity = _require_identity()
+    negotiator = _negotiator_for(owner_identity)
+    slot = negotiator.check_completion(_board, conversation_id)
+    return {"conversation_id": conversation_id, "slot": _slot_to_dict(slot) if slot else None}
+
+
+@ea_server.tool
+async def request_booking(conversation_id: str) -> dict[str, Any]:
+    """Request booking for a completed negotiation, through the autonomy
+    gate (docs/DESIGN.md §2.2 point 3). Completion alone never books
+    directly -- an external counterparty is always `ask_first`; an internal
+    one earns autonomous booking from a real approval track record.
+
+    Returns `booked=True` with the confirmed slot only if booking happened
+    immediately in this call (the caller is responsible for actually
+    creating the calendar invite -- see module docstring's "Booking" gap).
+    `booked=False, pending_approval=True` means a hold was opened;
+    `ea_respond_to_approval` resolves it later. `booked=False,
+    pending_approval=False` means the negotiation isn't complete yet, or
+    is already booked/pending."""
+    owner_identity = _require_identity()
+    negotiator = _negotiator_for(owner_identity)
+    booked_slot: CandidateSlot | None = None
+
+    def on_book(_conversation_id: str, slot: CandidateSlot) -> None:
+        nonlocal booked_slot
+        booked_slot = slot
+
+    booked = negotiator.maybe_finalize(_board, conversation_id, on_book=on_book)
+    return {
+        "conversation_id": conversation_id,
+        "booked": booked,
+        "slot": _slot_to_dict(booked_slot) if booked_slot else None,
+        "pending_approval": negotiator.has_pending_booking_approval(conversation_id),
+    }
+
+
+@ea_server.tool
+async def respond_to_approval(conversation_id: str, approved: bool) -> dict[str, Any]:
+    """Resolve a pending booking approval hold opened by `ea_request_booking`
+    -- the human-in-the-loop response to an `ask_first` gate decision.
+    `approved=True` books the calendar slot (same caller responsibility as
+    `ea_request_booking` for the actual invite); `approved=False` releases
+    the ledger hold and records the rejection for the confidence system."""
+    owner_identity = _require_identity()
+    negotiator = _negotiator_for(owner_identity)
+    booked_slot: CandidateSlot | None = None
+
+    def on_book(_conversation_id: str, slot: CandidateSlot) -> None:
+        nonlocal booked_slot
+        booked_slot = slot
+
+    negotiator.respond_to_booking_approval(
+        _board, conversation_id, approved=approved, on_book=on_book
+    )
+    return {
+        "conversation_id": conversation_id,
+        "booked": booked_slot is not None,
+        "slot": _slot_to_dict(booked_slot) if booked_slot else None,
+    }
