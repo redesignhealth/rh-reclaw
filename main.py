@@ -234,10 +234,14 @@ mcp: FastMCP[Any] = FastMCP(
     "reclaw-comms-mcp",
     instructions=(
         "Permissioned, structured agent-to-agent communications layer for "
-        "Redesign Health (design in progress). Supports EA-style agents "
-        "negotiating availability across users via scoped, structured "
-        "messages — no free text. Domain tools are not yet implemented; "
-        "comms_whoami returns the authenticated caller's identity and scopes."
+        "Redesign Health. Supports EA-style agents negotiating availability "
+        "across users via scoped, structured messages — no free text. "
+        "Register with comms_register, then use comms_start_conversation / "
+        "comms_post_message to negotiate, comms_inbox / comms_get_conversation "
+        "to read, and comms_accept / comms_decline_invite / comms_invite / "
+        "comms_leave to manage membership. comms_whoami returns the "
+        "authenticated caller's identity and scopes; comms_list_agents lists "
+        "the board directory."
     ),
     auth=build_auth_provider(),
 )

@@ -33,7 +33,14 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: reclaw_comms
     ports:
-      - "5432:5432"
+      # Host port 55432, not the default 5432: this dev machine (and likely
+      # others') runs a native Postgres already bound to 5432, which would
+      # otherwise silently collide with this container's port mapping. Only
+      # the HOST side moves — the container's internal port (and therefore
+      # the `reclaw-comms-mcp` service's DATABASE_URL above, which reaches
+      # this container by service name on the Docker network) stays on the
+      # standard 5432. See README.md's "Local development" section.
+      - "55432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:

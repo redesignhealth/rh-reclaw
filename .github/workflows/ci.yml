@@ -1,8 +1,9 @@
 # Adapted from the RH Python CI template (rh-tech-guide topics/06-ci-cd.md)
 # and rh-data-platform/.github/workflows/ci.yml idioms (pinned uv, frozen
-# sync, cached venv). No Postgres service yet — the skeleton has no
-# database code; add the postgres service block when the comms domain
-# schema lands.
+# sync, cached venv). The test job runs a Postgres service (16.6, matching
+# docker-compose.yml) on the standard 5432 port — GitHub Actions runners
+# don't have the local-native-Postgres port conflict that docker-compose.yml
+# works around with an alternate host port (see README.md).
 name: CI
 
 on:
@@ -57,6 +58,22 @@ jobs:
   test:
     name: Tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16.6
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: reclaw_comms
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/reclaw_comms
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,6 +98,9 @@ jobs:
 
       - name: Install deps (dev)
         run: uv sync --frozen
+
+      - name: Alembic upgrade head
+        run: uv run alembic upgrade head
 
       - name: Pytest
         run: uv run pytest --tb=short -q

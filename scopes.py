@@ -40,10 +40,19 @@ from observability import log_auth_rejected
 #   :run    — triggers a unit of work that may write derived data
 TOOL_SCOPES: dict[str, str] = {
     # --- comms (provider: providers/comms.py, namespace="comms") ---
-    # Placeholder identity tool. Domain tools (message send/receive,
-    # negotiation state, etc.) are enrolled here as they are designed —
-    # each in the same PR that adds the tool.
     "comms_whoami": "comms:read",
+    # Reads
+    "comms_list_agents": "comms:read",
+    "comms_get_conversation": "comms:read",
+    "comms_inbox": "comms:read",
+    # Writes (mutate board/agent/conversation state)
+    "comms_register": "comms:write",
+    "comms_start_conversation": "comms:write",
+    "comms_post_message": "comms:write",
+    "comms_accept": "comms:write",
+    "comms_decline_invite": "comms:write",
+    "comms_invite": "comms:write",
+    "comms_leave": "comms:write",
 }
 
 
