@@ -49,7 +49,11 @@ def upgrade() -> None:
     # and the warning below is skipped along with it.
     if not context.is_offline_mode():
         bind = op.get_context().connection
-        assert bind is not None  # guaranteed by the is_offline_mode() check above
+        if bind is None:
+            # Guaranteed non-None by the is_offline_mode() check above; an
+            # `assert` here would be stripped under `python -O`, silently
+            # turning this into a less diagnostic AttributeError below.
+            raise RuntimeError("Expected a live DB connection in online Alembic context")
         truncated_count = bind.execute(
             sa.text("SELECT count(*) FROM agents WHERE length(display_name) > 255")
         ).scalar()

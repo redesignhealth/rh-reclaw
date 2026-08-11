@@ -99,12 +99,12 @@ class TestResolveLogLevel:
             # already installed a root handler (e.g. via configure_logging()
             # elsewhere in the session), which would make the bug this test
             # guards against invisible even if it regressed.
-            root.handlers.clear()
+            root.handlers[:] = []
             with patch.dict("os.environ", {"LOG_LEVEL": "NOT_A_REAL_LEVEL"}):
                 _resolve_log_level()
             assert root.handlers == []
         finally:
-            root.handlers = handlers_before
+            root.handlers[:] = handlers_before
 
     def test_configure_logging_applies_debug_level_to_structlog(self) -> None:
         """LOG_LEVEL=DEBUG must reach structlog's filtering wrapper, not just
