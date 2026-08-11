@@ -31,6 +31,13 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# reclaw-ea/ is a sibling project with its own pyproject.toml, deps, and
+# lint/type config -- it is not part of this project and `uv sync --frozen`
+# here never installs its dependencies (scheduler-mcp etc.), so scanning it
+# with this project's own tooling either double-lints it against the wrong
+# rules or fails outright on unresolved imports. See reclaw-ea/README.md's
+# "Linting and type-checking" section for how to check it on its own terms.
+exclude = ["reclaw-ea"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -46,7 +53,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 strict = true
 python_version = "3.12"
-exclude = ["tests/"]
+# "tests/" excludes this project's OWN test suite from strict mode;
+# "reclaw-ea/" excludes the sibling project entirely -- see the matching
+# comment on [tool.ruff] above.
+exclude = ["tests/", "reclaw-ea/"]
 
 [[tool.mypy.overrides]]
 module = ["key_value.*"]
