@@ -114,7 +114,7 @@ async def _column_max_length(engine: AsyncEngine, table: str, column: str) -> in
             ),
             {"table": table, "column": column},
         )
-        return result.scalar_one()
+        return result.scalar_one_or_none()
 
 
 async def _indexes(engine: AsyncEngine, table: str) -> set[str]:
@@ -159,6 +159,24 @@ class TestSchema:
         assert cols["display_name"] == "character varying"
         max_length = await _column_max_length(engine, "agents", "display_name")
         assert max_length == MAX_DISPLAY_NAME_LENGTH
+
+    async def test_agents_accepted_types_check_constraint(self, engine: AsyncEngine) -> None:
+        # DB-level backstop (migrations/versions/18f2d7735523...) capping
+        # agents.accepted_types at 20 entries via cardinality(), not
+        # array_length() — cardinality() never returns NULL for an empty
+        # array, so the constraint can't be silently satisfied for that edge
+        # case the way array_length() would.
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = 'agents'::regclass "
+                    "AND conname = 'ck_agents_accepted_types_max'"
+                )
+            )
+            constraint_def = result.scalar_one_or_none()
+        assert constraint_def is not None, "ck_agents_accepted_types_max constraint missing"
+        assert "cardinality" in constraint_def
 
     async def test_conversations_columns(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "conversations")

@@ -52,6 +52,10 @@ import structlog
 
 SERVICE_NAME = "reclaw-comms-mcp"
 
+# Fallback logger for observability helpers' own failure paths, and for
+# ``_resolve_log_level`` (structlog isn't configured yet at that point).
+_fallback_logger = logging.getLogger(__name__)
+
 
 def _resolve_log_level() -> int:
     """Resolve the numeric logging level from ``LOG_LEVEL`` (default ``INFO``).
@@ -111,8 +115,6 @@ def configure_logging() -> None:
 # emits the positional message under the ``event`` key, matching the fleet's
 # ``$.event = "<name>"`` Metric Filter contract.
 obs_log = structlog.get_logger(service=SERVICE_NAME)
-
-_fallback_logger = logging.getLogger(__name__)
 
 
 def hash_user(email: str) -> str:

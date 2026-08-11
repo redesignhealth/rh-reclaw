@@ -1,16 +1,19 @@
 """Tests for identity.py's rh-auth-detection + email-resolution helpers.
 
-Unit-tests ``try_resolve_email`` / ``_is_rh_auth_token`` directly against
-constructed claims dicts (no DB, no MCP tool stack) — mirrors
-``tests/test_scopes.py``'s ``TestIsInteractiveToken`` pattern, which is the
-scopes.py counterpart to the ``iss is None`` fail-closed guard tested here.
+Unit-tests ``try_resolve_email`` directly against constructed claims dicts
+(no DB, no MCP tool stack). Exercises the ``_is_rh_auth_token`` fail-closed
+behavior only indirectly, through ``try_resolve_email``'s observable
+behavior (which claim it resolves identity from) rather than by calling the
+private helper directly — mirrors ``tests/test_scopes.py``'s
+``TestIsInteractiveToken`` pattern, which is the scopes.py counterpart to
+the ``iss is None`` fail-closed guard tested here.
 """
 
 from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from identity import RH_AUTH_ISSUER, _is_rh_auth_token, try_resolve_email, validate_sub_shape
+from identity import RH_AUTH_ISSUER, try_resolve_email, validate_sub_shape
 
 
 def _fake_token(claims: dict[str, object]) -> MagicMock:
@@ -18,23 +21,6 @@ def _fake_token(claims: dict[str, object]) -> MagicMock:
     token = MagicMock()
     token.claims = claims
     return token
-
-
-class TestIsRhAuthToken:
-    def test_rh_auth_issuer_is_rh_auth(self) -> None:
-        assert _is_rh_auth_token({"iss": RH_AUTH_ISSUER, "sub": "bot-1"}) is True
-
-    def test_okta_issuer_is_not_rh_auth(self) -> None:
-        assert _is_rh_auth_token({"iss": "https://redesignhealth.okta.com/oauth2/default"}) is False
-
-    def test_missing_iss_claim_is_treated_as_rh_auth(self) -> None:
-        # Fail-closed: an absent issuer must not fall through to the
-        # "trust email/preferred_username" branch by default.
-        assert _is_rh_auth_token({"sub": "bot-1"}) is True
-
-    def test_none_iss_claim_is_treated_as_rh_auth(self) -> None:
-        # Same guard, explicit `iss: None` rather than an absent key.
-        assert _is_rh_auth_token({"iss": None, "sub": "bot-1"}) is True
 
 
 class TestTryResolveEmail:
@@ -55,6 +41,15 @@ class TestTryResolveEmail:
         # plus a forged `email` claim. Must resolve to the sub-derived
         # identity, never the forged email.
         token = _fake_token({"sub": "svc-account-1", "email": "forged@redesignhealth.com"})
+        assert try_resolve_email(token) == "svc-account-1"
+
+    def test_explicit_none_iss_with_forged_email_resolves_via_sub(self) -> None:
+        # Same fail-closed guard as the missing-iss case above, but with an
+        # explicit `iss: None` claim rather than an absent key -- must not
+        # fall through to trusting the forged `email` claim.
+        token = _fake_token(
+            {"iss": None, "sub": "svc-account-1", "email": "forged@redesignhealth.com"}
+        )
         assert try_resolve_email(token) == "svc-account-1"
 
     def test_interactive_token_trusts_email_claim(self) -> None:

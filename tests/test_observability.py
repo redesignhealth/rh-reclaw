@@ -92,11 +92,13 @@ class TestResolveLogLevel:
         the module-scoped ``_fallback_logger`` instead must not trigger that
         side effect, even with no patch around the warning call itself."""
         root = logging.getLogger()
-        had_handlers_before = bool(root.handlers)
-        with patch.dict("os.environ", {"LOG_LEVEL": "NOT_A_REAL_LEVEL"}):
-            _resolve_log_level()
-        if not had_handlers_before:
-            assert not root.handlers
+        handlers_before = list(root.handlers)
+        try:
+            with patch.dict("os.environ", {"LOG_LEVEL": "NOT_A_REAL_LEVEL"}):
+                _resolve_log_level()
+            assert root.handlers == handlers_before
+        finally:
+            root.handlers = handlers_before
 
     def test_configure_logging_applies_debug_level_to_structlog(self) -> None:
         """LOG_LEVEL=DEBUG must reach structlog's filtering wrapper, not just

@@ -118,7 +118,10 @@ class OktaOIDCProxy(OIDCProxy):
             # provider already validated the token during the auth flow.
             payload_b64 = id_token.split(".")[1]
             payload_b64 += "=" * (-len(payload_b64) % 4)  # base64 padding
-            payload: dict[str, Any] = json.loads(base64.urlsafe_b64decode(payload_b64))
+            payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+            if not isinstance(payload, dict):
+                logger.error("Rejecting Okta id_token with non-object payload")
+                return None
             claims = {k: payload[k] for k in _UPSTREAM_CLAIM_KEYS if k in payload}
             return claims or None
         except (IndexError, json.JSONDecodeError, ValueError):
