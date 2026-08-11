@@ -20,6 +20,8 @@ from fastmcp.exceptions import ResourceError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
 
 from auth import build_auth_provider
 from db import database_url
@@ -255,6 +257,17 @@ mcp.add_middleware(ObservabilityMiddleware())
 mcp.add_middleware(ScopeEnforcementMiddleware())
 
 mcp.mount(comms_server, namespace="comms")
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> PlainTextResponse:
+    """Unauthenticated liveness check for the Dockerfile HEALTHCHECK / ECS
+    container healthCheck (both hit this path — see Dockerfile and
+    infrastructure/modules/mcp-server's health_check_command). custom_route
+    registers a plain Starlette route outside MultiAuth, so this must not
+    return anything sensitive.
+    """
+    return PlainTextResponse("ok")
 
 
 if __name__ == "__main__":
