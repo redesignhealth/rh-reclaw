@@ -44,6 +44,7 @@ once mutual exclusivity is enforced by the validator.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, Literal
 from uuid import UUID
 
@@ -234,6 +235,11 @@ _TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION = frozenset(
 )
 
 
+def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
+    if len(set(values)) != len(values):
+        raise ValueError(f"{field_name} must not contain duplicates")
+
+
 class TaskSpecV1(_StrictModel):
     """internal.coordination / task_spec / v1 — the ``tasks.payload`` shape (TECH-5094).
 
@@ -268,15 +274,9 @@ class TaskSpecV1(_StrictModel):
     constraints: list[_CONSTRAINTS] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
-    def _no_duplicate_constraints(self) -> TaskSpecV1:
-        if len(set(self.constraints)) != len(self.constraints):
-            raise ValueError("constraints must not contain duplicates")
-        return self
-
-    @model_validator(mode="after")
-    def _no_duplicate_counterparty_agent_ids(self) -> TaskSpecV1:
-        if len(set(self.counterparty_agent_ids)) != len(self.counterparty_agent_ids):
-            raise ValueError("counterparty_agent_ids must not contain duplicates")
+    def _no_duplicates(self) -> TaskSpecV1:
+        _check_no_duplicates(self.constraints, "constraints")
+        _check_no_duplicates(self.counterparty_agent_ids, "counterparty_agent_ids")
         return self
 
     @model_validator(mode="after")

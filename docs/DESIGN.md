@@ -103,7 +103,7 @@ not a permission concept.
 
 ## 5. Data model (Postgres)
 
-Five tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
+Six tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
 
 ```
 agents          id, sub UNIQUE, owner_sub, owner_email, display_name,
@@ -115,7 +115,9 @@ participants    (conversation_id, agent_id) UNIQUE, role(owner|member),
                 joined_at (set on accept), last_read_seq
 messages        id, conversation_id, seq (UNIQUE per conversation, server-assigned,
                 race-safe), sender_id, type, schema_version, payload jsonb, created_at
-audit_log       id, at, actor_sub, action, agent_id/conversation_id/message_id,
+tasks           id, created_by, assignee_id, status(open|done|declined),
+                schema_version, payload jsonb, timestamps   -- §9, mutable status
+audit_log       id, at, actor_sub, action, agent_id/conversation_id/message_id/task_id,
                 detail jsonb   -- every mutation AND every denial
 ```
 

@@ -4,6 +4,20 @@ Revision ID: 6d2a8e63e469
 Revises: 18f2d7735523
 Create Date: 2026-08-12 00:09:33.389567
 
+NOTE on in-place amendment (mirrors migrations/versions/18f2d7735523's own
+note): this revision has been authored and iterated on entirely within
+this single unmerged PR (reclaw-comms-mcp PR #9, TECH-5094) -- it does not
+exist on `main`, and it has never been applied to any persistent or shared
+database. CI runs `alembic upgrade head` against a fresh, ephemeral
+Postgres service container on every run; local review testing always ran
+full `downgrade base` -> `upgrade head` cycles against the latest file
+content. In-place amendment during code review (e.g. the `idx_audit_log_
+task_id` index added in Argus round 2, rather than splitting it into a new
+revision) is therefore safe -- there is no environment where this
+revision is recorded as already-applied without that index. Once this PR
+merges, treat this file as frozen: any further schema change requires a
+NEW Alembic revision, never an edit to this one.
+
 """
 
 from __future__ import annotations

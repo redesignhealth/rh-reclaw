@@ -1504,12 +1504,20 @@ def may_assign(creator_owners: set[str], assignee_owners: set[str]) -> bool:
     return not creator_owners.isdisjoint(assignee_owners)
 
 
-def task_public(
+def _task_public(
     task: Task, *, caller_agent_id: uuid.UUID, created_by_sub: str, assignee_sub: str
 ) -> dict[str, Any]:
-    """The one canonical AXI shape for a task — used by both ``add_task`` (via
-    ``get_task_public``) and ``get_tasks``, so the same resource never comes
-    back with two different shapes depending on which tool returned it."""
+    """The one canonical AXI shape for a task — used by both ``add_task`` and
+    ``get_tasks``, so the same resource never comes back with two different
+    shapes depending on which tool returned it. Private/unauthorized by
+    design (TECH-5094 Argus round 2, security/B1): performs no visibility
+    check of its own, so every caller MUST have already established that
+    ``caller_agent_id`` may see ``task`` before calling this. Never export
+    this at module level — a future caller reaching for a "lower-level"
+    export could otherwise bypass whatever authorization its call sites
+    are relying on today (``add_task``'s caller is trivially the task's own
+    creator; ``get_tasks``'s ``role_filter`` already scopes its query to
+    rows the caller may see)."""
     return {
         "task_id": str(task.id),
         "role": "created" if task.created_by == caller_agent_id else "assigned",
@@ -1556,8 +1564,15 @@ async def add_task(
     task: dict[str, Any],
     ownership_client: OwnershipClient,
     schema_version: int = 1,
-) -> Task:
+) -> dict[str, Any]:
     """Create a task assigned from ``creator_agent_id`` to ``assignee_agent_id``.
+
+    Returns the same canonical AXI shape ``get_tasks`` returns for this
+    resource (``task_id``, ``role``, ``status``, ``created_by``,
+    ``created_by_sub``, ``assignee_agent_id``, ``assignee_sub``,
+    ``payload``, ``schema_version``, ``created_at``, ``updated_at``) —
+    ``role`` is always ``"created"`` here, since the caller is the task's
+    own creator.
 
     Bidirectional (DESIGN.md/TECH-5094 §5): either party in an admitted
     pair may call this — a Chief-of-Staff assigning work down, or an EA
@@ -1603,7 +1618,18 @@ async def add_task(
             actor_sub=actor_sub,
             action="denied.ownership_unverified",
             agent_id=creator.id,
-            detail={"assignee_agent_id": str(assignee.id), "error": repr(exc)},
+            detail={
+                "assignee_agent_id": str(assignee.id),
+                # type(exc).__name__ + a truncated str(exc), never repr(exc)
+                # (TECH-5094 Argus round 2, security): AgentTableOwnershipClient's
+                # LookupError is benign today, but a future HTTP-backed
+                # OwnershipClient's exceptions routinely embed Authorization
+                # headers, full request URLs with token query params, and raw
+                # response bodies in repr() -- those must never land in the
+                # append-only audit_log.
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:200],
+            },
         )
     creator_owners = set(creator_owner_info.get("owners") or [])
     assignee_owners = set(assignee_owner_info.get("owners") or [])
@@ -1678,38 +1704,18 @@ async def add_task(
         detail={"assignee_agent_id": str(assignee.id)},
     )
     await session.commit()
-    return new_task
-
-
-async def get_task_public(
-    session: AsyncSession, *, task_id: uuid.UUID, caller_agent_id: uuid.UUID
-) -> dict[str, Any]:
-    """``task_public``'s AXI shape for a single task, by id.
-
-    Exists so ``comms_add_task`` can return the exact same shape
-    ``comms_get_tasks`` does for the same resource, rather than hand-
-    building a narrower response (TECH-5094 Argus round 1, api contract/S5).
-    Callers only ever invoke this with a ``task_id`` they just created or
-    otherwise already know is visible to ``caller_agent_id`` — no
-    membership/visibility check here (mirroring ``task_public`` itself,
-    which also assumes its caller already authorized the read).
-    """
-    creator_agent = aliased(Agent)
-    assignee_agent = aliased(Agent)
-    row = (
-        await session.execute(
-            select(Task, creator_agent.sub, assignee_agent.sub)
-            .join(creator_agent, creator_agent.id == Task.created_by)
-            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
-            .where(Task.id == task_id)
-        )
-    ).one()
-    task, created_by_sub, assignee_sub = row
-    return task_public(
-        task,
-        caller_agent_id=caller_agent_id,
-        created_by_sub=created_by_sub,
-        assignee_sub=assignee_sub,
+    # Build the same canonical AXI shape get_tasks returns for this
+    # resource (TECH-5094 Argus round 1, api contract/S5) directly from
+    # the creator/assignee Agent rows already loaded above — no second
+    # query, no second service call from the tools layer (round 2,
+    # architecture: providers/comms.py must call exactly one service.py
+    # function per tool), and no separately-exported, unauthorized
+    # formatter for a caller to reach for by mistake (round 2, security/
+    # B1's IDOR fix supersedes the earlier get_task_public seam entirely
+    # rather than patching it). The caller is trivially the task's own
+    # creator here, so no additional visibility check is needed.
+    return _task_public(
+        new_task, caller_agent_id=creator.id, created_by_sub=creator.sub, assignee_sub=assignee.sub
     )
 
 
@@ -1775,7 +1781,7 @@ async def get_tasks(
     total_count = (await session.execute(count_stmt)).scalar_one()
 
     tasks = [
-        task_public(
+        _task_public(
             t,
             caller_agent_id=caller_agent_id,
             created_by_sub=created_by_sub,
@@ -1807,7 +1813,6 @@ __all__ = [
     "decline_invite",
     "get_agent_by_sub",
     "get_conversation",
-    "get_task_public",
     "get_tasks",
     "inbox",
     "invite",
@@ -1819,5 +1824,4 @@ __all__ = [
     "post_message",
     "register_agent",
     "start_conversation",
-    "task_public",
 ]

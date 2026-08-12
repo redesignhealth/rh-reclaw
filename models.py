@@ -227,6 +227,7 @@ class AuditLog(Base):
     __table_args__ = (
         Index("idx_audit_log_conversation_id", "conversation_id"),
         Index("idx_audit_log_at", "at"),
+        Index("idx_audit_log_task_id", "task_id"),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)

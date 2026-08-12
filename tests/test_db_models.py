@@ -300,6 +300,7 @@ class TestSchema:
         audit_indexes = await _indexes(engine, "audit_log")
         assert "idx_audit_log_conversation_id" in audit_indexes
         assert "idx_audit_log_at" in audit_indexes
+        assert "idx_audit_log_task_id" in audit_indexes
 
         message_indexes = await _indexes(engine, "messages")
         assert "idx_messages_conversation_id_sender_id_created_at" in message_indexes

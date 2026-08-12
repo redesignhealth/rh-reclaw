@@ -574,7 +574,11 @@ async def add_task(
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)
         async with _map_service_errors():
-            new_task = await service.add_task(
+            # service.add_task returns the same canonical AXI shape
+            # comms_get_tasks does for this resource (TECH-5094 Argus round
+            # 1, api contract/S5) -- one session, one service.py function
+            # call, per this file's module-level invariant.
+            return await service.add_task(
                 session,
                 actor_sub=sub,
                 creator_agent_id=caller.id,
@@ -582,12 +586,6 @@ async def add_task(
                 task=task,
                 ownership_client=service.AgentTableOwnershipClient(session),
                 schema_version=schema_version,
-            )
-            # Same canonical shape comms_get_tasks returns for this resource
-            # (TECH-5094 Argus round 1, api contract/S5) -- never a
-            # narrower, hand-built dict.
-            return await service.get_task_public(
-                session, task_id=new_task.id, caller_agent_id=caller.id
             )
 
 

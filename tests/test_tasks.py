@@ -236,10 +236,41 @@ class TestAddTaskAdmission:
             ownership_client=client,
         )
 
-        assert task.status == "open"
-        assert task.created_by == creator.id
-        assert task.assignee_id == assignee.id
-        assert "task.create" in await _audit_actions(session, task.id)
+        assert task["status"] == "open"
+        assert task["role"] == "created"
+        assert task["created_by"] == str(creator.id)
+        assert task["assignee_agent_id"] == str(assignee.id)
+        assert "task.create" in await _audit_actions(session, uuid.UUID(task["task_id"]))
+
+    async def test_owner_sub_freeze_prevents_forged_reregistration_admission(
+        self, session: AsyncSession
+    ) -> None:
+        """End-to-end regression for the B1 security fix (TECH-5094 Argus
+        round 1/2): re-registering under a different (forged) owner_sub
+        must NOT change the persisted owner_sub, and must NOT grant
+        add_task admission into the impersonated owner's agents. Uses the
+        real AgentTableOwnershipClient (not a fake) since this is exactly
+        the seam the vulnerability lived in."""
+        victim = await _register(session, "victim-agent", owner_sub="alice")
+        attacker = await _register(session, "attacker-agent", owner_sub="mallory")
+
+        # Attacker re-registers under alice's owner_sub, attempting to
+        # forge admission into victim's tasks.
+        reregistered = await _register(session, "attacker-agent", owner_sub="alice")
+        assert reregistered.id == attacker.id
+        assert reregistered.owner_sub == "mallory"  # frozen, NOT overwritten to "alice"
+
+        client = AgentTableOwnershipClient(session)
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await add_task(
+                session,
+                actor_sub="attacker-agent",
+                creator_agent_id=attacker.id,
+                assignee_agent_id=victim.id,
+                task=_task_spec(),
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.not_same_owner"
 
     async def test_different_owner_agents_denied(self, session: AsyncSession) -> None:
         creator = await _register(session, "cos", owner_sub="dan-sub")
@@ -293,7 +324,7 @@ class TestAddTaskAdmission:
             task=_task_spec(),
             ownership_client=client,
         )
-        assert task.status == "open"
+        assert task["status"] == "open"
 
     async def test_ownership_lookup_failure_fails_closed(self, session: AsyncSession) -> None:
         creator = await _register(session, "cos", owner_sub="dan-sub")
@@ -382,7 +413,7 @@ class TestAddTaskPayloadValidation:
             task={"action": "report_status"},
             ownership_client=client,
         )
-        assert task.payload["action"] == "report_status"
+        assert task["payload"]["action"] == "report_status"
 
     async def test_duplicate_constraints_rejected(self, session: AsyncSession) -> None:
         creator, assignee, client = await self._pair(session)
@@ -453,7 +484,7 @@ class TestAddTaskPayloadValidation:
             task=_task_spec(related_conversation_id=str(conversation.id)),
             ownership_client=client,
         )
-        assert task.payload["related_conversation_id"] == str(conversation.id)
+        assert task["payload"]["related_conversation_id"] == str(conversation.id)
 
     async def test_related_conversation_id_rejects_left_participant(
         self, session: AsyncSession

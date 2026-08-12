@@ -823,6 +823,18 @@ class TestTasks:
         assert result["status"] == "open"
         assert result["created_by"] == creator["agent_id"]
         assert result["assignee_agent_id"] == assignee["agent_id"]
+        assert result["role"] == "created"
+        assert result["created_by_sub"] == "bond-007"
+        assert result["assignee_sub"] == "pepper-potts"
+        assert result["updated_at"] is not None
+
+        assignee_view = await _call(
+            main,
+            test_session_factory,
+            _token("pepper-potts", owner_sub="owner-dan@example.com"),
+            "comms_get_tasks",
+        )
+        assert assignee_view["tasks"][0]["role"] == "assigned"
 
     async def test_different_owner_agents_uniformly_denied(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
@@ -911,6 +923,66 @@ class TestTasks:
                     "assignee_agent_id": assignee["agent_id"],
                     "task": {"action": "report_status", "notes": "call me back"},
                 },
+            )
+
+    async def test_get_tasks_cursor_pages_through_tool_layer(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
+        )
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        for _ in range(3):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_add_task",
+                {
+                    "assignee_agent_id": assignee["agent_id"],
+                    "task": {"action": "report_status"},
+                },
+            )
+
+        page1 = await _call(
+            main, test_session_factory, token, "comms_get_tasks", {"limit": 2}
+        )
+        assert len(page1["tasks"]) == 2
+        assert page1["has_more"] is True
+        assert page1["next_cursor"] is not None
+
+        page2 = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_get_tasks",
+            {"limit": 2, "cursor": page1["next_cursor"]},
+        )
+        assert len(page2["tasks"]) == 1
+        assert page2["has_more"] is False
+
+        seen_ids = {t["task_id"] for t in page1["tasks"] + page2["tasks"]}
+        assert len(seen_ids) == 3
+
+    async def test_get_tasks_malformed_cursor_maps_to_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
+        )
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_get_tasks",
+                {"cursor": "not-a-valid-cursor"},
             )
 
 
