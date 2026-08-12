@@ -492,6 +492,12 @@ def test_sweep_expired_booking_approvals_releases_ledger_and_clears_pending():
 
     assert released == [cid]
     assert cid not in alice._pending_booking_approvals
+    # Argus round 2 finding (reclaw-ea-mcp PR #6): this pop-site (expiry)
+    # was the only one of the three not also verified through the public
+    # accessor -- approve/reject are covered in
+    # test_has_pending_booking_approval_public_accessor and
+    # test_has_pending_booking_approval_false_after_rejection.
+    assert alice.has_pending_booking_approval(cid) is False
     assert alice.ledger.get(owner="alice@example.com", slot_start_utc=T0) is None
 
     # A fresh maybe_finalize call is now free to re-request the gate.
@@ -681,3 +687,64 @@ def test_sweep_expired_booking_approvals_survives_ledger_error_and_retries_next_
     assert second_sweep == [cid]
     assert cid not in alice._pending_booking_approvals
     assert calls["n"] == 2
+
+
+def test_has_pending_booking_approval_public_accessor():
+    """`has_pending_booking_approval` mirrors `_pending_booking_approvals`
+    membership without exposing the private dict -- added for reclaw-ea-mcp's
+    `ea_request_booking` tool (TECH-5065), which needs this without reaching
+    into `Negotiator` internals (the same pattern TECH-5077 flags for this
+    repo's own tests)."""
+    board = FakeBoard(clock=lambda: T0)
+    alice = make_negotiator("alice@example.com")
+    bob = make_negotiator("bob@example.com")
+    request = AvailabilityRequest(
+        window=CandidateSlot(start=T0, end=T1),
+        duration_minutes=30,
+        modality=Modality.VIDEO,
+        priority=3,
+    )
+    cid = alice.open_negotiation(
+        board, to_agent_identity="bob@example.com", request=request
+    )
+    assert alice.has_pending_booking_approval(cid) is False
+
+    bob.react(board, cid, my_candidates=[slot_ctx(T0, T1)], rules=[])
+    alice.react(board, cid, my_candidates=[slot_ctx(T0, T1)], rules=[])
+    bob.react(board, cid, my_candidates=[slot_ctx(T0, T1)], rules=[])
+    alice.maybe_finalize(board, cid, on_book=lambda c, s: None)
+
+    assert alice.has_pending_booking_approval(cid) is True
+    assert cid in alice._pending_booking_approvals  # accessor agrees with internal state
+
+    # Argus round 1 finding (reclaw-ea-mcp PR #6): the original version of
+    # this test only exercised False->True; it never verified the accessor
+    # flips back to False once the hold is actually resolved. Three
+    # pop-sites clear `_pending_booking_approvals` (approve, reject,
+    # expiry) -- this covers the approve path.
+    alice.respond_to_booking_approval(board, cid, approved=True, on_book=lambda c, s: None)
+    assert alice.has_pending_booking_approval(cid) is False
+
+
+def test_has_pending_booking_approval_false_after_rejection():
+    """Companion to the accessor test above -- the reject pop-site."""
+    board = FakeBoard(clock=lambda: T0)
+    alice = make_negotiator("alice-reject@example.com")
+    bob = make_negotiator("bob-reject@example.com")
+    request = AvailabilityRequest(
+        window=CandidateSlot(start=T0, end=T1),
+        duration_minutes=30,
+        modality=Modality.VIDEO,
+        priority=3,
+    )
+    cid = alice.open_negotiation(
+        board, to_agent_identity="bob-reject@example.com", request=request
+    )
+    bob.react(board, cid, my_candidates=[slot_ctx(T0, T1)], rules=[])
+    alice.react(board, cid, my_candidates=[slot_ctx(T0, T1)], rules=[])
+    bob.react(board, cid, my_candidates=[slot_ctx(T0, T1)], rules=[])
+    alice.maybe_finalize(board, cid, on_book=lambda c, s: None)
+    assert alice.has_pending_booking_approval(cid) is True
+
+    alice.respond_to_booking_approval(board, cid, approved=False, on_book=lambda c, s: None)
+    assert alice.has_pending_booking_approval(cid) is False

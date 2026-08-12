@@ -913,3 +913,12 @@ class Negotiator:
 
     def state_for(self, conversation_id: str) -> NegotiationRoundState | None:
         return self._negotiations.get(conversation_id)
+
+    def has_pending_booking_approval(self, conversation_id: str) -> bool:
+        """Whether `conversation_id` has an open booking-approval hold from
+        `maybe_finalize`, awaiting `respond_to_booking_approval`. Public
+        accessor so callers (e.g. reclaw-ea-mcp's `ea_request_booking`
+        tool) don't need to reach into `_pending_booking_approvals`
+        directly -- see TECH-5077, which flagged the equivalent pattern in
+        this repo's own tests."""
+        return conversation_id in self._pending_booking_approvals
