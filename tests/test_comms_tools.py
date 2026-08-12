@@ -361,6 +361,47 @@ class TestRegister:
                 {"display_name": "Prober", "accepted_types": ["__probe_invalid_type__"]},
             )
 
+    async def test_register_empty_accepted_types_generic_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Boundary-level counterpart to
+        ``test_service.test_empty_accepted_types_raises_plain_value_error``:
+        an empty ``accepted_types`` list is a bare ``ValueError`` at the
+        service layer, which ``_map_service_errors`` maps to the generic
+        ``invalid_request`` ``ToolError`` shape (not the specific
+        ``UnknownConversationTypeError`` message) at the MCP boundary."""
+        token = _token("agent-empty-types-boundary")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {"display_name": "Empty Types", "accepted_types": []},
+            )
+
+    async def test_register_oversized_accepted_types_generic_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Boundary-level counterpart to
+        ``test_service.test_oversized_accepted_types_of_unknown_values_still_hits_count_cap``:
+        21 entries hits the count cap (a bare ``ValueError``) before any
+        entry is checked against ``CONVERSATION_TYPES``, so the MCP layer
+        sees the generic ``invalid_request`` shape, not the specific
+        unknown-type error."""
+        token = _token("agent-oversized-types-boundary")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {
+                    "display_name": "Oversized Types",
+                    "accepted_types": [f"bogus-{i}" for i in range(21)],
+                },
+            )
+
 
 # --- AXI empty-state / shape spot checks --------------------------------------------
 
