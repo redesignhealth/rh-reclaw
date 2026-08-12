@@ -54,11 +54,12 @@ class TestExtractUpstreamClaims:
         mock_log.assert_called_once_with("okta_id_token_rejected", reason="non_object_header")
 
     async def test_non_object_payload_rejected(self, proxy: OktaOIDCProxy) -> None:
-        """Argus round 4 finding: this was the one of five security-event
-        branches in `_extract_upstream_claims` this test file (added
-        specifically to close that coverage gap) still missed -- a
-        well-formed header paired with a payload that decodes to valid
-        JSON that isn't a dict (e.g. a JSON array)."""
+        """Argus round 4 finding: this was the one of four
+        `log_security_event` call sites in `_extract_upstream_claims` this
+        test file (added specifically to close that coverage gap) still
+        missed -- a well-formed header paired with a payload that decodes
+        to valid JSON that isn't a dict (e.g. a JSON array). (Argus round
+        5 finding: this docstring previously said "five".)"""
         header_b64 = (
             base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).rstrip(b"=").decode()
         )

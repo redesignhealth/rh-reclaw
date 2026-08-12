@@ -195,10 +195,15 @@ class TestCrossOwnerIsolation:
         human-in-the-loop booking gate). Mallory has no pending approval
         for a conversation she was never part of, so `has_pending_booking_
         approval` returns False and `ToolError` is raised directly at that
-        pre-check (Argus round 4 finding: an earlier version of this
-        docstring described a since-removed `except ValueError` block) --
-        not the conversation-not-found path -- both are safe (neither
-        reveals board state), just via different messages."""
+        pre-check -- not the conversation-not-found path -- both are safe
+        (neither reveals board state), just via different messages. (Argus
+        round 5 finding: an earlier version of this docstring called the
+        tool's `except ValueError` block "since-removed" -- round 4
+        re-added it, for a different, narrower case: the race where
+        `sweep_expired_booking_approvals` runs between this pre-check and
+        the actual call. That branch is exercised by
+        `test_race_between_precheck_and_call_is_denied_safely` below, not
+        this test.)"""
         bob = _token("bob5-agent")
         mallory = _token("mallory5-agent")
         window = _window()
@@ -217,10 +222,79 @@ class TestCrossOwnerIsolation:
         )
         cid = opened["conversation_id"]
 
-        with pytest.raises(ToolError, match="no pending booking approval"):
+        with (
+            patch("providers.ea.log_security_event") as mock_log,
+            pytest.raises(ToolError, match="no pending booking approval"),
+        ):
             await _call(
                 main, mallory, "ea_respond_to_approval", {"conversation_id": cid, "approved": True}
             )
+        # Argus round 5 finding: nothing previously asserted that the
+        # no_pending denial path actually emits an audit event -- a
+        # silent removal of that log_security_event call would not have
+        # failed this test.
+        mock_log.assert_called_once_with(
+            "booking_approval_call_denied",
+            operation="ea_respond_to_approval",
+            reason="no_pending",
+            owner="mallory5-agent",
+        )
+
+    async def test_race_between_precheck_and_call_is_denied_safely(self, main: Any) -> None:
+        """Argus round 5 finding: the race branch added in round 4 (
+        `except ValueError` after the `has_pending_booking_approval`
+        pre-check passes but `respond_to_booking_approval` itself still
+        raises -- e.g. another request's `sweep_expired_booking_approvals`
+        flips the hold to expired in between) had no direct test."""
+        alice = _token("alice6-agent")
+        bob = _token("bob6-agent")
+        window = _window()
+
+        opened = await _call(
+            main,
+            alice,
+            "ea_negotiate",
+            {
+                "to_agent_identity": "bob6-agent",
+                "window": window,
+                "duration_minutes": 30,
+                "modality": "video",
+                "priority": 3,
+            },
+        )
+        cid = opened["conversation_id"]
+        for owner in (bob, alice, bob):
+            await _call(
+                main,
+                owner,
+                "ea_react_to_conversation",
+                {"conversation_id": cid, "my_candidates": [_slot_context(window)]},
+            )
+        await _call(main, alice, "ea_request_booking", {"conversation_id": cid})
+
+        import providers.ea as ea
+
+        negotiator = ea._negotiator_for("alice6-agent")
+        with (
+            patch.object(
+                negotiator,
+                "respond_to_booking_approval",
+                side_effect=ValueError("no pending booking approval for conversation (raced)"),
+            ),
+            patch("providers.ea.log_security_event") as mock_log,
+            pytest.raises(ToolError, match="no pending booking approval"),
+        ):
+            await _call(
+                main, alice, "ea_respond_to_approval", {"conversation_id": cid, "approved": True}
+            )
+        mock_log.assert_called_once_with(
+            "booking_approval_call_denied",
+            operation="ea_respond_to_approval",
+            reason="lapsed_between_precheck_and_call",
+            owner="alice6-agent",
+            error_type="ValueError",
+            exc_info=True,
+        )
 
     async def test_unknown_conversation_id_and_not_a_participant_raise_identically(
         self, main: Any

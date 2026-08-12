@@ -468,11 +468,15 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
     already resolved, never requested, or swept as expired (TECH-5076),
     AND the rarer case where completion itself has lapsed (the negotiation
     is no longer fully confirmed) between this call starting and
-    `respond_to_booking_approval` actually running. All of these reduce to
+    `respond_to_booking_approval` actually running. All of THESE reduce to
     the same message because all of them are keyed off THIS caller's own
     local state (`has_pending_booking_approval`, or a race against it),
     never board state -- none can be used to probe whether some other
-    conversation_id exists."""
+    conversation_id exists. (Argus round 5 finding, clarified: this does
+    NOT apply to `_CONVERSATION_ERRORS` below, which uses the separate
+    uniform conversation-not-found message -- reachable in principle from
+    the same call, though in practice `has_pending_booking_approval`
+    already implies participation.)"""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -505,8 +509,17 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
     # those two known, non-leaking conditions from THIS exact call, not an
     # unrelated bug several layers down being silently reclassified.
     if not negotiator.has_pending_booking_approval(conversation_id):
+        # Argus round 5 finding: renamed from "booking_approval_rejected"
+        # -- that name collides with the legitimate domain concept of an
+        # owner rejecting a booking via `approved=False`, which would make
+        # a CloudWatch Metric Filter on this event name ambiguous between
+        # "this tool call was denied" and "the owner said no." Also adds
+        # `owner` (already in scope) for incident correlation.
         log_security_event(
-            "booking_approval_rejected", operation="ea_respond_to_approval", reason="no_pending"
+            "booking_approval_call_denied",
+            operation="ea_respond_to_approval",
+            reason="no_pending",
+            owner=owner_identity,
         )
         raise ToolError("no pending booking approval for this conversation")
 
@@ -516,11 +529,18 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         )
     except _CONVERSATION_ERRORS as exc:
         raise _tool_error("ea_respond_to_approval", exc) from exc
-    except ValueError:
+    except ValueError as exc:
+        # Argus round 5 finding: bind the exception and log error_type/
+        # exc_info -- the prior version discarded the original ValueError
+        # entirely, so the two known raise sites this branch can reach
+        # (orchestrator.py:827,848) were indistinguishable in the logs.
         log_security_event(
-            "booking_approval_rejected",
+            "booking_approval_call_denied",
             operation="ea_respond_to_approval",
             reason="lapsed_between_precheck_and_call",
+            owner=owner_identity,
+            error_type=type(exc).__name__,
+            exc_info=True,
         )
         raise ToolError("no pending booking approval for this conversation") from None
     return {

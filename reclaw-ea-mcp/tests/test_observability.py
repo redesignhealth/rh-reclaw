@@ -4,6 +4,7 @@ Argus round 1/2 fixes, previously untested (Argus round 2 finding)."""
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import patch
 
 import pytest
@@ -41,9 +42,20 @@ def test_exc_info_renders_a_real_traceback_through_the_full_pipeline(
     structlog's process-global config (`configure_logging()`), with no
     teardown -- a `structlog.reset_defaults()` in a `try/finally` stops
     that config from silently leaking into whichever test happens to run
-    next."""
-    configure_logging()
+    next.
+
+    Argus round 5 finding: `configure_logging()` itself was OUTSIDE the
+    `try`, so a raise from it would skip teardown entirely; and
+    `structlog.reset_defaults()` alone doesn't undo `logging.basicConfig`
+    (which `configure_logging()` also calls) -- the stdlib root handler it
+    installs could still leak into a later test. Both are fixed below:
+    `configure_logging()` now runs inside the `try`, and `finally` also
+    restores `logging.root`'s prior handlers/level."""
+    root_logger = logging.getLogger()
+    prior_handlers = list(root_logger.handlers)
+    prior_level = root_logger.level
     try:
+        configure_logging()
         try:
             raise ValueError("boom-for-traceback-test")
         except ValueError:
@@ -66,3 +78,30 @@ def test_exc_info_renders_a_real_traceback_through_the_full_pipeline(
         assert "boom-for-traceback-test" in record["exception"]
     finally:
         structlog.reset_defaults()
+        root_logger.handlers = prior_handlers
+        root_logger.setLevel(prior_level)
+
+
+def test_severity_field_appears_in_real_json_output(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Argus round 5 finding: `severity` was verified only via a mock
+    (`test_log_security_event_emits_structured_fields` above) -- this
+    exercises the real structlog pipeline the way an actual CloudWatch
+    Metric Filter would see it."""
+    root_logger = logging.getLogger()
+    prior_handlers = list(root_logger.handlers)
+    prior_level = root_logger.level
+    try:
+        configure_logging()
+        log_security_event("okta_id_token_rejected", reason="alg_none", severity="critical")
+
+        output = capsys.readouterr().out
+        assert output.strip(), "configure_logging() produced no captured stdout"
+        record = json.loads(output.strip().splitlines()[-1])
+        assert record["event"] == "okta_id_token_rejected"
+        assert record["severity"] == "critical"
+    finally:
+        structlog.reset_defaults()
+        root_logger.handlers = prior_handlers
+        root_logger.setLevel(prior_level)
