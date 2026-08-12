@@ -17,7 +17,7 @@ auth.py              # Okta OIDCProxy (humans) + rh-auth JWTVerifier (agents) vi
 scopes.py            # TOOL_SCOPES catalog + fail-closed scope helpers
 identity.py          # Issuer-gated JWT identity resolution (anti-impersonation guards)
 observability.py     # structlog JSON events (tool_call, scope_denial, auth_flow, ...)
-providers/comms.py   # Comms provider sub-server — the 13 MCP tools (see below)
+providers/comms.py   # Comms provider sub-server — the 14 MCP tools (see below)
 models.py            # SQLAlchemy 2.x async ORM models (agents, conversations,
                       #   participants, messages, tasks, audit_log — DESIGN.md §5, §9)
 db.py                # Async engine/session factory (DATABASE_URL, fail-fast)
@@ -67,6 +67,7 @@ fail-closed `scopes.TOOL_SCOPES` registry. Source of truth:
 | `comms_leave` | `comms:write` | Leave a conversation the caller is currently `active` in |
 | `comms_add_task` | `comms:write` | Create a two-party `internal.coordination` task, assigned to another agent |
 | `comms_get_tasks` | `comms:read` | Paginated "visible to me" task list — caller is the task's creator or assignee |
+| `comms_update_task` | `comms:write` | Transition a task `open → done`/`declined` — `declined` is assignee-only |
 
 The layout mirrors [rh-mcp](https://github.com/redesignhealth/rh-data-platform/tree/main/services/rh-mcp),
 the reference MCP implementation in the [RH tech guide](https://github.com/redesignhealth/rh-tech-guide).

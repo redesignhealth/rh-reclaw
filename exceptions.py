@@ -28,10 +28,11 @@ service/tools boundary:
 
 - ``InvalidConversationStateError``: a message type is not legal given the
   conversation's current state (state-machine violation — posting after
-  completion/cancellation/expiry). Kept distinct and specific: the caller
-  is already an authorized member and has legitimate access to
-  ``conversation.state`` via ``get_conversation``, so there is nothing to
-  enumerate here.
+  completion/cancellation/expiry), or (TECH-5099) a task-status transition
+  attempted from a terminal status (``done``/``declined``). Kept distinct
+  and specific in both cases: the caller is already an authorized member/
+  party and has legitimate access to the current state via
+  ``get_conversation``/``get_tasks``, so there is nothing to enumerate here.
 
 - ``RateLimitExceededError``: a sender exceeded a per-hour cap. Specific by
   design — DESIGN.md does not treat rate limiting as an enumeration risk.
@@ -60,7 +61,9 @@ class AccessDeniedError(Exception):
 
 
 class InvalidConversationStateError(Exception):
-    """A message type is not legal in the conversation's current state."""
+    """A state-machine transition is not legal in the current state — either
+    a message type disallowed by the conversation's state, or (TECH-5099) a
+    task-status transition attempted from a terminal status."""
 
 
 class RateLimitExceededError(Exception):

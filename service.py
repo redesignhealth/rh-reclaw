@@ -63,13 +63,14 @@ scattered as inline comments):
   ``exceptions.AccessDeniedError``'s docstring — folded into the uniform denial
   rather than given a leakier, more specific message.
 - **Board-level ``Agent.status`` gating**: checked (uniform denial) on the
-  *initiating* side of a write — starting a conversation, inviting, and
-  posting all require the actor's own agent to be board-``active``, and
-  ``invite``/``start_conversation`` require the same of every target. It
-  is deliberately NOT re-checked on ``accept_invite``/``decline_invite``/
-  ``leave``: those are a participant exiting or resolving their own
-  already-granted membership, and a participant should always be able to
-  do that even if ops suspends their agent mid-negotiation.
+  *initiating* side of a write — starting a conversation, inviting,
+  posting, and (TECH-5099) ``update_task`` all require the actor's own
+  agent to be board-``active``, and ``invite``/``start_conversation``
+  require the same of every target. It is deliberately NOT re-checked on
+  ``accept_invite``/``decline_invite``/``leave``: those are a participant
+  exiting or resolving their own already-granted membership, and a
+  participant should always be able to do that even if ops suspends their
+  agent mid-negotiation.
 
 Audit contract
 --------------
@@ -81,8 +82,13 @@ operation it describes. Denial actions are namespaced ``denied.*``:
 of "already active", "declined", "left" distinguishable in the trail even
 though the client sees one uniform message), ``denied.unknown_agent``,
 ``denied.type_not_accepted``, ``denied.already_participant``,
-``denied.bad_state`` (state-machine violation), ``denied.bad_schema``
-(payload validation), and ``denied.rate_limited``.
+``denied.bad_state`` (state-machine violation — conversation *or*, since
+TECH-5099, task-status), ``denied.bad_schema`` (payload validation),
+``denied.rate_limited``, ``denied.not_party`` (caller is neither a task's
+creator nor its assignee, or the task does not exist — uniform anti-
+enumeration, the task-domain analog of ``denied.not_member``), and
+``denied.not_assignee`` (a non-assignee attempted the assignee-only
+``declined`` transition).
 """
 
 from __future__ import annotations
@@ -344,13 +350,22 @@ def _maybe_expire(session: AsyncSession, actor_sub: str, conversation: Conversat
 
 
 async def _require_active_agent(
-    session: AsyncSession, *, actor_sub: str, agent_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    agent_id: uuid.UUID,
+    task_id: uuid.UUID | None = None,
 ) -> Agent:
     """Resolve ``agent_id`` to its board-ACTIVE ``Agent``, or deny (uniform).
 
     Used on the *initiating* side of writes (starting a conversation,
-    inviting, posting) — see the module docstring's judgment-call note on
-    why this check is deliberately skipped for accept/decline/leave.
+    inviting, posting, ``update_task``) — see the module docstring's
+    judgment-call note on why this check is deliberately skipped for
+    accept/decline/leave. ``task_id`` is ``None`` for every caller except
+    ``update_task``, which already has one in scope by the time it calls
+    this — passed through so this denial's audit row is task-attributed
+    like every other ``update_task`` denial (TECH-5099 Argus round 3),
+    rather than the only one landing with ``audit_log.task_id`` NULL.
     """
     agent = await _find_agent_by_id(session, agent_id)
     if agent is None or agent.status != "active":
@@ -359,6 +374,7 @@ async def _require_active_agent(
             actor_sub=actor_sub,
             action="denied.unknown_agent",
             agent_id=agent.id if agent else None,
+            task_id=task_id,
         )
     return agent
 
@@ -1820,6 +1836,172 @@ async def get_tasks(
     }
 
 
+async def _find_task(session: AsyncSession, task_id: uuid.UUID, *, for_update: bool) -> Task | None:
+    """No default for ``for_update``: its only call site (``update_task``)
+    always needs the row lock (see that function's comment), so a default
+    would be dead configurability suggesting an unlocked path is exercised
+    somewhere — it isn't."""
+    stmt = select(Task).where(Task.id == task_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _task_with_subs(session: AsyncSession, task_id: uuid.UUID) -> tuple[Task, str, str]:
+    """Load ``task_id`` plus its creator/assignee subs in one query.
+
+    Also serves as the post-commit refresh for ``update_task``: since this
+    issues a fresh SELECT on real ``Task`` columns, SQLAlchemy's identity
+    map repopulates the already-tracked ``Task`` instance's ``updated_at``
+    (server-computed by the ``UPDATE`` just committed, otherwise expired
+    and unreadable without an explicit refresh) as a side effect — no
+    separate ``session.refresh()`` call needed.
+    """
+    creator_agent = aliased(Agent)
+    assignee_agent = aliased(Agent)
+    row = (
+        await session.execute(
+            select(Task, creator_agent.sub, assignee_agent.sub)
+            .join(creator_agent, creator_agent.id == Task.created_by)
+            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
+            .where(Task.id == task_id)
+        )
+    ).one_or_none()
+    if row is None:
+        # No deletion endpoint exists as of TECH-5099, so this is
+        # unreachable today -- an explicit RuntimeError beats letting
+        # NoResultFound propagate as an unexplained 500 for whoever hits
+        # it first if that ever changes; the caller's transition already
+        # committed successfully by the time this runs.
+        raise RuntimeError(f"task {task_id} vanished after its own status transition committed")
+    task, created_by_sub, assignee_sub = row
+    return task, created_by_sub, assignee_sub
+
+
+async def _deny_bad_task_state(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    agent_id: uuid.UUID,
+    task_id: uuid.UUID,
+    current_status: str,
+    attempted_status: str,
+) -> NoReturn:
+    """Audit + raise the specific (non-uniform) task-status transition violation."""
+    _audit(
+        session,
+        actor_sub=actor_sub,
+        action="denied.bad_state",
+        agent_id=agent_id,
+        task_id=task_id,
+        detail={"status": current_status, "attempted_status": attempted_status},
+    )
+    await session.commit()
+    raise InvalidConversationStateError(
+        f"task cannot transition to '{attempted_status}' while its status is '{current_status}'"
+    )
+
+
+async def update_task(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    caller_agent_id: uuid.UUID,
+    task_id: uuid.UUID,
+    status: str,
+) -> dict[str, Any]:
+    """Transition a task: ``open`` -> ``done`` (either party) or ``open`` ->
+    ``declined`` (assignee only — the consent/refusal mechanism, terminal).
+
+    TECH-5099. Only the task's creator or assignee may call this (uniform
+    ``AccessDeniedError`` for a non-party or an unknown task_id — anti-
+    enumeration, identical treatment to a non-existent task). ``declined``
+    is further restricted to the assignee; the creator attempting it on a
+    still-``open`` task gets the same uniform denial. No transition out of
+    a terminal status (``done``/``declined``) is legal — that is a
+    state-machine violation (``InvalidConversationStateError``, specific:
+    the caller already knows the task's current status via ``get_tasks``),
+    not an authorization one, and it is checked BEFORE the assignee-only
+    restriction: any party (creator or assignee) attempting any status
+    change on an already-terminal task gets ``InvalidConversationStateError``,
+    never ``AccessDeniedError`` — role-eligibility for a status value is
+    moot once no transition is legal at all.
+
+    Raises ``ValueError`` for a ``status`` this tool never accepts (``open``
+    is only ever written by ``add_task``; anything outside
+    ``{"done", "declined"}`` is malformed input).
+    """
+    if status not in ("done", "declined"):
+        raise ValueError(f"status must be 'done' or 'declined', got {status!r}")
+
+    # Initiating-write check, same as every other write in this module
+    # (add_task/post_message/start_conversation) — a suspended
+    # agent must not be able to mutate a task's status.
+    await _require_active_agent(
+        session, actor_sub=actor_sub, agent_id=caller_agent_id, task_id=task_id
+    )
+
+    # for_update=True: without a row lock, two concurrent update_task calls
+    # can both observe status='open', both pass the terminal-state guard
+    # below, and both commit — e.g. a creator's 'done' silently overwriting
+    # an assignee's 'declined'. Serializes concurrent transitions on the
+    # same task, exactly like post_message's seq assignment does for
+    # concurrent posts to the same conversation.
+    task = await _find_task(session, task_id, for_update=True)
+    is_creator = task is not None and task.created_by == caller_agent_id
+    is_assignee = task is not None and task.assignee_id == caller_agent_id
+    if task is None or not (is_creator or is_assignee):
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.not_party",
+            agent_id=caller_agent_id,
+            task_id=task.id if task is not None else None,
+            detail={"attempted_task_id": str(task_id)},
+        )
+    # Terminal-state check before the assignee-only restriction (TECH-5099
+    # Argus round 2): a party on an already-terminal task must get the
+    # specific InvalidConversationStateError regardless of role, not
+    # denied.not_assignee — role-eligibility for a status value is moot
+    # once no transition is legal at all.
+    if task.status != "open":
+        await _deny_bad_task_state(
+            session,
+            actor_sub=actor_sub,
+            agent_id=caller_agent_id,
+            task_id=task.id,
+            current_status=task.status,
+            attempted_status=status,
+        )
+    if status == "declined" and not is_assignee:
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.not_assignee",
+            agent_id=caller_agent_id,
+            task_id=task.id,
+            detail={"attempted_status": status},
+        )
+
+    task.status = status
+    _audit(
+        session,
+        actor_sub=actor_sub,
+        action="task.update_status",
+        agent_id=caller_agent_id,
+        task_id=task.id,
+        detail={"from": "open", "to": status},
+    )
+    await session.commit()
+    task, created_by_sub, assignee_sub = await _task_with_subs(session, task.id)
+    return _task_public(
+        task,
+        caller_agent_id=caller_agent_id,
+        created_by_sub=created_by_sub,
+        assignee_sub=assignee_sub,
+    )
+
+
 __all__ = [
     "CONVERSATION_TTL",
     "MAX_CONVERSATION_STARTS_PER_HOUR",
@@ -1843,4 +2025,5 @@ __all__ = [
     "post_message",
     "register_agent",
     "start_conversation",
+    "update_task",
 ]

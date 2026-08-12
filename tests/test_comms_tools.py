@@ -974,6 +974,109 @@ class TestTasks:
                 {"cursor": "not-a-valid-cursor"},
             )
 
+    async def test_update_task_end_to_end(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        creator_token = _token("bond-007", owner_sub="owner-dan@example.com")
+        assignee_token = _token("pepper-potts", owner_sub="owner-dan@example.com")
+
+        added = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_add_task",
+            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+        )
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                creator_token,
+                "comms_update_task",
+                {"task_id": added["task_id"], "status": "declined"},
+            )
+
+        updated = await _call(
+            main,
+            test_session_factory,
+            assignee_token,
+            "comms_update_task",
+            {"task_id": added["task_id"], "status": "declined"},
+        )
+        assert updated["status"] == "declined"
+
+        with pytest.raises(
+            ToolError,
+            match=re.escape("task cannot transition to 'done' while its status is 'declined'"),
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                assignee_token,
+                "comms_update_task",
+                {"task_id": added["task_id"], "status": "done"},
+            )
+
+        # status='done' through the full tool stack too -- the above only
+        # exercised 'declined'.
+        added_2 = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_add_task",
+            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+        )
+        done_result = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_update_task",
+            {"task_id": added_2["task_id"], "status": "done"},
+        )
+        assert done_result["status"] == "done"
+
+    async def test_update_task_malformed_task_id_maps_to_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_update_task",
+                {"task_id": "not-a-uuid", "status": "done"},
+            )
+
+    async def test_update_task_unknown_task_id_matches_non_party_denial_message(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Anti-enumeration at the MCP boundary: an unknown task_id must
+        produce the exact same ToolError text as a genuine non-party
+        denial (TECH-5099 Argus round 1)."""
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_update_task",
+                {"task_id": str(uuid.uuid4()), "status": "done"},
+            )
+
 
 # --- Registry parity / scope enforcement still intact --------------------------------
 
@@ -997,6 +1100,7 @@ class TestScopesUnaffected:
             "comms_leave",
             "comms_add_task",
             "comms_get_tasks",
+            "comms_update_task",
         }
         assert expected <= mounted
         assert expected <= set(TOOL_SCOPES)
