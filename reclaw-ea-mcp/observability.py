@@ -45,7 +45,12 @@ def _resolve_log_level() -> int:
 def configure_logging() -> None:
     """Configure stdlib + structlog for JSON output to stdout.
 
-    Idempotent -- safe to call from both ``main`` and tests.
+    Safe to call multiple times with the same configuration (``main`` and
+    tests both call this) -- ``structlog.configure`` overwrites the global
+    config unconditionally on every call rather than no-op'ing after the
+    first, so this is NOT idempotent in the strict sense (a prior call's
+    config is discarded, not preserved); it is safe here only because every
+    caller passes the same configuration.
     """
     level = _resolve_log_level()
     logging.basicConfig(level=level)
@@ -66,12 +71,16 @@ def configure_logging() -> None:
 obs_log = structlog.get_logger(service=SERVICE_NAME)
 
 
-def hash_user(email: str) -> str:
+def email_local_part(email: str) -> str:
     """Return the email local-part (before ``@``) for log attribution.
 
-    Internal users only -- no privacy concern in the local part. rh-auth
-    service slugs (no ``@``) pass through whole, so service tokens surface
-    unchanged in CloudWatch under ``user_id``.
+    Named for what it does (Argus round 1 finding: the previous name,
+    ``hash_user``, implied a one-way irreversible transformation this
+    function does not perform -- this is plain-text truncation, not a
+    hash, and provides no anonymization guarantee). Internal users only --
+    no privacy concern in the local part. rh-auth service slugs (no ``@``)
+    pass through whole, so service tokens surface unchanged in CloudWatch
+    under ``user_id``.
     """
     return email.strip().split("@")[0]
 
@@ -93,7 +102,7 @@ def log_tool_call(
         if error_type is not None:
             fields["error_type"] = error_type
         if email and email.strip():
-            fields["user_id"] = hash_user(email)
+            fields["user_id"] = email_local_part(email)
         obs_log.info("tool_call", **fields)
     except Exception:
         _fallback_logger.warning("log_tool_call failed to emit event", exc_info=True)
@@ -102,7 +111,7 @@ def log_tool_call(
 def log_user_active(email: str) -> None:
     """Emit a ``user_active`` event for unique-user counting."""
     try:
-        obs_log.info("user_active", user_id=hash_user(email))
+        obs_log.info("user_active", user_id=email_local_part(email))
     except Exception:
         _fallback_logger.warning("log_user_active failed to emit event", exc_info=True)
 
@@ -123,6 +132,11 @@ def log_auth_rejected(
 ) -> None:
     """Emit an ``auth_rejected`` event for a post-signature guard hit.
 
+    ``warning``, not ``info`` (Argus round 1 finding): this is an
+    adversarial-signal event (an access-control failure), not routine
+    traffic -- at ``info`` it's indistinguishable from normal tool calls
+    for any log-level-based alarm.
+
     Deliberately does NOT log the rejected ``sub`` -- the sub of a forged
     rh-auth token IS the attacker's payload; logging it would turn the
     metric stream into an attacker-writable side channel.
@@ -131,7 +145,7 @@ def log_auth_rejected(
         fields: dict[str, Any] = {"reason": reason}
         if issuer is not None:
             fields["issuer"] = issuer
-        obs_log.info("auth_rejected", **fields)
+        obs_log.warning("auth_rejected", **fields)
     except Exception:
         _fallback_logger.warning("log_auth_rejected failed to emit event", exc_info=True)
 
@@ -144,6 +158,9 @@ def log_scope_denial(
     required_scope: str | None = None,
 ) -> None:
     """Emit a ``scope_denial`` event.
+
+    ``warning``, not ``info`` (Argus round 1 finding, same reasoning as
+    ``log_auth_rejected``): an access-control failure, not routine traffic.
 
     structlog's JSONRenderer escapes the user-controlled ``tool`` value, so
     crafted tool names cannot inject log lines. ``required_scope`` is
@@ -158,18 +175,41 @@ def log_scope_denial(
         }
         if required_scope is not None:
             fields["required_scope"] = required_scope
-        obs_log.info("scope_denial", **fields)
+        obs_log.warning("scope_denial", **fields)
     except Exception:
         _fallback_logger.warning("log_scope_denial failed to emit event", exc_info=True)
+
+
+def log_security_event(event: str, **fields: Any) -> None:
+    """Emit an arbitrary security-relevant event through the structured
+    JSON pipeline, at ``warning``.
+
+    Added (Argus round 1 finding) for security-sensitive paths that
+    previously used ``logging.getLogger(__name__)`` directly (Okta
+    id_token decode/validation failures in auth.py, identity-resolution
+    failures in main.py's ``ObservabilityMiddleware``): those calls emit
+    unstructured plain-text output, since ``configure_logging`` wires two
+    INDEPENDENT pipelines (``logging.basicConfig``'s plain-text
+    StreamHandler and structlog's JSONRenderer) with no bridge between
+    them -- a CloudWatch Metric Filter keyed on ``$.event`` silently misses
+    every stdlib ``logger.*`` call. This is exactly the class of event
+    most likely to matter during an incident, so it must flow through the
+    same JSON pipeline as every other observability event in this module.
+    """
+    try:
+        obs_log.warning(event, **fields)
+    except Exception:
+        _fallback_logger.warning("log_security_event failed to emit event", exc_info=True)
 
 
 __all__ = [
     "SERVICE_NAME",
     "configure_logging",
-    "hash_user",
+    "email_local_part",
     "log_auth_flow",
     "log_auth_rejected",
     "log_scope_denial",
+    "log_security_event",
     "log_tool_call",
     "log_user_active",
     "obs_log",

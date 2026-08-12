@@ -123,3 +123,13 @@ class TestScopeEnforcement:
         from scopes import required_scope_for
 
         assert required_scope_for("ea_not_a_real_tool") is None
+
+    async def test_missing_token_denied(self) -> None:
+        """Argus round 1 finding: the ``token is None`` deny branch
+        (ScopeEnforcementMiddleware.on_call_tool) was untested -- every
+        other test patches ``get_access_token`` to return a valid mock."""
+        main = _import_main()
+        with patch("main.get_access_token", return_value=None):
+            async with Client(main.mcp) as client:
+                with pytest.raises(ToolError, match="insufficient_scope"):
+                    await client.call_tool("ea_whoami", {})

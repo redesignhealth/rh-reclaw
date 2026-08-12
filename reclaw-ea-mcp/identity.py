@@ -77,6 +77,23 @@ def _is_rh_auth_token(claims: dict[str, Any]) -> bool:
     become ``owner_identity`` -- the key every ledger row, approval hold,
     and outcome record for this call is filed under -- not just a
     scope-bypass decision.
+
+    Argus round 1 finding: for an ``iss=None`` token, this function and
+    ``scopes.scopes_for_token`` independently reach different
+    CLASSIFICATIONS of the same token (this one calls it rh-auth;
+    ``scopes_for_token``'s ``token.claims.get("iss") != RH_AUTH_ISSUER``
+    check calls it non-rh-auth) even though both independently reject it
+    (this module via ``require_owner_identity`` raising when ``sub`` is
+    also absent; ``scopes_for_token`` via returning ``[]``, denying every
+    scope). The SECURITY OUTCOME is correct either way, but the two
+    disagreeing means an audit trail can show "rh-auth caller" in one log
+    line and "non-rh-auth, no scopes" in another for the exact same
+    denied call. Not unified into one canonical classifier because the two
+    call sites have different fail-closed directions for the ``None`` case
+    (identity resolution must NOT fall through to trusting Okta-style
+    claims; scope lookup must NOT fall through to granting scopes) and
+    unifying them risked inverting one of those two independently-derived
+    guards rather than clarifying anything.
     """
     issuer = claims.get("iss")
     if issuer is None:

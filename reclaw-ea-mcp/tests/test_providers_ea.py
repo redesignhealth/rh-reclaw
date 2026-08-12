@@ -18,12 +18,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from fastmcp import Client
+from fastmcp.exceptions import ToolError
 
 _MOCK_OIDC_CONFIG = MagicMock()
 _OIDC_PATCH = patch(
     "fastmcp.server.auth.oidc_proxy.OIDCProxy.get_oidc_configuration",
     return_value=_MOCK_OIDC_CONFIG,
 )
+
+_CONVERSATION_ERROR_MESSAGE = "conversation not found or not accessible"
 
 
 def _import_main() -> Any:
@@ -80,6 +83,104 @@ class TestWhoami:
         result = await _call(main, _token("alice-agent"), "ea_whoami", {})
         assert result["identity"] == "alice-agent"
         assert result["caller_type"] == "service"
+
+
+class TestRequireOwnerIdentityRejectionPaths:
+    """`require_owner_identity` is the primary impersonation defense for
+    this service (Argus round 1 finding: previously untested through any
+    mounted tool) -- these exercise it via a real tool call, not the bare
+    function."""
+
+    async def test_email_shaped_sub_rejected(self, main: Any) -> None:
+        token = _token("alice@example.com")  # rh-auth sub must never be email-shaped
+        with pytest.raises(ToolError):
+            await _call(main, token, "ea_whoami", {})
+
+    async def test_empty_sub_rejected(self, main: Any) -> None:
+        token = _token("")
+        with pytest.raises(ToolError):
+            await _call(main, token, "ea_whoami", {})
+
+    async def test_whitespace_sub_rejected(self, main: Any) -> None:
+        token = _token("   ")
+        with pytest.raises(ToolError):
+            await _call(main, token, "ea_whoami", {})
+
+
+class TestScopeToolRegistryParity:
+    async def test_every_registered_ea_tool_has_a_scope_entry(self, main: Any) -> None:
+        """Argus round 1 finding: a future tool that omits its TOOL_SCOPES
+        entry is silently unreachable for M2M callers with no test-time
+        signal -- this asserts the two stay in lockstep."""
+        from scopes import TOOL_SCOPES
+
+        token = _token("alice-agent")
+        with patch("main.get_access_token", return_value=token):
+            async with Client(main.mcp) as client:
+                tools = await client.list_tools()
+        registered = {tool.name for tool in tools}
+        assert registered == set(TOOL_SCOPES)
+
+
+class TestCrossOwnerIsolation:
+    async def test_non_participant_cannot_touch_anothers_conversation(self, main: Any) -> None:
+        """The load-bearing auth invariant (TECH-5065): an owner who is
+        not a participant in a conversation must not be able to read or
+        act on it, even knowing its conversation_id (Argus round 1
+        finding: previously untested -- the only multi-owner test had both
+        owners legitimately in the same conversation)."""
+        bob = _token("bob3-agent")
+        mallory = _token("mallory3-agent")
+        window = _window()
+
+        opened = await _call(
+            main,
+            bob,
+            "ea_negotiate",
+            {
+                "to_agent_identity": "charlie3-agent",
+                "window": window,
+                "duration_minutes": 30,
+                "modality": "video",
+                "priority": 3,
+            },
+        )
+        cid = opened["conversation_id"]
+
+        with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
+            await _call(main, mallory, "ea_check_completion", {"conversation_id": cid})
+
+        # maybe_finalize short-circuits on the owner check BEFORE touching
+        # the board at all for a non-owner -- it never raises, but also
+        # never reveals anything (booked=False, pending_approval=False is
+        # indistinguishable from "not complete yet"). Different shape from
+        # the raise-based tools, same non-oracle property.
+        booking = await _call(main, mallory, "ea_request_booking", {"conversation_id": cid})
+        assert booking == {
+            "conversation_id": cid,
+            "booked": False,
+            "slot": None,
+            "pending_approval": False,
+        }
+
+        with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
+            await _call(
+                main,
+                mallory,
+                "ea_react_to_conversation",
+                {"conversation_id": cid, "my_candidates": [_slot_context(window)]},
+            )
+
+    async def test_unknown_conversation_id_and_not_a_participant_raise_identically(
+        self, main: Any
+    ) -> None:
+        """The two failure modes must be indistinguishable to the caller
+        (Argus round 1 finding: previously a three-way oracle via raw
+        exception propagation)."""
+        alice = _token("alice4-agent")
+
+        with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
+            await _call(main, alice, "ea_check_completion", {"conversation_id": "conv-nonexistent"})
 
 
 class TestFullNegotiationFlow:

@@ -49,13 +49,17 @@ reclaw-ea = { path = "../reclaw-ea", editable = true }
 members = ["."]
 
 [dependency-groups]
+# Exact pins (Argus round 1 finding): reclaw-comms-mcp uses exact pins for
+# its dev/test deps; the lower-bounded `>=` versions here let `uv lock
+# --upgrade` silently advance dev tools out from under CI without a diff
+# to review.
 test = [
-    "pytest>=8.0.0",
-    "pytest-asyncio>=1.0.0",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
 ]
 dev = [
-    "ruff>=0.6.0",
-    "mypy>=1.10.0",
+    "ruff==0.16.2",
+    "mypy==2.3.0",
 ]
 
 [tool.ruff]

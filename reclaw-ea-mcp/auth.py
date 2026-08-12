@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -43,9 +42,7 @@ from mcp.server.auth.provider import AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from identity import RH_AUTH_ISSUER
-from observability import log_auth_flow
-
-logger = logging.getLogger(__name__)
+from observability import log_auth_flow, log_security_event
 
 _UPSTREAM_CLAIM_KEYS = ["sub", "email", "preferred_username", "name"]
 
@@ -92,21 +89,21 @@ class OktaOIDCProxy(OIDCProxy):
             header_b64 += "=" * (-len(header_b64) % 4)
             header = json.loads(base64.urlsafe_b64decode(header_b64))
             if not isinstance(header, dict):
-                logger.error("Rejecting Okta id_token with non-object header")
+                log_security_event("okta_id_token_rejected", reason="non_object_header")
                 return None
             if str(header.get("alg", "")).lower() == "none":
-                logger.error("Rejecting Okta id_token with alg=none")
+                log_security_event("okta_id_token_rejected", reason="alg_none")
                 return None
             payload_b64 = id_token.split(".")[1]
             payload_b64 += "=" * (-len(payload_b64) % 4)
             payload = json.loads(base64.urlsafe_b64decode(payload_b64))
             if not isinstance(payload, dict):
-                logger.error("Rejecting Okta id_token with non-object payload")
+                log_security_event("okta_id_token_rejected", reason="non_object_payload")
                 return None
             claims = {k: payload[k] for k in _UPSTREAM_CLAIM_KEYS if k in payload}
             return claims or None
         except (IndexError, json.JSONDecodeError, ValueError):
-            logger.error("Failed to decode Okta id_token for upstream claims")
+            log_security_event("okta_id_token_rejected", reason="decode_failed")
             return None
 
     async def exchange_authorization_code(

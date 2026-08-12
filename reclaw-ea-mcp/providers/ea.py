@@ -61,14 +61,15 @@ mounted name (``ea_<tool>``) in the same change.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time
-from typing import Any
+from typing import Annotated, Any
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.dependencies import get_access_token
-from pydantic import BaseModel, ConfigDict, Field
-from reclaw_ea.fake_board import FakeBoard
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from reclaw_ea.fake_board import FakeBoard, NotAParticipantError, UnknownConversationError
 from reclaw_ea.ledger import Ledger
 from reclaw_ea.orchestrator import Negotiator
 from reclaw_ea.scorer import Incumbent, SlotContext
@@ -80,7 +81,39 @@ from scheduler_mcp.rules import InMemoryRuleStore, Rule, Situation, apply_defaul
 from identity import require_owner_identity
 from scopes import is_interactive_token, scopes_for_token
 
+logger = logging.getLogger(__name__)
+
 ea_server: FastMCP[Any] = FastMCP("ea")
+
+# Bounds conversation_id/to_agent_identity string inputs: both are stored as
+# dict keys in process-lifetime state (Argus round 1 finding), so an
+# unbounded string could bloat in-memory structures.
+ConversationId = Annotated[str, Field(min_length=1, max_length=256)]
+
+_CONVERSATION_NOT_FOUND = "conversation not found or not accessible"
+
+# Exceptions that reveal, by their distinct shape, whether a conversation
+# exists at all vs. exists-but-not-mine vs. exists-and-mine-but-in-the-wrong-
+# state (Argus round 1 finding: without normalizing these, a caller could
+# distinguish "unknown conversation_id" from "exists, but I'm not a
+# participant" by exception type alone -- an oracle DESIGN.md §4 requires
+# closed off, the same anti-enumeration posture reclaw-comms-mcp's own
+# uniform denials already take).
+_CONVERSATION_ERRORS: tuple[type[Exception], ...] = (
+    UnknownConversationError,
+    NotAParticipantError,
+    ValueError,
+)
+
+
+def _tool_error(operation: str, exc: Exception) -> ToolError:
+    """Collapse a conversation-state exception into a uniform, detail-free
+    `ToolError` -- the specific exception type/message is logged server-side
+    only (never in the client-facing message) so a caller cannot distinguish
+    "conversation doesn't exist" from "exists but you're not in it" from
+    "exists but in the wrong state" by probing error text."""
+    logger.warning("ea tool %s rejected: %s: %s", operation, type(exc).__name__, exc, exc_info=True)
+    return ToolError(_CONVERSATION_NOT_FOUND)
 
 
 # --- Per-owner state (see module docstring's "Known interim gaps") --------
@@ -92,6 +125,15 @@ ea_server: FastMCP[Any] = FastMCP("ea")
 # actually work end-to-end today, ahead of TECH-5055's real board client.
 _board = FakeBoard()
 
+# Argus round 1 finding: these three dicts/sets grow one entry per unique
+# owner_identity with no eviction, TTL, or size cap. Since an rh-auth Bearer
+# token can be minted with any `--sub` value by anyone holding
+# RH_AUTH_SECRET, a compromised or misconfigured caller could cause
+# unbounded heap growth by cycling through distinct identities. Acceptable
+# for the same reason the rest of this module's persistence is (TECH-5083
+# replaces all of this with real, presumably-bounded storage) but the
+# growth dimension specifically is not yet mitigated -- no cap is applied
+# here today.
 _negotiators: dict[str, Negotiator] = {}
 _rule_store = InMemoryRuleStore()
 _rules_seeded: set[str] = set()
@@ -166,6 +208,18 @@ class SlotContextIn(BaseModel):
     within_counterparty_window: bool | None = None
     tier: Tier = Tier.TIER_3
 
+    @model_validator(mode="after")
+    def _energy_peak_both_or_neither(self) -> SlotContextIn:
+        # Argus round 1 finding: silently dropping a partial energy_peak
+        # specification (one bound set, the other None) previously
+        # discarded both with no error -- a caller-supplied preference
+        # signal vanishing without feedback.
+        if (self.energy_peak_start is None) != (self.energy_peak_end is None):
+            raise ValueError(
+                "energy_peak_start and energy_peak_end must both be set or both omitted"
+            )
+        return self
+
     def to_slot_context(self) -> SlotContext:
         energy_peak = (
             (self.energy_peak_start, self.energy_peak_end)
@@ -197,13 +251,17 @@ def _slot_to_dict(slot: CandidateSlot) -> dict[str, str]:
 async def whoami() -> dict[str, Any]:
     """Return the authenticated caller's identity, issuer, caller type, and
     scopes -- diagnostic tool for verifying auth/scope wiring, matching
-    reclaw-comms-mcp's `comms_whoami`."""
+    reclaw-comms-mcp's `comms_whoami`. `identity` is exactly the
+    `owner_identity` every other tool attributes this caller's ledger,
+    negotiator, and approval-hold state to (Argus round 1 finding: this
+    used to return `None` for interactive callers, even though their state
+    is keyed identically to service callers')."""
     token = get_access_token()
     if token is None:
         raise ToolError("no access token provided")
     interactive = is_interactive_token(token)
     return {
-        "identity": require_owner_identity(token) if not interactive else None,
+        "identity": require_owner_identity(token),
         "issuer": token.claims.get("iss"),
         "caller_type": "interactive" if interactive else "service",
         "scopes": scopes_for_token(token),
@@ -212,15 +270,18 @@ async def whoami() -> dict[str, Any]:
 
 @ea_server.tool
 async def negotiate(
-    to_agent_identity: str,
+    to_agent_identity: ConversationId,
     window: CandidateSlot,
-    duration_minutes: int,
+    duration_minutes: Annotated[int, Field(gt=0, le=24 * 60)],
     modality: Modality,
-    priority: int = 3,
+    priority: Annotated[int, Field(ge=1, le=4)] = 3,
 ) -> dict[str, Any]:
-    """Open a new negotiation with `to_agent_identity`, posting the initial
-    `AvailabilityRequest`. Returns the `conversation_id` both sides use for
-    every subsequent `ea_react_to_conversation`/`ea_check_completion` call.
+    """Open a new negotiation with `to_agent_identity`. `to_agent_identity`
+    must be the counterparty's own `owner_identity` as this service would
+    resolve it (a service-token `sub`, or an interactive caller's email) --
+    there is no separate directory/lookup, so it must be known out of band.
+    Returns the `conversation_id` both sides use for every subsequent
+    `ea_react_to_conversation`/`ea_check_completion` call.
 
     `priority` is a hint, never an instruction (docs/DESIGN.md §2.2 point
     6) -- the receiving EA computes its own tier from its own rules."""
@@ -237,7 +298,7 @@ async def negotiate(
 
 @ea_server.tool
 async def react_to_conversation(
-    conversation_id: str, my_candidates: list[SlotContextIn]
+    conversation_id: ConversationId, my_candidates: list[SlotContextIn]
 ) -> dict[str, Any]:
     """Process the counterparty's latest message on `conversation_id` and
     take exactly one action (propose, confirm, or decline) -- a no-op if
@@ -245,16 +306,23 @@ async def react_to_conversation(
     `my_candidates` are this owner's own scored candidate slots for this
     meeting (sourced from real calendar + judgment upstream of this
     service -- see module docstring's "Rules" and TECH-5084); rules are
-    resolved internally, never accepted as input."""
+    resolved internally, never accepted as input.
+
+    Raises if `conversation_id` doesn't exist, or exists but this caller
+    isn't a participant -- the two cases are deliberately indistinguishable
+    to the caller (see `_tool_error`)."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     contexts = [c.to_slot_context() for c in my_candidates]
-    negotiator.react(
-        _board,
-        conversation_id,
-        my_candidates=contexts,
-        rules=_rules_for(owner_identity),
-    )
+    try:
+        negotiator.react(
+            _board,
+            conversation_id,
+            my_candidates=contexts,
+            rules=_rules_for(owner_identity),
+        )
+    except _CONVERSATION_ERRORS as exc:
+        raise _tool_error("ea_react_to_conversation", exc) from exc
     state = negotiator.state_for(conversation_id)
     return {
         "conversation_id": conversation_id,
@@ -265,21 +333,32 @@ async def react_to_conversation(
 
 
 @ea_server.tool
-async def check_completion(conversation_id: str) -> dict[str, Any]:
+async def check_completion(conversation_id: ConversationId) -> dict[str, Any]:
     """Return the agreed slot for `conversation_id` if every active
-    participant's latest message is a matching `Confirm`, else `None`."""
+    participant's latest message is a matching `Confirm`, else `None`.
+    Raises if `conversation_id` doesn't exist, or exists but this caller
+    isn't a participant (see `_tool_error`)."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
-    slot = negotiator.check_completion(_board, conversation_id)
+    try:
+        slot = negotiator.check_completion(_board, conversation_id)
+    except _CONVERSATION_ERRORS as exc:
+        raise _tool_error("ea_check_completion", exc) from exc
     return {"conversation_id": conversation_id, "slot": _slot_to_dict(slot) if slot else None}
 
 
 @ea_server.tool
-async def request_booking(conversation_id: str) -> dict[str, Any]:
+async def request_booking(conversation_id: ConversationId) -> dict[str, Any]:
     """Request booking for a completed negotiation, through the autonomy
     gate (docs/DESIGN.md §2.2 point 3). Completion alone never books
-    directly -- an external counterparty is always `ask_first`; an internal
-    one earns autonomous booking from a real approval track record.
+    directly -- an internal counterparty earns autonomous booking from a
+    real approval track record. **Every counterparty is currently
+    classified as internal** (`default_is_external`, TECH-5069 -- real
+    domain/org-membership resolution is not wired into this service yet),
+    so the "external counterparty is always ask_first" invariant this gate
+    is designed to enforce is NOT YET ENFORCED for any actual external
+    party. Do not rely on this tool to gate external-invite-adjacent
+    autonomy until TECH-5069 lands.
 
     Returns `booked=True` with the confirmed slot only if booking happened
     immediately in this call (the caller is responsible for actually
@@ -287,7 +366,8 @@ async def request_booking(conversation_id: str) -> dict[str, Any]:
     `booked=False, pending_approval=True` means a hold was opened;
     `ea_respond_to_approval` resolves it later. `booked=False,
     pending_approval=False` means the negotiation isn't complete yet, or
-    is already booked/pending."""
+    is already booked/pending. Raises if `conversation_id` doesn't exist,
+    or exists but this caller isn't a participant (see `_tool_error`)."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -296,7 +376,10 @@ async def request_booking(conversation_id: str) -> dict[str, Any]:
         nonlocal booked_slot
         booked_slot = slot
 
-    booked = negotiator.maybe_finalize(_board, conversation_id, on_book=on_book)
+    try:
+        booked = negotiator.maybe_finalize(_board, conversation_id, on_book=on_book)
+    except _CONVERSATION_ERRORS as exc:
+        raise _tool_error("ea_request_booking", exc) from exc
     return {
         "conversation_id": conversation_id,
         "booked": booked,
@@ -306,12 +389,19 @@ async def request_booking(conversation_id: str) -> dict[str, Any]:
 
 
 @ea_server.tool
-async def respond_to_approval(conversation_id: str, approved: bool) -> dict[str, Any]:
+async def respond_to_approval(conversation_id: ConversationId, approved: bool) -> dict[str, Any]:
     """Resolve a pending booking approval hold opened by `ea_request_booking`
-    -- the human-in-the-loop response to an `ask_first` gate decision.
-    `approved=True` books the calendar slot (same caller responsibility as
-    `ea_request_booking` for the actual invite); `approved=False` releases
-    the ledger hold and records the rejection for the confidence system."""
+    -- the human-in-the-loop response to an `ask_first` gate decision. This
+    tool only records the booking decision and runs the deterministic
+    ledger/autonomy-gate discipline -- it does NOT create a real calendar
+    event either way (see module docstring's "Booking" gap); the caller is
+    responsible for creating the invite itself when `booked=True` comes
+    back. `approved=False` releases the ledger hold and records the
+    rejection for the confidence system.
+
+    Raises if there is no pending approval for `conversation_id` (already
+    resolved, never requested, or swept as expired -- TECH-5076) or if
+    `conversation_id` doesn't exist / isn't this caller's."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -320,9 +410,12 @@ async def respond_to_approval(conversation_id: str, approved: bool) -> dict[str,
         nonlocal booked_slot
         booked_slot = slot
 
-    negotiator.respond_to_booking_approval(
-        _board, conversation_id, approved=approved, on_book=on_book
-    )
+    try:
+        negotiator.respond_to_booking_approval(
+            _board, conversation_id, approved=approved, on_book=on_book
+        )
+    except _CONVERSATION_ERRORS as exc:
+        raise _tool_error("ea_respond_to_approval", exc) from exc
     return {
         "conversation_id": conversation_id,
         "booked": booked_slot is not None,

@@ -14,7 +14,6 @@ See that module's docstring for the full middleware-ordering rationale.
 
 from __future__ import annotations
 
-import logging
 import os
 import time
 from typing import Any, NoReturn
@@ -31,6 +30,7 @@ from identity import RH_AUTH_ISSUER, try_resolve_email
 from observability import (
     configure_logging,
     log_scope_denial,
+    log_security_event,
     log_tool_call,
     log_user_active,
 )
@@ -44,8 +44,6 @@ from scopes import (
 )
 
 configure_logging()
-
-logger = logging.getLogger(__name__)
 
 
 _DENIAL_MESSAGE = "insufficient_scope: tool '{tool_name}' requires elevated permissions"
@@ -70,6 +68,18 @@ class ScopeEnforcementMiddleware(Middleware):
         tool_name: str = context.message.name
         token = get_access_token()
 
+        # Argus round 1 finding: this bypasses ALL scope checks for EVERY
+        # tool for any Okta-authenticated employee, including high-privilege
+        # ones -- ea_respond_to_approval (resolves a human-in-the-loop
+        # booking-approval hold) and ea_request_booking (triggers the
+        # autonomy gate). This matches the "valid scoped token = admission"
+        # principle for interactive users the sibling services already use
+        # (reclaw-comms-mcp/main.py has the identical bypass), and
+        # `require_owner_identity` still confines each caller to their own
+        # owner_identity's state -- lateral access to another owner's
+        # ledger/approvals is not possible. Intentional, not a gap; noted
+        # here so a reviewer of a future high-privilege tool evaluates the
+        # same question rather than assuming scope enforcement covers it.
         if is_interactive_token(token):
             return await call_next(context)
 
@@ -188,7 +198,7 @@ class ObservabilityMiddleware(Middleware):
                         upstream: dict[str, Any] = token.claims.get("upstream_claims", {})
                         email = upstream.get("email") or try_resolve_email(token)
             except Exception:
-                logger.warning("Failed to extract user identity for observability", exc_info=True)
+                log_security_event("identity_extraction_failed", tool=tool_name)
             log_tool_call(
                 tool=tool_name,
                 duration_ms=duration_ms,

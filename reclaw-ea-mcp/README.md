@@ -5,10 +5,10 @@ holds/booking discipline, and the autonomy gate, exposed as a tool surface for t
 run-loop host (TECH-5084, not yet built). See [`../reclaw-ea/docs/DESIGN.md`](../reclaw-ea/docs/DESIGN.md)
 §1a for the platform/deployment decision this service implements.
 
-This is one of several sibling projects in the `rh-reclaw` monorepo (see `../reclaw-comms-mcp/`,
-the agent-to-agent comms hub this service will eventually speak to as an MCP client, and
-`../reclaw-ea/`, the library this service wraps) -- all commands below assume you're running them
-from *inside this directory*, not the repo root.
+This is one of several sibling projects in the `rh-reclaw` monorepo (see `../` -- the repo root
+itself is `reclaw-comms-mcp`, the agent-to-agent comms hub this service will eventually speak to
+as an MCP client -- and `../reclaw-ea/`, the library this service wraps) -- all commands below
+assume you're running them from *inside this directory*, not the repo root.
 
 ## Tool surface
 
@@ -42,6 +42,11 @@ See `providers/ea.py`'s module docstring for the full list and tracking tickets.
 * **Booking**: `ea_request_booking`/`ea_respond_to_approval` run the deterministic booking
   discipline but do not create a real calendar event -- the caller is expected to do that itself
   and retry the tool call if the invite creation fails.
+* **External-counterparty detection**: `default_is_external` (TECH-5069) is not wired to any real
+  domain/org-membership resolution, so **every counterparty is currently classified as internal**.
+  The "an external counterparty is always `ask_first`" invariant `ea_request_booking`'s autonomy
+  gate is designed to enforce is NOT YET enforced for any actual external party -- do not rely on
+  it until TECH-5069 lands.
 
 ## Setup
 
