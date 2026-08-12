@@ -76,6 +76,14 @@ TASK_NAMESPACE = "internal.coordination"
 MAX_PARTICIPANTS_PER_CONVERSATION = 50
 MAX_DISPLAY_NAME_LENGTH = 255
 MAX_ACCEPTED_TYPES = 20
+# Per-entry length cap for a single accepted_types string (Argus round 2,
+# security): MAX_ACCEPTED_TYPES bounds the LIST length, but nothing
+# previously bounded each entry's own length -- a caller could submit 20
+# arbitrarily large strings, all pass the count check, then get echoed
+# back verbatim in UnknownConversationTypeError's message. Every real
+# CONVERSATION_TYPES value is under 30 characters; 100 is a generous
+# margin, not a tight fit to today's one value.
+MAX_ACCEPTED_TYPE_LENGTH = 100
 MAX_PAYLOAD_BYTES = 65536
 
 # Message types known to the board (v1: all under scheduling.availability).

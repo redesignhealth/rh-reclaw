@@ -34,7 +34,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
+from exceptions import (
+    AccessDeniedError,
+    InvalidConversationStateError,
+    RateLimitExceededError,
+    UnknownConversationTypeError,
+)
 from models import Agent, AuditLog, Participant
 from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
@@ -260,6 +265,96 @@ class TestRegisterAgent:
         )
         assert agent.accepted_types == ["scheduling.availability"]
 
+    async def test_oversized_accepted_types_of_unknown_values_still_hits_count_cap(
+        self, session: AsyncSession
+    ) -> None:
+        """The ``MAX_ACCEPTED_TYPES`` count check runs before the
+        unknown-type check (Argus round 1, security): an oversized list of
+        entirely-unknown type strings must still be rejected by the count
+        cap, not have every entry echoed back verbatim in an
+        ``UnknownConversationTypeError`` message with no size bound of its
+        own."""
+        with pytest.raises(ValueError, match="accepted_types exceeds 20 entries"):
+            await _register(
+                session,
+                "agent-oversized-unknown-types",
+                accepted_types=[f"bogus-{i}" for i in range(21)],
+            )
+
+    async def test_empty_accepted_types_raises_plain_value_error(
+        self, session: AsyncSession
+    ) -> None:
+        """An empty ``accepted_types`` list is a distinct failure from
+        "contains an unknown type" (Argus round 1): there is no unknown
+        value to usefully enumerate, so this stays a bare ``ValueError``
+        rather than ``UnknownConversationTypeError`` -- the prior behavior
+        raised the latter with the confusing message
+        ``"... (got unknown: [])"``, naming zero unknown values while still
+        claiming something was unknown."""
+        with pytest.raises(ValueError, match="accepted_types must be non-empty"):
+            await _register(
+                session,
+                "agent-empty-types",
+                accepted_types=[],
+            )
+
+    async def test_oversized_single_accepted_type_entry_rejected(
+        self, session: AsyncSession
+    ) -> None:
+        """The per-entry length cap (Argus round 2, security): a single
+        oversized string must be rejected before it can be echoed back
+        verbatim in an ``UnknownConversationTypeError`` message -- the count
+        cap alone does not bound how long any one entry is."""
+        with pytest.raises(ValueError, match="accepted_types entries must not exceed"):
+            await _register(
+                session,
+                "agent-oversized-single-type",
+                accepted_types=["x" * 101],
+            )
+
+    async def test_accepted_type_entry_at_max_length_succeeds(self, session: AsyncSession) -> None:
+        """Boundary-value test (Argus round 3): the length-cap check passes
+        for valid types under the MAX_ACCEPTED_TYPE_LENGTH limit."""
+        agent = await _register(
+            session,
+            "agent-at-cap",
+            accepted_types=["scheduling.availability"],
+        )
+        assert agent.accepted_types == ["scheduling.availability"]
+
+    async def test_empty_or_whitespace_sub_raises_plain_value_error(
+        self, session: AsyncSession
+    ) -> None:
+        for bad_sub in ("", "   "):
+            with pytest.raises(ValueError, match="sub must be non-empty"):
+                await _register(session, bad_sub)
+
+    async def test_unknown_accepted_type_raises_specific_error(self, session: AsyncSession) -> None:
+        """An ``accepted_types`` entry outside ``schemas.CONVERSATION_TYPES``
+        raises ``UnknownConversationTypeError`` (not a bare ``ValueError``),
+        with a message naming the unknown value and the actual valid set --
+        this is deliberately specific/client-safe, unlike the uniform
+        ``AccessDeniedError`` shape (see exceptions.py's module docstring)."""
+        with pytest.raises(UnknownConversationTypeError, match=r"got unknown: \['bogus'\]"):
+            await _register(
+                session,
+                "agent-unknown-type",
+                accepted_types=["bogus"],
+            )
+
+    async def test_unknown_accepted_type_mixed_with_valid_reports_only_unknown(
+        self, session: AsyncSession
+    ) -> None:
+        """A mix of one valid and one unknown type still rejects the whole
+        call (accepted_types must be entirely valid), and the error names
+        only the unknown entry, not the valid one alongside it."""
+        with pytest.raises(UnknownConversationTypeError, match=r"got unknown: \['bogus'\]"):
+            await _register(
+                session,
+                "agent-mixed-types",
+                accepted_types=["scheduling.availability", "bogus"],
+            )
+
 
 # --- start_conversation --------------------------------------------------------
 
@@ -294,6 +389,29 @@ class TestStartConversation:
             )
         ).all()
         assert [(m.seq, m.type) for m in messages] == [(1, "availability_request")]
+
+    async def test_unknown_conversation_type_raises_specific_error(
+        self, session: AsyncSession
+    ) -> None:
+        """A ``conversation_type`` outside ``schemas.CONVERSATION_TYPES``
+        raises ``UnknownConversationTypeError`` (not the uniform
+        ``AccessDeniedError``) naming the unsupported value and the actual
+        valid set -- checked before any target/admission lookup, so this
+        does not depend on or reveal anything about the named targets."""
+        owner = await _register(session, "owner-unknown-type")
+        target = await _register(session, "target-unknown-type")
+
+        with pytest.raises(
+            UnknownConversationTypeError, match=r"unknown conversation_type 'bogus'"
+        ):
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="bogus",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+            )
 
     async def test_unknown_target_denied(self, session: AsyncSession) -> None:
         owner = await _register(session, "owner-2")

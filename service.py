@@ -102,10 +102,16 @@ from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
+from exceptions import (
+    AccessDeniedError,
+    InvalidConversationStateError,
+    RateLimitExceededError,
+    UnknownConversationTypeError,
+)
 from models import Agent, AuditLog, Conversation, Message, Participant, Task
 from schemas import (
     CONVERSATION_TYPES,
+    MAX_ACCEPTED_TYPE_LENGTH,
     MAX_ACCEPTED_TYPES,
     MAX_DISPLAY_NAME_LENGTH,
     TASK_NAMESPACE,
@@ -565,12 +571,20 @@ async def register_agent(
     admission-decision input, allowing a re-register to change it became a
     forgeable privilege-escalation path, not just an unmodeled edge case.
 
-    Raises ``ValueError`` (not ``AccessDeniedError``) for malformed input — this
-    is a data-validation failure, not an authorization decision (the
-    caller has not claimed a resource yet). This includes an empty or
-    over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``, and
-    an empty, unknown-typed, or over-count (``schemas.MAX_ACCEPTED_TYPES``)
-    ``accepted_types``.
+    Raises ``ValueError`` (not ``AccessDeniedError``) for malformed input --
+    this is a data-validation failure, not an authorization decision (the
+    caller has not claimed a resource yet). In validation order: empty ``sub``;
+    empty or over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``;
+    empty ``accepted_types``; over-count (``schemas.MAX_ACCEPTED_TYPES``)
+    ``accepted_types``; or any entry over-length
+    (``schemas.MAX_ACCEPTED_TYPE_LENGTH``) within ``accepted_types``. NOTE: an
+    empty ``accepted_types`` previously raised ``UnknownConversationTypeError``
+    with an empty "got unknown" list; it now raises this plain ``ValueError``
+    instead (a deliberate breaking change to the ToolError shape for that one
+    input -- there is no unknown value to usefully name for an empty list).
+    An ``accepted_types`` containing a value outside ``CONVERSATION_TYPES``
+    instead raises ``UnknownConversationTypeError`` (exceptions.py) --
+    specific and client-safe by design, unlike the cases above.
     """
     sub = sub.strip()
     if not sub:
@@ -580,14 +594,40 @@ async def register_agent(
         raise ValueError("display_name must be non-empty")
     if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
         raise ValueError(f"display_name exceeds {MAX_DISPLAY_NAME_LENGTH} characters")
-    unknown_types = sorted(set(accepted_types) - CONVERSATION_TYPES)
-    if not accepted_types or unknown_types:
+    # Cap check runs FIRST, before computing unknown_types (Argus round 1,
+    # security): the old order let a caller submit an arbitrarily large
+    # list of unknown-type strings and get every one of them echoed back
+    # verbatim in the error message, silently bypassing the declared
+    # MAX_ACCEPTED_TYPES cap for this input shape. Bounding the input size
+    # up front means unknown_types is now computed over an already-capped
+    # list, whatever the values.
+    if len(accepted_types) > MAX_ACCEPTED_TYPES:
+        raise ValueError(f"accepted_types exceeds {MAX_ACCEPTED_TYPES} entries")
+    # Empty list is a distinct failure from "contains an unknown type" --
+    # it's not client-safe/specific in the same way (there's no unknown
+    # value to usefully enumerate), so it stays a bare ValueError rather
+    # than UnknownConversationTypeError. Splitting these (Argus round 1)
+    # avoids the confusing prior message "... (got unknown: [])" for an
+    # empty list, which named zero unknown values while still claiming
+    # something was unknown.
+    if not accepted_types:
+        raise ValueError("accepted_types must be non-empty")
+    # Per-entry length cap (Argus round 2, security): the count cap above
+    # bounds how many entries there are, not how long any one entry is --
+    # without this, 20 arbitrarily large strings would all pass the count
+    # check, then get echoed back verbatim in UnknownConversationTypeError
+    # below. Checked before computing unknown_types for the same
+    # echo-bounding reason as the count check.
+    if any(len(t) > MAX_ACCEPTED_TYPE_LENGTH for t in accepted_types):
         raise ValueError(
+            f"accepted_types entries must not exceed {MAX_ACCEPTED_TYPE_LENGTH} characters"
+        )
+    unknown_types = sorted(set(accepted_types) - CONVERSATION_TYPES)
+    if unknown_types:
+        raise UnknownConversationTypeError(
             "accepted_types must be a non-empty subset of "
             f"{sorted(CONVERSATION_TYPES)} (got unknown: {unknown_types})"
         )
-    if len(accepted_types) > MAX_ACCEPTED_TYPES:
-        raise ValueError(f"accepted_types exceeds {MAX_ACCEPTED_TYPES} entries")
     normalized_types = sorted(set(accepted_types))
 
     existing = (await session.execute(select(Agent).where(Agent.sub == sub))).scalar_one_or_none()
@@ -765,8 +805,10 @@ async def start_conversation(
     initiator = await _require_active_agent(
         session, actor_sub=actor_sub, agent_id=initiator_agent_id
     )
+    if len(conversation_type) > MAX_ACCEPTED_TYPE_LENGTH:
+        raise ValueError(f"conversation_type exceeds {MAX_ACCEPTED_TYPE_LENGTH} characters")
     if conversation_type not in CONVERSATION_TYPES:
-        raise ValueError(
+        raise UnknownConversationTypeError(
             f"unknown conversation_type {conversation_type!r} — supported: "
             f"{sorted(CONVERSATION_TYPES)}"
         )
