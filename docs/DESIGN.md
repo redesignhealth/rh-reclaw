@@ -210,7 +210,7 @@ block per environment, plus:
 - **EFS** for FastMCP's OAuth token storage (`MCP_TOKEN_STORAGE_PATH`): same pattern
   as rh-mcp, one file system per service, `prevent_destroy`.
 - **DNS**: Route53 CNAME → the module's Tailscale MagicDNS hostname
-  (`reclaw-comms.drum-mackarel.ts.net`), plus a human-friendly alias if this ever
+  (`reclaw-mcp.drum-mackarel.ts.net`), plus a human-friendly alias if this ever
   needs one (`comms.core.redesignhealth.com`), though likely unnecessary, since the
   only clients are EA agents, not humans in a browser.
 - **Migrations**: confirm the execution mechanism against an existing DB-backed
