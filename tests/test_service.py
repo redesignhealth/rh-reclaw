@@ -2066,6 +2066,28 @@ class TestPerTypeTTL:
         delta = conv.expires_at - before
         assert abs(delta.total_seconds() - CONVERSATION_TTL["internal"].total_seconds()) < 5
 
+    async def test_asymmetric_gets_14_day_ttl(self, session: AsyncSession) -> None:
+        creator = await _register(session, "ttl-asymmetric-creator")
+        target = await _register(session, "ttl-asymmetric-target")
+        client = _FakeOwnershipClient(
+            {
+                creator.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": True, "owners": ["dan", "priya"]},
+            }
+        )
+        before = datetime.now(UTC)
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="asymmetric",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        delta = conv.expires_at - before
+        assert abs(delta.total_seconds() - CONVERSATION_TTL["asymmetric"].total_seconds()) < 5
+
     async def test_explicit_expires_at_overrides_ttl(self, session: AsyncSession) -> None:
         creator = await _register(session, "ttl-override-creator")
         target = await _register(session, "ttl-override-target")

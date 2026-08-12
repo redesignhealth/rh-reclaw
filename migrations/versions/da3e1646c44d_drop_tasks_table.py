@@ -41,12 +41,19 @@ def upgrade() -> None:
     op.drop_index("idx_tasks_created_at_id", table_name="tasks", if_exists=True)
     op.drop_index("idx_tasks_created_by_status", table_name="tasks", if_exists=True)
     op.drop_index("idx_audit_log_task_id", table_name="audit_log", if_exists=True)
-    op.drop_constraint("audit_log_task_id_fkey", "audit_log", type_="foreignkey")
-    op.drop_column("audit_log", "task_id")
-    op.drop_table("tasks")
+    # Raw SQL for IF EXISTS guards — op.drop_constraint/op.drop_column/op.drop_table
+    # have no native IF EXISTS support, and this migration may run on a DB where
+    # 6d2a8e63e469 was never applied (e.g. a fresh dev environment).
+    op.execute("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_task_id_fkey")
+    op.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS task_id")
+    op.execute("DROP TABLE IF EXISTS tasks")
 
 
 def downgrade() -> None:
+    # WARNING: this downgrade is permanently lossy — all task data (now
+    # represented as conversations with task_assign/etc messages) is
+    # unrecoverable by reverting this migration. Downgrade is provided for
+    # schema completeness only, not as a data-recovery path.
     op.create_table(
         "tasks",
         sa.Column(
@@ -83,8 +90,10 @@ def downgrade() -> None:
             autoincrement=False,
             nullable=False,
         ),
+        # Use the original IN(...) form to match 6d2a8e63e469 exactly and
+        # avoid schema-drift noise from autogenerate's array normalization.
         sa.CheckConstraint(
-            "status = ANY (ARRAY['open'::text, 'done'::text, 'declined'::text])",
+            "status IN ('open', 'done', 'declined')",
             name="ck_tasks_status",
         ),
         sa.CheckConstraint("created_by <> assignee_id", name="ck_tasks_distinct_parties"),
@@ -92,16 +101,28 @@ def downgrade() -> None:
         sa.ForeignKeyConstraint(["created_by"], ["agents.id"], name="tasks_created_by_fkey"),
         sa.PrimaryKeyConstraint("id", name="tasks_pkey"),
     )
-    op.create_index("idx_tasks_created_by_status", "tasks", ["created_by", "status"], unique=False)
+    op.create_index(
+        "idx_tasks_created_by_status",
+        "tasks",
+        ["created_by", "status"],
+        unique=False,
+        if_not_exists=True,
+    )
     op.create_index(
         "idx_tasks_created_at_id",
         "tasks",
         [sa.literal_column("created_at DESC"), sa.literal_column("id DESC")],
         unique=False,
+        if_not_exists=True,
     )
     op.create_index(
-        "idx_tasks_assignee_id_status", "tasks", ["assignee_id", "status"], unique=False
+        "idx_tasks_assignee_id_status",
+        "tasks",
+        ["assignee_id", "status"],
+        unique=False,
+        if_not_exists=True,
     )
-    op.add_column("audit_log", sa.Column("task_id", sa.UUID(), autoincrement=False, nullable=True))
-    op.create_foreign_key("audit_log_task_id_fkey", "audit_log", "tasks", ["task_id"], ["id"])
-    op.create_index("idx_audit_log_task_id", "audit_log", ["task_id"], unique=False)
+    op.execute("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS task_id UUID REFERENCES tasks(id)")
+    op.create_index(
+        "idx_audit_log_task_id", "audit_log", ["task_id"], unique=False, if_not_exists=True
+    )

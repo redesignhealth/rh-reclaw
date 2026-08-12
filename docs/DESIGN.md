@@ -93,7 +93,9 @@ verified identity, at which point `agent_key` should be removed.
 **Membership rules (v1):**
 
 - Any registered agent may start a conversation with N other agents. All named
-  targets must exist, be active, and list the conversation type in `accepted_types`.
+  targets must exist and be active. (`accepted_types` is informational in v1 — it
+  declares which message types an agent intends to handle but is not enforced
+  at admission time; enforcement is deferred to a future release.)
   The creator becomes an `active` participant with `role=owner`. **Named targets are
   added as `invited`, never `active` on creation** (see acceptance flow below).
 - **Any active member may invite others** (creator is `owner` so this can tighten to
@@ -148,19 +150,25 @@ Design notes:
 - Rate limits (per-sender posts per conversation per hour, and conversation-starts per
   hour) are computed from the tables. No Redis until it matters.
 
-## 6. Message schemas — `scheduling.availability` v1
+## 6. Message schemas (TECH-5118 two-axis model)
 
 Strict Pydantic (`extra='forbid'`), timezone-aware datetimes only, enum-coded reasons,
-**no free-text fields anywhere**. All types legal only in `state=active`.
+**no free-text fields anywhere (except `note`, which is provisional/pre-quarantine pipeline)**. All types legal only in `state=active`.
 
-| Type | Payload | Semantics |
-|---|---|---|
-| `availability_request` | window {start,end}, duration_min, modality(video\|phone\|in_person), priority, constraints[] (enum-coded) | opens the negotiation |
-| `availability_response` | slots[{start,end,preference 0..1}] max 10, or none_available+reason | **`preference` is the product**: judgment crosses the boundary, never calendar data. There is no field for raw calendar to travel in |
-| `counter_proposal` | same slots shape | iterate |
-| `confirm` | slot {start,end} | transitions conversation → `completed`. Booking itself is EA-side |
-| `decline` | reason (enum) | sets sender's participant status to `declined`. All non-owners declined → conversation `canceled` |
-| `needs_clarification` | about_seq | pause signal. A human/EA needs to weigh in |
+| Type | `boundary_safe` | Payload | Semantics |
+|---|---|---|---|
+| `availability_request` | True | window {start,end}, duration_min, modality(video\|phone\|in_person), priority, constraints[] (enum-coded) | opens scheduling negotiation |
+| `availability_response` | True | slots[{start,end,preference 0..1}] max 10, or none_available+reason | **`preference` is the product**: judgment crosses the boundary, never calendar data |
+| `counter_proposal` | True | same slots shape | iterate on slots |
+| `confirm` | True | slot {start,end} | transitions conversation → `completed`. Booking itself is EA-side |
+| `decline` | True | reason (enum) | sets sender's participant status to `declined`. All non-owners declined → conversation `canceled` |
+| `needs_clarification` | True | about_seq | pause signal. A human/EA needs to weigh in |
+| `task_assign` | True | action (enum), scheduling params | opens task-coordination; structured spec, no free text |
+| `task_report` | True | progress (enum), optional note_ref | non-terminal status update from assignee |
+| `task_complete` | True | _(minimal)_ | transitions conversation → `completed` |
+| `task_decline` | True | reason (enum) | member-only; transitions conversation → `canceled` |
+| `task_cancel` | True | reason (enum) | owner-only; transitions conversation → `canceled` |
+| `note` | **False** | text (string) | free-text note; pre-quarantine — provisional |
 
 ## 7. MCP tool surface
 
@@ -256,7 +264,7 @@ Currently registered message types (all `boundary_safe=True` unless noted):
 | `task_complete` | True | transitions conversation → `completed` |
 | `task_decline` | True | assignee-only; transitions conversation → `canceled` |
 | `task_cancel` | True | owner-only; transitions conversation → `canceled` |
-| `note` | **False** | free-text note (pre-quarantine pipeline; `internal` only in practice via boundary rule) |
+| `note` | **False** | free-text note (pre-quarantine pipeline; `internal` always; `asymmetric` only when no boundary crossed; blocked in `open`) |
 
 **Sender-role restrictions**: `task_cancel` is owner-only; `task_decline` is
 member-only (non-owner). These map directly to `participants.role` and are checked

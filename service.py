@@ -92,6 +92,7 @@ expand a frozen owner set), and ``denied.boundary_crossing``/
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import logging
 import uuid
@@ -476,16 +477,16 @@ async def _load_participant_for_read(
 async def _owner_sets_for(
     agents: list[Agent], ownership_client: OwnershipClient
 ) -> dict[uuid.UUID, frozenset[str]]:
-    """Resolve each agent's verified owner set, one lookup per agent.
+    """Resolve each agent's verified owner set, all lookups in parallel.
 
     Callers MUST fail closed on any exception raised here (see
     ``OwnershipClient``'s docstring) — this helper does not catch.
     """
-    result: dict[uuid.UUID, frozenset[str]] = {}
-    for agent in agents:
-        info = await ownership_client.get_agent_owners(agent.id)
-        result[agent.id] = frozenset(info.get("owners") or [])
-    return result
+    infos = await asyncio.gather(*(ownership_client.get_agent_owners(a.id) for a in agents))
+    return {
+        agent.id: frozenset(info.get("owners") or [])
+        for agent, info in zip(agents, infos, strict=True)
+    }
 
 
 def _pairwise_admitted(
@@ -806,14 +807,12 @@ async def list_conversations(
             ts_part, id_part = cursor.rsplit("|", 1)
             cursor_ts = datetime.fromisoformat(ts_part)
             cursor_id = uuid.UUID(id_part)
-        except (ValueError, AttributeError):
-            cursor_ts = None
-            cursor_id = None
-        if cursor_ts is not None and cursor_id is not None:
-            stmt = stmt.where(
-                tuple_(Conversation.created_at, Conversation.id)
-                < tuple_(literal(cursor_ts), literal(cursor_id))
-            )
+        except (ValueError, AttributeError) as exc:
+            raise ValueError(f"malformed cursor: {cursor!r}") from exc
+        stmt = stmt.where(
+            tuple_(Conversation.created_at, Conversation.id)
+            < tuple_(literal(cursor_ts), literal(cursor_id))
+        )
 
     rows = list((await session.execute(stmt)).scalars().all())
     has_more = len(rows) > limit
@@ -923,7 +922,11 @@ async def _authorize_conversation_open(
     try:
         owner_sets = await _owner_sets_for(participants, ownership_client)
     except Exception as exc:
-        logger.warning("ownership lookup failed opening a conversation: %s", repr(exc))
+        logger.warning(
+            "ownership lookup failed opening a conversation: %s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         await _deny(
             session,
             actor_sub=actor_sub,
@@ -1185,7 +1188,11 @@ async def _authorize_invite_owner_freeze(
             (await ownership_client.get_agent_owners(target.id)).get("owners") or []
         )
     except Exception as exc:
-        logger.warning("ownership lookup failed authorizing an invite: %s", repr(exc))
+        logger.warning(
+            "ownership lookup failed authorizing an invite: %s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         await _deny(
             session,
             actor_sub=actor_sub,
@@ -1442,7 +1449,11 @@ async def _check_boundary_crossing(
                 ]
             )
         except Exception as exc:
-            logger.warning("ownership lookup failed checking boundary crossing: %s", repr(exc))
+            logger.warning(
+                "ownership lookup failed checking boundary crossing: %s",
+                type(exc).__name__,
+                exc_info=True,
+            )
             await _deny(
                 session,
                 actor_sub=actor_sub,

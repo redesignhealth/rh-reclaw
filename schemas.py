@@ -68,8 +68,7 @@ from pydantic import (
 # carries (see MESSAGE_SCHEMAS below). Used to validate ``conversations.type``
 # at start time.
 #
-#   internal   — every participant's verified owner set identical; no
-#                accept ceremony, starts active immediately; owner set
+#   internal   — every participant's verified owner set identical; owner set
 #                frozen at creation.
 #   asymmetric — verified owner sets intersect; standard invite->accept;
 #                owner set frozen at creation.

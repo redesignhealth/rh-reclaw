@@ -18,6 +18,11 @@ _MESSAGE_TYPES = [
     "decline",
     "needs_clarification",
     "note",
+    "task_assign",
+    "task_report",
+    "task_complete",
+    "task_decline",
+    "task_cancel",
 ]
 
 _NON_ACTIVE_STATES = ["completed", "canceled", "expired"]
@@ -75,6 +80,32 @@ class TestResultingConversationState:
 
     def test_unknown_message_type_is_noop(self) -> None:
         assert resulting_conversation_state("not_a_real_type") is None
+
+    def test_task_complete_completes_conversation(self) -> None:
+        assert resulting_conversation_state("task_complete") == "completed"
+
+    def test_task_decline_cancels_unconditionally(self) -> None:
+        # Unlike scheduling's `decline`, task_decline is role-restricted (member-only)
+        # so a single post is always decisive — no all-non-owners cascade needed.
+        assert resulting_conversation_state("task_decline") == "canceled"
+        assert (
+            resulting_conversation_state("task_decline", all_non_owners_declined=True) == "canceled"
+        )
+        assert (
+            resulting_conversation_state("task_decline", all_non_owners_declined=False)
+            == "canceled"
+        )
+
+    def test_task_cancel_cancels_conversation(self) -> None:
+        assert resulting_conversation_state("task_cancel") == "canceled"
+
+    def test_task_report_does_not_transition(self) -> None:
+        assert resulting_conversation_state("task_report") is None
+        assert resulting_conversation_state("task_report", all_non_owners_declined=True) is None
+
+    def test_task_assign_does_not_transition(self) -> None:
+        assert resulting_conversation_state("task_assign") is None
+        assert resulting_conversation_state("task_assign", all_non_owners_declined=True) is None
 
 
 _A = frozenset({"a"})

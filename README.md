@@ -21,7 +21,7 @@ providers/comms.py   # Comms provider sub-server — the MCP tools (see below)
 models.py            # SQLAlchemy 2.x async ORM models (agents, conversations,
                       #   participants, messages, audit_log — DESIGN.md §5)
 db.py                # Async engine/session factory (DATABASE_URL, fail-fast)
-schemas.py           # Pydantic message-payload schemas (scheduling.availability v1)
+schemas.py           # Pydantic message-payload schemas (all registered message types)
 state_machine.py     # Conversation/participant state transitions (DESIGN.md §4, §6)
 service.py           # Domain/service layer: membership rules, uniform denials, audit
 exceptions.py        # Service-layer exception shapes (mapped to ToolError in providers/comms.py)

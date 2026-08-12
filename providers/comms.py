@@ -545,6 +545,7 @@ async def list_conversations(
     state: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    agent_key: str | None = None,
 ) -> dict[str, Any]:
     """Return a paginated list of conversations the caller participates in.
 
@@ -560,19 +561,22 @@ async def list_conversations(
     participant statuses are included — declined and left are not.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
 
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)
-        return await service.list_conversations(
-            session,
-            caller_agent_id=caller.id,
-            role=role,
-            conversation_type=type,
-            state=state,
-            limit=limit,
-            cursor=cursor,
-        )
+        async with _map_service_errors():
+            return await service.list_conversations(
+                session,
+                caller_agent_id=caller.id,
+                role=role,
+                conversation_type=type,
+                state=state,
+                limit=limit,
+                cursor=cursor,
+            )
 
 
 @comms_server.tool
