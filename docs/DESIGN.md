@@ -226,7 +226,9 @@ fail-closed scoping).
   `status`), and `comms_update_task` (`comms:write`, TECH-5099: the
   `open → done`/`declined` transition — either party may mark `done`;
   `declined` is assignee-only, the consent/refusal mechanism; no
-  transition out of a terminal status).
+  transition out of a terminal status). Denials: `denied.not_party`
+  (caller is neither creator nor assignee, or the task doesn't exist —
+  uniform) and `denied.not_assignee` (non-assignee attempted `declined`).
 
 ## 10. Known extensions (explicitly deferred)
 

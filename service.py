@@ -63,13 +63,14 @@ scattered as inline comments):
   ``exceptions.AccessDeniedError``'s docstring — folded into the uniform denial
   rather than given a leakier, more specific message.
 - **Board-level ``Agent.status`` gating**: checked (uniform denial) on the
-  *initiating* side of a write — starting a conversation, inviting, and
-  posting all require the actor's own agent to be board-``active``, and
-  ``invite``/``start_conversation`` require the same of every target. It
-  is deliberately NOT re-checked on ``accept_invite``/``decline_invite``/
-  ``leave``: those are a participant exiting or resolving their own
-  already-granted membership, and a participant should always be able to
-  do that even if ops suspends their agent mid-negotiation.
+  *initiating* side of a write — starting a conversation, inviting,
+  posting, and (TECH-5099) ``update_task`` all require the actor's own
+  agent to be board-``active``, and ``invite``/``start_conversation``
+  require the same of every target. It is deliberately NOT re-checked on
+  ``accept_invite``/``decline_invite``/``leave``: those are a participant
+  exiting or resolving their own already-granted membership, and a
+  participant should always be able to do that even if ops suspends their
+  agent mid-negotiation.
 
 Audit contract
 --------------
@@ -81,8 +82,12 @@ operation it describes. Denial actions are namespaced ``denied.*``:
 of "already active", "declined", "left" distinguishable in the trail even
 though the client sees one uniform message), ``denied.unknown_agent``,
 ``denied.type_not_accepted``, ``denied.already_participant``,
-``denied.bad_state`` (state-machine violation), ``denied.bad_schema``
-(payload validation), and ``denied.rate_limited``.
+``denied.bad_state`` (state-machine violation — conversation *or*, since
+TECH-5099, task-status), ``denied.bad_schema`` (payload validation),
+``denied.rate_limited``, ``denied.not_party`` (caller is neither a task's
+creator nor its assignee — the task-domain analog of ``denied.not_member``),
+and ``denied.not_assignee`` (a non-assignee attempted the assignee-only
+``declined`` transition).
 """
 
 from __future__ import annotations
@@ -1820,8 +1825,36 @@ async def get_tasks(
     }
 
 
-async def _find_task(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
-    return (await session.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
+async def _find_task(
+    session: AsyncSession, task_id: uuid.UUID, *, for_update: bool = False
+) -> Task | None:
+    stmt = select(Task).where(Task.id == task_id)
+    if for_update:
+        stmt = stmt.with_for_update()
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def _task_with_subs(session: AsyncSession, task_id: uuid.UUID) -> tuple[Task, str, str]:
+    """Load ``task_id`` plus its creator/assignee subs in one query.
+
+    Also serves as the post-commit refresh for ``update_task``: since this
+    issues a fresh SELECT on real ``Task`` columns, SQLAlchemy's identity
+    map repopulates the already-tracked ``Task`` instance's ``updated_at``
+    (server-computed by the ``UPDATE`` just committed, otherwise expired
+    and unreadable without an explicit refresh) as a side effect — no
+    separate ``session.refresh()`` call needed.
+    """
+    creator_agent = aliased(Agent)
+    assignee_agent = aliased(Agent)
+    task, created_by_sub, assignee_sub = (
+        await session.execute(
+            select(Task, creator_agent.sub, assignee_agent.sub)
+            .join(creator_agent, creator_agent.id == Task.created_by)
+            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
+            .where(Task.id == task_id)
+        )
+    ).one()
+    return task, created_by_sub, assignee_sub
 
 
 async def _deny_bad_task_state(
@@ -1875,7 +1908,18 @@ async def update_task(
     if status not in ("done", "declined"):
         raise ValueError(f"status must be 'done' or 'declined', got {status!r}")
 
-    task = await _find_task(session, task_id)
+    # Initiating-write check, same as every other write in this module
+    # (add_task/post_message/start_conversation) — a suspended/revoked
+    # agent must not be able to mutate a task's status.
+    await _require_active_agent(session, actor_sub=actor_sub, agent_id=caller_agent_id)
+
+    # for_update=True: without a row lock, two concurrent update_task calls
+    # can both observe status='open', both pass the terminal-state guard
+    # below, and both commit — e.g. a creator's 'done' silently overwriting
+    # an assignee's 'declined'. Serializes concurrent transitions on the
+    # same task, exactly like post_message's seq assignment does for
+    # concurrent posts to the same conversation.
+    task = await _find_task(session, task_id, for_update=True)
     is_creator = task is not None and task.created_by == caller_agent_id
     is_assignee = task is not None and task.assignee_id == caller_agent_id
     if task is None or not (is_creator or is_assignee):
@@ -1916,23 +1960,7 @@ async def update_task(
         detail={"from": "open", "to": status},
     )
     await session.commit()
-    # updated_at's onupdate=text("now()") is computed server-side on the
-    # UPDATE just committed -- SQLAlchemy marks it expired regardless of
-    # expire_on_commit, so a plain attribute read would trigger an async
-    # lazy-load outside any await (MissingGreenlet). Refresh explicitly.
-    await session.refresh(task)
-
-    creator_agent = aliased(Agent)
-    assignee_agent = aliased(Agent)
-    created_by_sub, assignee_sub = (
-        await session.execute(
-            select(creator_agent.sub, assignee_agent.sub)
-            .select_from(Task)
-            .join(creator_agent, creator_agent.id == Task.created_by)
-            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
-            .where(Task.id == task.id)
-        )
-    ).one()
+    task, created_by_sub, assignee_sub = await _task_with_subs(session, task.id)
     return _task_public(
         task,
         caller_agent_id=caller_agent_id,

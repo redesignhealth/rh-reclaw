@@ -61,7 +61,9 @@ class AccessDeniedError(Exception):
 
 
 class InvalidConversationStateError(Exception):
-    """A message type is not legal in the conversation's current state."""
+    """A state-machine transition is not legal in the current state — either
+    a message type disallowed by the conversation's state, or (TECH-5099) a
+    task-status transition attempted from a terminal status."""
 
 
 class RateLimitExceededError(Exception):

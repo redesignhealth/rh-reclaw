@@ -798,6 +798,10 @@ class TestUpdateTask:
         )
         assert result["status"] == "done"
         assert result["role"] == "created"
+        # updated_at must reflect the transition just committed, not a
+        # stale/expired ORM attribute (TECH-5099 Argus round 1: guards the
+        # refresh _task_with_subs performs as a side effect of its SELECT).
+        assert result["updated_at"] >= result["created_at"]
 
     async def test_assignee_marks_done(self, session: AsyncSession) -> None:
         _creator, assignee, task_id = await self._open_task(session)
@@ -833,9 +837,54 @@ class TestUpdateTask:
                 status="declined",
             )
         assert exc_info.value.reason == "denied.not_assignee"
+        assert "denied.not_assignee" in await _audit_actions(session, uuid.UUID(task_id))
 
     async def test_non_party_denied(self, session: AsyncSession) -> None:
         _creator, _assignee, task_id = await self._open_task(session)
+        outsider = await _register(session, "outsider", owner_sub="other-sub")
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await update_task(
+                session,
+                actor_sub="outsider",
+                caller_agent_id=outsider.id,
+                task_id=uuid.UUID(task_id),
+                status="done",
+            )
+        assert exc_info.value.reason == "denied.not_party"
+        assert "denied.not_party" in await _audit_actions(session, uuid.UUID(task_id))
+
+    async def test_non_party_denied_for_declined_too(self, session: AsyncSession) -> None:
+        """A non-party attempting the assignee-only ``declined`` transition
+        must still get ``denied.not_party`` — never ``denied.not_assignee``,
+        which would confirm the caller found a real task with a real
+        assignee (anti-enumeration; TECH-5099 Argus round 1)."""
+        _creator, _assignee, task_id = await self._open_task(session)
+        outsider = await _register(session, "outsider", owner_sub="other-sub")
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await update_task(
+                session,
+                actor_sub="outsider",
+                caller_agent_id=outsider.id,
+                task_id=uuid.UUID(task_id),
+                status="declined",
+            )
+        assert exc_info.value.reason == "denied.not_party"
+
+    async def test_non_party_denied_uniformly_even_on_terminal_task(
+        self, session: AsyncSession
+    ) -> None:
+        """Guard ordering is a security property: a non-party hitting an
+        already-terminal task must get the uniform ``denied.not_party``,
+        never the specific ``InvalidConversationStateError`` (which would
+        leak the task's current status to a stranger)."""
+        creator, _assignee, task_id = await self._open_task(session)
+        await update_task(
+            session,
+            actor_sub="cos",
+            caller_agent_id=creator.id,
+            task_id=uuid.UUID(task_id),
+            status="done",
+        )
         outsider = await _register(session, "outsider", owner_sub="other-sub")
         with pytest.raises(AccessDeniedError) as exc_info:
             await update_task(
@@ -858,6 +907,8 @@ class TestUpdateTask:
                 status="done",
             )
         assert exc_info.value.reason == "denied.not_party"
+        actions = (await session.execute(select(AuditLog.action))).scalars().all()
+        assert "denied.not_party" in actions
 
     async def test_no_transition_out_of_done(self, session: AsyncSession) -> None:
         creator, _assignee, task_id = await self._open_task(session)
@@ -876,6 +927,7 @@ class TestUpdateTask:
                 task_id=uuid.UUID(task_id),
                 status="done",
             )
+        assert "denied.bad_state" in await _audit_actions(session, uuid.UUID(task_id))
 
     async def test_no_transition_out_of_declined(self, session: AsyncSession) -> None:
         _creator, assignee, task_id = await self._open_task(session)
