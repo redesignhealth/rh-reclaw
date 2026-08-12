@@ -414,6 +414,7 @@ async def start_conversation(
                 conversation_type=conversation_type,
                 target_agent_ids=target_uuids,
                 initial_message=initial_message,
+                ownership_client=service.AgentTableOwnershipClient(session),
                 message_type=message_type,
                 expires_at=expires_dt,
                 schema_version=schema_version,
@@ -464,6 +465,7 @@ async def post_message(
                 conversation_id=conv_id,
                 message_type=message_type,
                 payload=payload,
+                ownership_client=service.AgentTableOwnershipClient(session),
                 schema_version=schema_version,
             )
 
@@ -607,9 +609,10 @@ async def invite(
 
     Requires the caller to currently be an ``active`` participant (v1: any
     active member may invite, not just the owner). The target must be a
-    board-active agent accepting this conversation's type, and must not
-    already have a participant row in any status — uniform denial for
-    every failure mode.
+    board-active agent, must not already have a participant row in any
+    status, and — for ``internal``/``asymmetric`` conversations — must not
+    introduce an owner outside the conversation's frozen owner set —
+    uniform denial for every failure mode.
     """
     token = _require_token()
     base_sub = _require_identity(token)
@@ -627,6 +630,7 @@ async def invite(
                 inviter_agent_id=caller.id,
                 conversation_id=conv_id,
                 target_agent_id=target_id,
+                ownership_client=service.AgentTableOwnershipClient(session),
             )
 
     return {

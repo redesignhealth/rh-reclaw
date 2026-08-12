@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from state_machine import is_message_legal, resulting_conversation_state
+from state_machine import (
+    is_boundary_crossing_safe,
+    is_message_legal,
+    resulting_conversation_state,
+)
 
 _MESSAGE_TYPES = [
     "availability_request",
@@ -13,6 +17,7 @@ _MESSAGE_TYPES = [
     "confirm",
     "decline",
     "needs_clarification",
+    "note",
 ]
 
 _NON_ACTIVE_STATES = ["completed", "canceled", "expired"]
@@ -70,3 +75,44 @@ class TestResultingConversationState:
 
     def test_unknown_message_type_is_noop(self) -> None:
         assert resulting_conversation_state("not_a_real_type") is None
+
+
+_A = frozenset({"a"})
+_B = frozenset({"b"})
+_SHARED = frozenset({"a", "b"})
+_EMPTY: frozenset[str] = frozenset()
+
+
+class TestIsBoundaryCrossingSafe:
+    def test_open_requires_boundary_safe(self) -> None:
+        assert is_boundary_crossing_safe("open", True, _EMPTY, _EMPTY) is True
+        assert is_boundary_crossing_safe("open", False, _EMPTY, _EMPTY) is False
+
+    def test_open_ignores_owner_sets(self) -> None:
+        # open has no ownership concept -- boundary_safe alone decides.
+        assert is_boundary_crossing_safe("open", True, _A, _B) is True
+        assert is_boundary_crossing_safe("open", False, _A, _A) is False
+
+    def test_internal_always_safe(self) -> None:
+        assert is_boundary_crossing_safe("internal", True, _A, _A) is True
+        assert is_boundary_crossing_safe("internal", False, _A, _B) is True
+        assert is_boundary_crossing_safe("internal", False, _EMPTY, _EMPTY) is True
+
+    def test_asymmetric_boundary_safe_always_legal(self) -> None:
+        assert is_boundary_crossing_safe("asymmetric", True, _A, _B) is True
+
+    def test_asymmetric_single_owner_to_shared_crosses(self) -> None:
+        # sender owns only {a}; other side (shared) has an owner {b}
+        # outside the sender's set -- crosses, illegal.
+        assert is_boundary_crossing_safe("asymmetric", False, _A, _SHARED) is False
+
+    def test_asymmetric_shared_to_single_owner_does_not_cross(self) -> None:
+        # sender is shared {a, b}; other side's owner {b} is already in the
+        # sender's own set -- does not cross, legal.
+        assert is_boundary_crossing_safe("asymmetric", False, _SHARED, _B) is True
+
+    def test_asymmetric_same_single_owner_does_not_cross(self) -> None:
+        assert is_boundary_crossing_safe("asymmetric", False, _A, _A) is True
+
+    def test_asymmetric_disjoint_owners_crosses(self) -> None:
+        assert is_boundary_crossing_safe("asymmetric", False, _A, _B) is False

@@ -47,9 +47,19 @@ from service import (
     leave,
     may_assign,
     register_agent,
-    start_conversation,
     update_task,
 )
+from service import start_conversation as _start_conversation
+
+
+async def start_conversation(session: AsyncSession, **kwargs: object) -> object:
+    """Thin wrapper defaulting ``ownership_client`` (TECH-5118 phase 2 added
+    it as a required kwarg) — these tests only use ``start_conversation``
+    incidentally, to set up a conversation for ``related_conversation_id``
+    referential checks, so the real ownership behavior is irrelevant here."""
+    kwargs.setdefault("ownership_client", AgentTableOwnershipClient(session))
+    return await _start_conversation(session, **kwargs)
+
 
 SERVICE_ROOT = Path(__file__).parent.parent
 _DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"

@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+import service as _service
 from exceptions import (
     AccessDeniedError,
     InvalidConversationStateError,
@@ -45,17 +46,45 @@ from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
     MAX_CONVERSATION_STARTS_PER_HOUR,
     MAX_MESSAGES_PER_CONVERSATION_PER_HOUR,
+    AgentTableOwnershipClient,
+    OwnershipClient,
     accept_invite,
     decline_invite,
     get_conversation,
     inbox,
-    invite,
     leave,
     list_agents,
-    post_message,
     register_agent,
-    start_conversation,
 )
+
+
+async def start_conversation(
+    session: AsyncSession, *, ownership_client: OwnershipClient | None = None, **kwargs: Any
+) -> Any:
+    """Thin wrapper defaulting ``ownership_client`` (TECH-5118 phase 2 added
+    it as a required kwarg) so every pre-existing call site in this file
+    keeps working unchanged — tests that care about ownership behavior
+    pass their own fake client explicitly."""
+    return await _service.start_conversation(
+        session, ownership_client=ownership_client or AgentTableOwnershipClient(session), **kwargs
+    )
+
+
+async def invite(
+    session: AsyncSession, *, ownership_client: OwnershipClient | None = None, **kwargs: Any
+) -> Any:
+    return await _service.invite(
+        session, ownership_client=ownership_client or AgentTableOwnershipClient(session), **kwargs
+    )
+
+
+async def post_message(
+    session: AsyncSession, *, ownership_client: OwnershipClient | None = None, **kwargs: Any
+) -> Any:
+    return await _service.post_message(
+        session, ownership_client=ownership_client or AgentTableOwnershipClient(session), **kwargs
+    )
+
 
 SERVICE_ROOT = Path(__file__).parent.parent
 _DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
@@ -417,7 +446,7 @@ class TestStartConversation:
         owner = await _register(session, "owner-2")
         bogus_target_id = uuid.uuid4()
 
-        with pytest.raises(AccessDeniedError) as exc_info:
+        with pytest.raises(AccessDeniedError):
             await start_conversation(
                 session,
                 actor_sub=owner.sub,
@@ -426,44 +455,189 @@ class TestStartConversation:
                 target_agent_ids=[bogus_target_id],
                 initial_message=_request_payload(),
             )
-        unknown_message = str(exc_info.value)
-
-        owner2 = await _register(session, "owner-3")
-        # register_agent requires a non-empty, KNOWN accepted_types subset,
-        # and v1 has exactly one conversation type — so there is no way to
-        # register an agent that legitimately doesn't accept it via the
-        # public API. Simulate "accepts nothing" directly on the row (e.g. a
-        # future type-restriction change) rather than through register_agent.
-        target_wrong_type = await _register(session, "target-wrong-type")
-        target_wrong_type.accepted_types = []
-        await session.commit()
-
-        with pytest.raises(AccessDeniedError) as exc_info_2:
-            await start_conversation(
-                session,
-                actor_sub=owner2.sub,
-                initiator_agent_id=owner2.id,
-                conversation_type="open",
-                target_agent_ids=[target_wrong_type.id],
-                initial_message=_request_payload(),
-            )
-        type_not_accepted_message = str(exc_info_2.value)
-
-        # Anti-enumeration: identical client-visible message for "target
-        # doesn't exist" and "target doesn't accept this type".
-        assert unknown_message == type_not_accepted_message
 
         actions = (
-            (
-                await session.execute(
-                    select(AuditLog.action).where(AuditLog.agent_id.in_([owner.id, owner2.id]))
-                )
-            )
+            (await session.execute(select(AuditLog.action).where(AuditLog.agent_id == owner.id)))
             .scalars()
             .all()
         )
         assert "denied.unknown_agent" in actions
-        assert "denied.type_not_accepted" in actions
+
+
+class _FakeOwnershipClient:
+    """Test double for ``service.OwnershipClient`` — an in-memory owners map,
+    keyed by agent id, same shape as ``tests/test_tasks.py``'s fake."""
+
+    def __init__(self, owners_by_agent_id: dict[uuid.UUID, dict[str, Any]]) -> None:
+        self._owners_by_agent_id = owners_by_agent_id
+
+    async def get_agent_owners(self, agent_id: uuid.UUID) -> dict[str, Any]:
+        if agent_id not in self._owners_by_agent_id:
+            raise LookupError(f"unknown agent {agent_id}")
+        return self._owners_by_agent_id[agent_id]
+
+
+class _FailingOwnershipClient:
+    async def get_agent_owners(self, agent_id: uuid.UUID) -> dict[str, Any]:
+        raise RuntimeError("platform unreachable")
+
+
+class TestConversationOwnershipAdmission:
+    """N-party admission for ``internal``/``asymmetric`` conversations
+    (TECH-5118, DESIGN.md §9) — every pair must independently satisfy the
+    type's predicate; ``open`` never touches the ownership client."""
+
+    async def test_internal_identical_owner_sets_admitted(self, session: AsyncSession) -> None:
+        owner = await _register(session, "int-owner-1")
+        target = await _register(session, "int-target-1")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["dan"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="internal",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        assert conversation.state == "active"
+        assert conversation.owner_snapshot == {"owners": ["dan"]}
+
+    async def test_internal_different_owner_sets_denied(self, session: AsyncSession) -> None:
+        owner = await _register(session, "int-owner-2")
+        target = await _register(session, "int-target-2")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["priya"]},
+            }
+        )
+        with pytest.raises(AccessDeniedError):
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="internal",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+                ownership_client=client,
+            )
+        actions = (
+            (await session.execute(select(AuditLog.action).where(AuditLog.agent_id == owner.id)))
+            .scalars()
+            .all()
+        )
+        assert "denied.not_same_owner" in actions
+
+    async def test_asymmetric_intersecting_owner_sets_admitted(self, session: AsyncSession) -> None:
+        owner = await _register(session, "asym-owner-1")
+        target = await _register(session, "asym-target-1")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": True, "owners": ["dan", "priya"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="asymmetric",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        assert set(conversation.owner_snapshot["owners"]) == {"dan", "priya"}
+
+    async def test_asymmetric_disjoint_owner_sets_denied(self, session: AsyncSession) -> None:
+        owner = await _register(session, "asym-owner-2")
+        target = await _register(session, "asym-target-2")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["priya"]},
+            }
+        )
+        with pytest.raises(AccessDeniedError):
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="asymmetric",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+                ownership_client=client,
+            )
+        actions = (
+            (await session.execute(select(AuditLog.action).where(AuditLog.agent_id == owner.id)))
+            .scalars()
+            .all()
+        )
+        assert "denied.no_owner_overlap" in actions
+
+    async def test_asymmetric_no_star_topology_exception(self, session: AsyncSession) -> None:
+        """A(dan) - B(dan,priya) - C(priya): A-B and B-C each intersect, but
+        A-C does not -- every PAIR must independently satisfy the
+        predicate, not just a chain through an intermediary."""
+        a = await _register(session, "asym-a")
+        b = await _register(session, "asym-b")
+        c = await _register(session, "asym-c")
+        client = _FakeOwnershipClient(
+            {
+                a.id: {"is_shared": False, "owners": ["dan"]},
+                b.id: {"is_shared": True, "owners": ["dan", "priya"]},
+                c.id: {"is_shared": False, "owners": ["priya"]},
+            }
+        )
+        with pytest.raises(AccessDeniedError):
+            await start_conversation(
+                session,
+                actor_sub=a.sub,
+                initiator_agent_id=a.id,
+                conversation_type="asymmetric",
+                target_agent_ids=[b.id, c.id],
+                initial_message=_request_payload(),
+                ownership_client=client,
+            )
+
+    async def test_open_never_touches_ownership_client(self, session: AsyncSession) -> None:
+        owner = await _register(session, "open-owner-1")
+        target = await _register(session, "open-target-1")
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=_FailingOwnershipClient(),
+        )
+        assert conversation.owner_snapshot is None
+
+    async def test_ownership_lookup_failure_fails_closed(self, session: AsyncSession) -> None:
+        owner = await _register(session, "int-owner-fail")
+        target = await _register(session, "int-target-fail")
+        with pytest.raises(AccessDeniedError):
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="internal",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+                ownership_client=_FailingOwnershipClient(),
+            )
+        actions = (
+            (await session.execute(select(AuditLog.action).where(AuditLog.agent_id == owner.id)))
+            .scalars()
+            .all()
+        )
+        assert "denied.ownership_unverified" in actions
 
 
 # --- accept_invite / decline_invite -------------------------------------------
@@ -684,26 +858,6 @@ class TestInvite:
         actions = await _audit_actions(session, conversation.id)
         assert "denied.unknown_agent" in actions
 
-    async def test_denied_type_not_accepted(self, session: AsyncSession) -> None:
-        owner, _target, conversation = await self._active_owner_and_conversation(
-            session, "inv-owner-4", "inv-target-4"
-        )
-        wrong_type_agent = await _register(session, "inv-wrong-type-4")
-        wrong_type_agent.accepted_types = []
-        await session.commit()
-
-        with pytest.raises(AccessDeniedError) as exc_info:
-            await invite(
-                session,
-                actor_sub=owner.sub,
-                inviter_agent_id=owner.id,
-                conversation_id=conversation.id,
-                target_agent_id=wrong_type_agent.id,
-            )
-        assert exc_info.value.reason == "denied.type_not_accepted"
-        actions = await _audit_actions(session, conversation.id)
-        assert "denied.type_not_accepted" in actions
-
     async def test_denied_bad_state_when_conversation_not_active(
         self, session: AsyncSession
     ) -> None:
@@ -733,6 +887,135 @@ class TestInvite:
             )
         actions = await _audit_actions(session, conversation.id)
         assert "denied.bad_state" in actions
+
+
+class TestInviteOwnerFreeze:
+    """TECH-5118: an ``internal``/``asymmetric`` conversation's owner set is
+    frozen at creation — an invite that would introduce an outside owner is
+    rejected, not silently merged in."""
+
+    async def test_open_conversation_skips_owner_freeze_check(self, session: AsyncSession) -> None:
+        owner = await _register(session, "freeze-open-owner")
+        target = await _register(session, "freeze-open-target")
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        new_agent = await _register(session, "freeze-open-new")
+        participant = await invite(
+            session,
+            actor_sub=owner.sub,
+            inviter_agent_id=owner.id,
+            conversation_id=conversation.id,
+            target_agent_id=new_agent.id,
+            ownership_client=_FailingOwnershipClient(),
+        )
+        assert participant.status == "invited"
+
+    async def test_internal_invite_within_frozen_set_admitted(self, session: AsyncSession) -> None:
+        owner = await _register(session, "freeze-int-owner")
+        target = await _register(session, "freeze-int-target")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["dan"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="internal",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        new_agent = await _register(session, "freeze-int-new")
+        client._owners_by_agent_id[new_agent.id] = {"is_shared": False, "owners": ["dan"]}
+        participant = await invite(
+            session,
+            actor_sub=owner.sub,
+            inviter_agent_id=owner.id,
+            conversation_id=conversation.id,
+            target_agent_id=new_agent.id,
+            ownership_client=client,
+        )
+        assert participant.status == "invited"
+
+    async def test_internal_invite_expanding_owner_set_denied(self, session: AsyncSession) -> None:
+        owner = await _register(session, "freeze-int-owner-2")
+        target = await _register(session, "freeze-int-target-2")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["dan"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="internal",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        outsider = await _register(session, "freeze-int-outsider-2")
+        client._owners_by_agent_id[outsider.id] = {"is_shared": False, "owners": ["priya"]}
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await invite(
+                session,
+                actor_sub=owner.sub,
+                inviter_agent_id=owner.id,
+                conversation_id=conversation.id,
+                target_agent_id=outsider.id,
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.owner_set_frozen"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.owner_set_frozen" in actions
+
+        # The frozen snapshot itself must be untouched by the rejected attempt.
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.owner_snapshot == {"owners": ["dan"]}
+
+    async def test_ownership_lookup_failure_on_invite_fails_closed(
+        self, session: AsyncSession
+    ) -> None:
+        owner = await _register(session, "freeze-fail-owner")
+        target = await _register(session, "freeze-fail-target")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["dan"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="internal",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        new_agent = await _register(session, "freeze-fail-new")
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await invite(
+                session,
+                actor_sub=owner.sub,
+                inviter_agent_id=owner.id,
+                conversation_id=conversation.id,
+                target_agent_id=new_agent.id,
+                ownership_client=_FailingOwnershipClient(),
+            )
+        assert exc_info.value.reason == "denied.ownership_unverified"
 
 
 # --- get_conversation ----------------------------------------------------------
@@ -1036,6 +1319,164 @@ class TestPostMessage:
             payload=_decline_payload(),
         )
         assert message.type == "decline"
+
+
+class TestPostMessageBoundaryCrossing:
+    """DESIGN.md §9 Axis 2: ``asymmetric`` conversations reject a
+    non-``boundary_safe`` message (``note``) that would cross an ownership
+    boundary for the sender; ``open``/``internal`` are decided without any
+    ownership lookup at all."""
+
+    async def _asymmetric_pair(
+        self, session: AsyncSession, owner_owners: list[str], target_owners: list[str]
+    ) -> Any:
+        owner = await _register(session, f"bc-owner-{'-'.join(owner_owners)}")
+        target = await _register(session, f"bc-target-{'-'.join(target_owners)}")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": len(owner_owners) > 1, "owners": owner_owners},
+                target.id: {"is_shared": len(target_owners) > 1, "owners": target_owners},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="asymmetric",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        await accept_invite(
+            session, actor_sub=target.sub, agent_id=target.id, conversation_id=conversation.id
+        )
+        return owner, target, conversation, client
+
+    async def test_note_from_single_owner_to_shared_crosses_denied(
+        self, session: AsyncSession
+    ) -> None:
+        owner, _target, conversation, client = await self._asymmetric_pair(
+            session, ["dan"], ["dan", "priya"]
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=owner.sub,
+                sender_agent_id=owner.id,
+                conversation_id=conversation.id,
+                message_type="note",
+                payload={"text": "hello"},
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.boundary_crossing"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.boundary_crossing" in actions
+
+    async def test_note_from_shared_to_single_owner_does_not_cross(
+        self, session: AsyncSession
+    ) -> None:
+        owner, _target, conversation, client = await self._asymmetric_pair(
+            session, ["dan", "priya"], ["priya"]
+        )
+        message = await post_message(
+            session,
+            actor_sub=owner.sub,
+            sender_agent_id=owner.id,
+            conversation_id=conversation.id,
+            message_type="note",
+            payload={"text": "hello"},
+            ownership_client=client,
+        )
+        assert message.type == "note"
+
+    async def test_boundary_safe_message_never_checked_against_ownership(
+        self, session: AsyncSession
+    ) -> None:
+        # dan/{dan,priya} intersect (so admission succeeds) but a note
+        # from dan would cross (priya is outside dan's set) -- proving
+        # boundary_safe=True (counter_proposal) skips the crossing check
+        # entirely rather than happening to pass it.
+        owner, _target, conversation, _client = await self._asymmetric_pair(
+            session, ["dan"], ["dan", "priya"]
+        )
+        message = await post_message(
+            session,
+            actor_sub=owner.sub,
+            sender_agent_id=owner.id,
+            conversation_id=conversation.id,
+            message_type="counter_proposal",
+            payload=_counter_proposal_payload(),
+            ownership_client=_FailingOwnershipClient(),
+        )
+        assert message.type == "counter_proposal"
+
+    async def test_open_note_denied_unconditionally(self, session: AsyncSession) -> None:
+        owner, _target, conversation = await self._active_pair_open(
+            session, "bc-open-owner", "bc-open-target"
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=owner.sub,
+                sender_agent_id=owner.id,
+                conversation_id=conversation.id,
+                message_type="note",
+                payload={"text": "hello"},
+                ownership_client=_FailingOwnershipClient(),
+            )
+        assert exc_info.value.reason == "denied.boundary_crossing"
+
+    async def _active_pair_open(
+        self, session: AsyncSession, owner_sub: str, target_sub: str
+    ) -> Any:
+        owner = await _register(session, owner_sub)
+        target = await _register(session, target_sub)
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=target.sub, agent_id=target.id, conversation_id=conversation.id
+        )
+        return owner, target, conversation
+
+    async def test_internal_note_never_checked_against_ownership(
+        self, session: AsyncSession
+    ) -> None:
+        owner = await _register(session, "bc-int-owner")
+        target = await _register(session, "bc-int-target")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": ["dan"]},
+                target.id: {"is_shared": False, "owners": ["dan"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="internal",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        await accept_invite(
+            session, actor_sub=target.sub, agent_id=target.id, conversation_id=conversation.id
+        )
+        message = await post_message(
+            session,
+            actor_sub=owner.sub,
+            sender_agent_id=owner.id,
+            conversation_id=conversation.id,
+            message_type="note",
+            payload={"text": "hello"},
+            ownership_client=_FailingOwnershipClient(),
+        )
+        assert message.type == "note"
 
 
 # --- seq race-safety -----------------------------------------------------------

@@ -1,8 +1,8 @@
-"""Pure conversation state-machine rules for the comms board (DESIGN.md §6/§4).
+"""Pure conversation state-machine rules for the comms board (DESIGN.md §6/§4/§9).
 
-Two independent, side-effect-free functions, deliberately typed with only
-primitives (no ORM/DB objects) so the (not-yet-built) service layer can
-call them without importing models.py:
+Three independent, side-effect-free functions, deliberately typed with only
+primitives (no ORM/DB objects) so the service layer can call them without
+importing models.py:
 
 - ``is_message_legal``: is this message type postable given the
   conversation's *current* state? (All message types are legal only while
@@ -12,9 +12,14 @@ call them without importing models.py:
   The service layer supplies the one piece of context it alone has —
   whether every non-owner participant is now declined — via
   ``all_non_owners_declined``; this module never sees participant rows.
+- ``is_boundary_crossing_safe``: is this message legal given the
+  conversation type's ownership-boundary policy and the sender's/other
+  participants' verified owner sets? The service layer resolves owner sets
+  (DB + external ownership lookup) and passes primitives in; this module
+  never talks to ``OwnershipClient``.
 
-Neither function talks to the database, raises, or has side effects —
-both are trivially unit-testable with plain strings/bools.
+None of these functions talk to the database, raise, or have side effects
+— all are trivially unit-testable with plain strings/bools/sets.
 """
 
 from __future__ import annotations
@@ -77,8 +82,42 @@ def resulting_conversation_state(
     return None
 
 
+def is_boundary_crossing_safe(
+    conversation_type: str,
+    boundary_safe: bool,
+    sender_owners: frozenset[str],
+    other_owners: frozenset[str],
+) -> bool:
+    """Whether a message with this ``boundary_safe`` flag may be posted into
+    a conversation of ``conversation_type``, given the sender's and the
+    other participants' verified owner sets (DESIGN.md §9 Axis 2).
+
+    - ``open``: legal only if ``boundary_safe`` — no ownership boundary
+      concept exists here, so ``sender_owners``/``other_owners`` are
+      ignored (callers may pass empty sets to skip the lookup entirely).
+    - ``internal``: always legal — every participant shares one owner set
+      by construction (enforced at admission), so there is no boundary to
+      cross.
+    - ``asymmetric``: legal unconditionally if ``boundary_safe``; otherwise
+      legal only when the post does not cross an ownership boundary for
+      the sender — every other participant's owner is already in the
+      sender's own owner set. A single-owner agent posting to a shared
+      agent crosses (the shared agent has owners outside the sender's); a
+      shared agent posting to a single-owner agent does not (that owner is
+      already among the sender's).
+    """
+    if conversation_type == "open":
+        return boundary_safe
+    if conversation_type == "internal":
+        return True
+    if boundary_safe:
+        return True
+    return other_owners <= sender_owners
+
+
 __all__ = [
     "ConversationState",
+    "is_boundary_crossing_safe",
     "is_message_legal",
     "resulting_conversation_state",
 ]

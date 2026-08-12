@@ -93,6 +93,7 @@ enumeration, the task-domain analog of ``denied.not_member``), and
 
 from __future__ import annotations
 
+import itertools
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -115,9 +116,14 @@ from schemas import (
     MAX_ACCEPTED_TYPES,
     MAX_DISPLAY_NAME_LENGTH,
     PayloadValidationError,
+    is_boundary_safe,
     validate_payload,
 )
-from state_machine import is_message_legal, resulting_conversation_state
+from state_machine import (
+    is_boundary_crossing_safe,
+    is_message_legal,
+    resulting_conversation_state,
+)
 
 # Plain stdlib logging, not structlog/observability.py's event-schema
 # helpers (TECH-5094 Argus round 4): this module's own docstring commits to
@@ -473,16 +479,64 @@ async def _load_participant_for_read(
 # --- Policy seams --------------------------------------------------------------
 
 
-def may_open(target: Agent, conversation_type: str) -> bool:
-    """v1 conversation-open policy for a single target agent.
+async def _owner_sets_for(
+    agents: list[Agent], ownership_client: OwnershipClient
+) -> dict[uuid.UUID, frozenset[str]]:
+    """Resolve each agent's verified owner set, one lookup per agent.
 
-    DESIGN.md §4/§10's seam for a future grants/consent layer (pairwise,
-    directional, expiring, human-approved) once external counterparties
-    exist. Today: any board-active agent that lists ``conversation_type``
-    in its own ``accepted_types`` may be named as a target — no pairwise
-    check between initiator and target in the internal trust domain.
+    Callers MUST fail closed on any exception raised here (see
+    ``OwnershipClient``'s docstring) — this helper does not catch.
     """
-    return target.status == "active" and conversation_type in target.accepted_types
+    result: dict[uuid.UUID, frozenset[str]] = {}
+    for agent in agents:
+        info = await ownership_client.get_agent_owners(agent.id)
+        result[agent.id] = frozenset(info.get("owners") or [])
+    return result
+
+
+def _pairwise_admitted(
+    conversation_type: str,
+    participants: list[Agent],
+    owner_sets: dict[uuid.UUID, frozenset[str]],
+) -> bool:
+    """Pure pairwise decision given already-resolved owner sets — every pair
+    must independently satisfy the type's predicate (no star-topology
+    exception: A-B and B-C admitted doesn't imply A-C is).
+    """
+    pairs = itertools.combinations(participants, 2)
+    if conversation_type == "internal":
+        return all(owner_sets[a.id] == owner_sets[b.id] for a, b in pairs)
+    return all(not owner_sets[a.id].isdisjoint(owner_sets[b.id]) for a, b in pairs)
+
+
+async def may_open(
+    participants: list[Agent],
+    conversation_type: str,
+    ownership_client: OwnershipClient,
+) -> bool:
+    """v1 conversation-open policy (TECH-5118, DESIGN.md §9 "two axes"),
+    evaluated over the FULL candidate participant set (initiator + every
+    named target), not one target at a time.
+
+    - ``open``: unrestricted — every participant merely board-``active``
+      (today's pre-TECH-5118 rule, renamed).
+    - ``internal``: every pair's verified owner sets must be identical.
+    - ``asymmetric``: every pair's verified owner sets must intersect
+      (this is exactly ``may_assign`` below, applied pairwise) — see
+      ``_pairwise_admitted``.
+
+    Raises whatever ``ownership_client.get_agent_owners`` raises (fail
+    closed — callers must catch and deny as
+    ``denied.ownership_unverified``, same posture as the former
+    ``add_task``). Assumes every participant is already known
+    board-``active`` for ``internal``/``asymmetric`` (callers check that
+    separately, e.g. via ``_resolve_targets``); ``open`` checks it here
+    directly since it has no other authorization step.
+    """
+    if conversation_type == "open":
+        return all(p.status == "active" for p in participants)
+    owner_sets = await _owner_sets_for(participants, ownership_client)
+    return _pairwise_admitted(conversation_type, participants, owner_sets)
 
 
 def may_invite(inviter_participant_status: str) -> bool:
@@ -739,15 +793,13 @@ async def _resolve_targets(
     actor_sub: str,
     initiator: Agent,
     target_ids: list[uuid.UUID],
-    conversation_type: str,
 ) -> list[Agent]:
-    """Resolve + authorize every named target via ``may_open``.
+    """Resolve every named target, requiring it to exist and be board-active.
 
-    Each failure (missing/inactive agent, or type not accepted) raises the
-    uniform ``AccessDeniedError`` — see ``exceptions.AccessDeniedError``'s docstring
-    for why unknown-agent is folded into the same shape as type-not-
-    accepted rather than given a more specific message. The audit trail
-    keeps the two causes distinguishable via ``action``.
+    Ownership/ownership-boundary admission across the WHOLE participant
+    set (initiator + targets) is a separate step (``_authorize_conversation_open``)
+    — this function only rules out missing/inactive targets, uniformly
+    denied as ``denied.unknown_agent``.
     """
     rows = (await session.execute(select(Agent).where(Agent.id.in_(target_ids)))).scalars().all()
     by_id = {a.id: a for a in rows}
@@ -761,15 +813,57 @@ async def _resolve_targets(
                 agent_id=initiator.id,
                 detail={"target_agent_id": str(target_id)},
             )
-        elif not may_open(target, conversation_type):
-            await _deny(
-                session,
-                actor_sub=actor_sub,
-                action="denied.type_not_accepted",
-                agent_id=initiator.id,
-                detail={"target_agent_id": str(target_id), "conversation_type": conversation_type},
-            )
     return [by_id[target_id] for target_id in target_ids]
+
+
+async def _authorize_conversation_open(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    initiator: Agent,
+    targets: list[Agent],
+    conversation_type: str,
+    ownership_client: OwnershipClient,
+) -> dict[str, Any] | None:
+    """Admit or deny opening ``conversation_type`` with this participant set.
+
+    Returns the owner-set snapshot to persist on ``Conversation.owner_snapshot``
+    on success (``None`` for ``open``, which has no ownership concept).
+    Raises via ``_deny``/``_deny``-family helpers (``NoReturn``) otherwise —
+    this function's return type omits that case because every ``_deny*``
+    call always raises.
+
+    Fails closed (``denied.ownership_unverified``) on any ownership-lookup
+    exception, same posture ``add_task`` used.
+    """
+    participants = [initiator, *targets]
+    if conversation_type == "open":
+        return None
+    try:
+        owner_sets = await _owner_sets_for(participants, ownership_client)
+    except Exception as exc:
+        logger.warning("ownership lookup failed opening a conversation: %s", repr(exc))
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.ownership_unverified",
+            agent_id=initiator.id,
+            detail={"conversation_type": conversation_type},
+        )
+    if not _pairwise_admitted(conversation_type, participants, owner_sets):
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action=(
+                "denied.not_same_owner"
+                if conversation_type == "internal"
+                else "denied.no_owner_overlap"
+            ),
+            agent_id=initiator.id,
+            detail={"conversation_type": conversation_type},
+        )
+    snapshot_owners = sorted(set().union(*owner_sets.values()))
+    return {"owners": snapshot_owners}
 
 
 async def start_conversation(
@@ -780,6 +874,7 @@ async def start_conversation(
     conversation_type: str,
     target_agent_ids: list[uuid.UUID],
     initial_message: dict[str, Any],
+    ownership_client: OwnershipClient,
     message_type: str = "availability_request",
     schema_version: int = 1,
     expires_at: datetime | None = None,
@@ -791,15 +886,22 @@ async def start_conversation(
     invite/accept revision — "Named targets are added as invited, never
     active on creation"). ``initial_message``/``message_type`` are
     validated via ``schemas.validate_payload`` against
-    ``(conversation_type, message_type, schema_version)`` before anything
-    is persisted.
+    ``(message_type, schema_version)`` before anything is persisted.
+
+    Admission (``_authorize_conversation_open``) is evaluated over the
+    FULL participant set at once (TECH-5118, DESIGN.md §9) — ``internal``
+    requires identical verified owner sets, ``asymmetric`` requires every
+    pair to intersect, ``open`` is unrestricted. The resulting owner-set
+    snapshot is persisted on ``Conversation.owner_snapshot`` (``None`` for
+    ``open``) so ``invite`` can later reject an invite that would expand
+    the frozen set.
 
     Raises ``ValueError`` for a malformed ``conversation_type`` or an empty
     target list (input-validation, not authorization); ``AccessDeniedError``
-    (uniform) if any target is unknown/inactive/doesn't accept the type;
-    ``RateLimitExceededError`` past the per-initiator hourly cap;
-    ``schemas.PayloadValidationError`` if ``initial_message`` fails schema
-    validation.
+    (uniform) if any target is unknown/inactive, or the participant set
+    fails admission; ``RateLimitExceededError`` past the per-initiator
+    hourly cap; ``schemas.PayloadValidationError`` if ``initial_message``
+    fails schema validation.
     """
     initiator = await _require_active_agent(
         session, actor_sub=actor_sub, agent_id=initiator_agent_id
@@ -821,7 +923,14 @@ async def start_conversation(
         actor_sub=actor_sub,
         initiator=initiator,
         target_ids=target_ids,
+    )
+    owner_snapshot = await _authorize_conversation_open(
+        session,
+        actor_sub=actor_sub,
+        initiator=initiator,
+        targets=targets,
         conversation_type=conversation_type,
+        ownership_client=ownership_client,
     )
 
     try:
@@ -842,6 +951,7 @@ async def start_conversation(
         state="active",
         created_by=initiator.id,
         expires_at=expires_at or (now + CONVERSATION_TTL),
+        owner_snapshot=owner_snapshot,
     )
     session.add(conversation)
     await session.flush()
@@ -885,7 +995,11 @@ async def start_conversation(
         action="conversation.start",
         agent_id=initiator.id,
         conversation_id=conversation.id,
-        detail={"type": conversation_type, "target_agent_ids": [str(t) for t in target_ids]},
+        detail={
+            "type": conversation_type,
+            "target_agent_ids": [str(t) for t in target_ids],
+            "owner_snapshot": owner_snapshot,
+        },
     )
     _audit(
         session,
@@ -968,6 +1082,49 @@ async def decline_invite(
     return None
 
 
+async def _authorize_invite_owner_freeze(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    inviter_agent_id: uuid.UUID,
+    conversation: Conversation,
+    target: Agent,
+    ownership_client: OwnershipClient,
+) -> None:
+    """Reject an invite that would expand an ``internal``/``asymmetric``
+    conversation's frozen owner set (TECH-5118). No-op for ``open``.
+
+    Fails closed (``denied.ownership_unverified``) on any lookup error,
+    same posture as conversation-open admission.
+    """
+    if conversation.type == "open":
+        return
+    try:
+        target_owners = frozenset(
+            (await ownership_client.get_agent_owners(target.id)).get("owners") or []
+        )
+    except Exception as exc:
+        logger.warning("ownership lookup failed authorizing an invite: %s", repr(exc))
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.ownership_unverified",
+            agent_id=inviter_agent_id,
+            conversation_id=conversation.id,
+            detail={"target_agent_id": str(target.id)},
+        )
+    snapshot_owners = frozenset((conversation.owner_snapshot or {}).get("owners") or [])
+    if not target_owners <= snapshot_owners:
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.owner_set_frozen",
+            agent_id=inviter_agent_id,
+            conversation_id=conversation.id,
+            detail={"target_agent_id": str(target.id)},
+        )
+
+
 async def invite(
     session: AsyncSession,
     *,
@@ -975,17 +1132,22 @@ async def invite(
     inviter_agent_id: uuid.UUID,
     conversation_id: uuid.UUID,
     target_agent_id: uuid.UUID,
+    ownership_client: OwnershipClient,
 ) -> Participant:
     """Add ``target_agent_id`` to a conversation as a new ``invited`` row.
 
     ``inviter_agent_id`` must currently be an ``active`` participant
     (``may_invite`` — v1: any active member, tightenable to owner-only
-    later without a migration). The target must be a board-active agent
-    that accepts the conversation's type and must not already have a
-    participant row in ANY status (re-inviting a former member is out of
-    scope for v1 — DESIGN.md does not define re-invite semantics, and a
-    ``declined`` row in particular must never be overridable by another
-    member, since decline is the consent mechanism).
+    later without a migration). The target must be a board-active agent,
+    must not already have a participant row in ANY status (re-inviting a
+    former member is out of scope for v1 — DESIGN.md does not define
+    re-invite semantics, and a ``declined`` row in particular must never
+    be overridable by another member, since decline is the consent
+    mechanism), and — for ``internal``/``asymmetric`` conversations — must
+    not introduce an owner outside the conversation's frozen
+    ``owner_snapshot`` (TECH-5118: the owner set is frozen at creation, not
+    retroactively reconciled against prior messages when it would expand).
+    ``open`` conversations have no ownership concept and skip this check.
     """
     conversation, inviter_participant = await _load_participant_for_transition(
         session,
@@ -1021,18 +1183,14 @@ async def invite(
             conversation_id=conversation.id,
             detail={"target_agent_id": str(target_agent_id)},
         )
-    if not may_open(target, conversation.type):
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.type_not_accepted",
-            agent_id=inviter_agent_id,
-            conversation_id=conversation.id,
-            detail={
-                "target_agent_id": str(target_agent_id),
-                "conversation_type": conversation.type,
-            },
-        )
+    await _authorize_invite_owner_freeze(
+        session,
+        actor_sub=actor_sub,
+        inviter_agent_id=inviter_agent_id,
+        conversation=conversation,
+        target=target,
+        ownership_client=ownership_client,
+    )
     existing = await _find_participant(session, conversation.id, target.id)
     if existing is not None:
         await _deny(
@@ -1155,6 +1313,78 @@ async def _all_non_owners_declined(session: AsyncSession, conversation_id: uuid.
     return bool(member_statuses) and all(status == "declined" for status in member_statuses)
 
 
+async def _check_boundary_crossing(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    sender_agent_id: uuid.UUID,
+    conversation: Conversation,
+    message_type: str,
+    schema_version: int,
+    ownership_client: OwnershipClient,
+) -> None:
+    """Enforce DESIGN.md §9 Axis 2's boundary-crossing rule for this message.
+
+    Only ``asymmetric`` conversations posting a non-``boundary_safe``
+    message need an actual ownership lookup (``open``/``internal``, and any
+    ``boundary_safe`` message, are decided by
+    ``state_machine.is_boundary_crossing_safe`` from the conversation type
+    alone) — avoids the external ownership-client round trip on the common
+    path. Fails closed (``denied.ownership_unverified``) on any lookup
+    error.
+    """
+    boundary_safe = is_boundary_safe(message_type, schema_version)
+    sender_owners: frozenset[str] = frozenset()
+    other_owners: frozenset[str] = frozenset()
+    if conversation.type == "asymmetric" and not boundary_safe:
+        other_ids = (
+            (
+                await session.execute(
+                    select(Participant.agent_id).where(
+                        Participant.conversation_id == conversation.id,
+                        Participant.agent_id != sender_agent_id,
+                        Participant.status == "active",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        try:
+            sender_owners = frozenset(
+                (await ownership_client.get_agent_owners(sender_agent_id)).get("owners") or []
+            )
+            other_owners = frozenset().union(
+                *[
+                    frozenset((await ownership_client.get_agent_owners(pid)).get("owners") or [])
+                    for pid in other_ids
+                ]
+            )
+        except Exception as exc:
+            logger.warning("ownership lookup failed checking boundary crossing: %s", repr(exc))
+            await _deny(
+                session,
+                actor_sub=actor_sub,
+                action="denied.ownership_unverified",
+                agent_id=sender_agent_id,
+                conversation_id=conversation.id,
+                detail={"message_type": message_type},
+            )
+    if not is_boundary_crossing_safe(conversation.type, boundary_safe, sender_owners, other_owners):
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.boundary_crossing",
+            agent_id=sender_agent_id,
+            conversation_id=conversation.id,
+            detail={
+                "message_type": message_type,
+                "sender_is_shared": len(sender_owners) > 1,
+                "other_owners_outside_sender": bool(other_owners - sender_owners),
+            },
+        )
+
+
 async def post_message(
     session: AsyncSession,
     *,
@@ -1163,6 +1393,7 @@ async def post_message(
     conversation_id: uuid.UUID,
     message_type: str,
     payload: dict[str, Any],
+    ownership_client: OwnershipClient,
     schema_version: int = 1,
 ) -> Message:
     """Append a schema-validated message; apply state-machine side effects.
@@ -1176,6 +1407,12 @@ async def post_message(
     ``seq`` is assigned under ``SELECT ... FOR UPDATE`` on the conversation
     row (acquired while loading the participant), so concurrent posters to
     the same conversation serialize and every seq is gapless and race-safe.
+
+    Boundary-crossing (DESIGN.md §9 Axis 2, ``_check_boundary_crossing``) is
+    checked right after state-machine legality and before payload
+    validation: an ``asymmetric`` conversation rejects a non-``boundary_safe``
+    message that would cross an ownership boundary for the sender, audited
+    as ``denied.boundary_crossing``.
 
     Side effects: ``confirm`` transitions the conversation to
     ``completed``; ``decline`` sets the sender's OWN participant status to
@@ -1213,6 +1450,16 @@ async def post_message(
             current_state=conversation.state,
             message_type=message_type,
         )
+
+    await _check_boundary_crossing(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=sender_agent_id,
+        conversation=conversation,
+        message_type=message_type,
+        schema_version=schema_version,
+        ownership_client=ownership_client,
+    )
 
     try:
         validated = validate_payload(message_type, schema_version, payload)
