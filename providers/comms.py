@@ -539,8 +539,44 @@ async def inbox(agent_key: str | None = None) -> dict[str, Any]:
 
 
 @comms_server.tool
-async def accept(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:
-    """Accept a pending invite: flips the caller's status ``invited`` → ``active``.
+async def list_conversations(
+    role: str | None = None,
+    type: str | None = None,
+    state: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Return a paginated list of conversations the caller participates in.
+
+    Optional filters (combinable):
+    - ``role``: ``"owner"`` or ``"member"`` (default: any role).
+    - ``type``: conversation type — ``"open"``, ``"internal"``, or
+      ``"asymmetric"`` (default: any type).
+    - ``state``: ``"active"``, ``"completed"``, ``"canceled"``, or
+      ``"expired"`` (default: any state).
+
+    Results are ordered newest-first. Pass ``next_cursor`` from a prior
+    response to get the next page. Both ``invited`` and ``active``
+    participant statuses are included — declined and left are not.
+    """
+    token = _require_token()
+    sub = _require_identity(token)
+
+    async with get_session_factory()() as session:
+        caller = await _resolve_caller_agent(session, sub)
+        return await service.list_conversations(
+            session,
+            caller_agent_id=caller.id,
+            role=role,
+            conversation_type=type,
+            state=state,
+            limit=limit,
+            cursor=cursor,
+        )
+
+
+@comms_server.tool
+async def accept(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:    """Accept a pending invite: flips the caller's status ``invited`` → ``active``.
 
     Grants full history read and posting rights from this point forward.
     Requires the caller to currently be ``invited`` on this conversation

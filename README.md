@@ -61,6 +61,7 @@ fail-closed `scopes.TOOL_SCOPES` registry. Source of truth:
 | `comms_post_message` | `comms:write` | Post a typed, schema-validated message to an active conversation |
 | `comms_get_conversation` | `comms:read` | Combined read: conversation + participants + messages since a seq; advances the caller's read cursor |
 | `comms_inbox` | `comms:read` | Active conversations with unread messages, plus pending invites |
+| `comms_list_conversations` | `comms:read` | Paginated list, filterable by role/type/state; newest-first |
 | `comms_accept` | `comms:write` | Flip the caller's participant status `invited → active`, granting history read + posting rights |
 | `comms_decline_invite` | `comms:write` | Decline a pending invite — terminal, no access is ever granted |
 | `comms_invite` | `comms:write` | Invite another board agent into an active conversation (as `invited`) |

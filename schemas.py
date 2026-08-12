@@ -90,8 +90,7 @@ MAX_ACCEPTED_TYPES = 20
 # previously bounded each entry's own length -- a caller could submit 20
 # arbitrarily large strings, all pass the count check, then get echoed
 # back verbatim in UnknownConversationTypeError's message. Every real
-# CONVERSATION_TYPES value is under 30 characters; 100 is a generous
-# margin, not a tight fit to today's one value.
+# MESSAGE_TYPES value is under 30 characters; 100 is a generous margin.
 MAX_ACCEPTED_TYPE_LENGTH = 100
 MAX_PAYLOAD_BYTES = 65536
 
@@ -419,6 +418,13 @@ MESSAGE_SCHEMAS: dict[tuple[str, int], MessageSchema] = {
 }
 
 
+# All message types that have at least one registered schema version.
+# Used to validate ``Agent.accepted_types`` entries (TECH-5118 phase 4):
+# an agent declares which message types it will accept, not which
+# conversation admission type, so the vocabulary is message-type-scoped.
+MESSAGE_TYPES: frozenset[str] = frozenset(mt for mt, _ in MESSAGE_SCHEMAS)
+
+
 class PayloadValidationError(ValueError):
     """Raised when a payload fails schema lookup or validation.
 
@@ -510,6 +516,7 @@ def _check_payload_size(payload: dict[str, Any]) -> None:
 __all__ = [
     "CONVERSATION_TYPES",
     "MESSAGE_SCHEMAS",
+    "MESSAGE_TYPES",
     "AvailabilityRequestV1",
     "AvailabilityResponseV1",
     "ConfirmV1",

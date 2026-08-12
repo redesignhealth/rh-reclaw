@@ -44,6 +44,7 @@ from exceptions import (
 from models import Agent, AuditLog, Participant
 from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
+    CONVERSATION_TTL,
     MAX_CONVERSATION_STARTS_PER_HOUR,
     MAX_MESSAGES_PER_CONVERSATION_PER_HOUR,
     AgentTableOwnershipClient,
@@ -54,6 +55,7 @@ from service import (
     inbox,
     leave,
     list_agents,
+    list_conversations,
     register_agent,
 )
 
@@ -183,7 +185,7 @@ async def _register(session: AsyncSession, sub: str, **overrides: Any) -> Agent:
         "owner_sub": f"owner-{sub}",
         "owner_email": f"{sub}@example.com",
         "display_name": sub,
-        "accepted_types": ["open"],
+        "accepted_types": ["availability_request"],
     }
     kwargs.update(overrides)
     return await register_agent(session, **kwargs)
@@ -198,6 +200,12 @@ def _request_payload(**overrides: Any) -> dict[str, Any]:
         "priority": "normal",
         "constraints": [],
     }
+    payload.update(overrides)
+    return payload
+
+
+def _task_assign_payload(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"action": "report_status"}
     payload.update(overrides)
     return payload
 
@@ -275,24 +283,23 @@ class TestRegisterAgent:
             await _register(
                 session,
                 "agent-too-many-types",
-                accepted_types=["open"] * 21,
+                accepted_types=["availability_request"] * 21,
             )
 
     async def test_accepted_types_at_max_count_accepted(self, session: AsyncSession) -> None:
         """Exactly ``schemas.MAX_ACCEPTED_TYPES`` (20) entries is still
         accepted — the inclusive boundary of the ``len() > 20`` check in
         ``register_agent``. The count check runs against the raw list
-        (before dedup), so 20 repeats of the only valid v1 conversation
-        type (``open``) exercise this boundary without
-        tripping the "unknown type" check; ``register_agent`` then
-        dedupes/sorts, so the persisted ``accepted_types`` collapses to a
-        single entry."""
+        (before dedup), so 20 repeats of a valid message type exercise
+        this boundary without tripping the "unknown type" check;
+        ``register_agent`` then dedupes/sorts, so the persisted
+        ``accepted_types`` collapses to a single entry."""
         agent = await _register(
             session,
             "agent-max-types",
-            accepted_types=["open"] * 20,
+            accepted_types=["availability_request"] * 20,
         )
-        assert agent.accepted_types == ["open"]
+        assert agent.accepted_types == ["availability_request"]
 
     async def test_oversized_accepted_types_of_unknown_values_still_hits_count_cap(
         self, session: AsyncSession
@@ -347,9 +354,9 @@ class TestRegisterAgent:
         agent = await _register(
             session,
             "agent-at-cap",
-            accepted_types=["open"],
+            accepted_types=["availability_request"],
         )
-        assert agent.accepted_types == ["open"]
+        assert agent.accepted_types == ["availability_request"]
 
     async def test_empty_or_whitespace_sub_raises_plain_value_error(
         self, session: AsyncSession
@@ -359,7 +366,7 @@ class TestRegisterAgent:
                 await _register(session, bad_sub)
 
     async def test_unknown_accepted_type_raises_specific_error(self, session: AsyncSession) -> None:
-        """An ``accepted_types`` entry outside ``schemas.CONVERSATION_TYPES``
+        """An ``accepted_types`` entry outside ``schemas.MESSAGE_TYPES``
         raises ``UnknownConversationTypeError`` (not a bare ``ValueError``),
         with a message naming the unknown value and the actual valid set --
         this is deliberately specific/client-safe, unlike the uniform
@@ -381,7 +388,7 @@ class TestRegisterAgent:
             await _register(
                 session,
                 "agent-mixed-types",
-                accepted_types=["open", "bogus"],
+                accepted_types=["availability_request", "bogus"],
             )
 
 
@@ -1999,3 +2006,221 @@ class TestInbox:
         assert len(result["pending_invites"]) == 1
         assert result["pending_invites"][0]["conversation_id"] == str(pending_conversation.id)
         assert result["total_count"] == 2
+
+
+# --- accepted_types message-type vocabulary (TECH-5118 phase 4) ----------------
+
+
+class TestAcceptedTypesMessageVocabulary:
+    async def test_message_type_string_is_valid(self, session: AsyncSession) -> None:
+        agent = await _register(session, "vocab-ok", accepted_types=["task_assign", "note"])
+        assert "task_assign" in agent.accepted_types
+        assert "note" in agent.accepted_types
+
+    async def test_conversation_type_string_now_invalid(self, session: AsyncSession) -> None:
+        """Conversation type strings ('open', 'internal', 'asymmetric') are no
+        longer valid accepted_types values — message type strings are."""
+        with pytest.raises(UnknownConversationTypeError, match=r"got unknown: \['open'\]"):
+            await _register(session, "vocab-conv-type", accepted_types=["open"])
+
+    async def test_all_registered_message_types_accepted(self, session: AsyncSession) -> None:
+        from schemas import MESSAGE_TYPES
+
+        agent = await _register(session, "vocab-all", accepted_types=sorted(MESSAGE_TYPES)[:5])
+        assert agent.accepted_types
+
+
+# --- per-type TTL (TECH-5118 phase 4) ------------------------------------------
+
+
+class TestPerTypeTTL:
+    async def test_open_gets_7_day_ttl(self, session: AsyncSession) -> None:
+        creator = await _register(session, "ttl-open-creator")
+        target = await _register(session, "ttl-open-target")
+        before = datetime.now(UTC)
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        delta = conv.expires_at - before
+        assert abs(delta.total_seconds() - CONVERSATION_TTL["open"].total_seconds()) < 5
+
+    async def test_internal_gets_30_day_ttl(self, session: AsyncSession) -> None:
+        owner_sub = "owner-ttl-internal@example.com"
+        creator = await _register(session, "ttl-internal-creator", owner_sub=owner_sub)
+        target = await _register(session, "ttl-internal-target", owner_sub=owner_sub)
+        before = datetime.now(UTC)
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="internal",
+            target_agent_ids=[target.id],
+            initial_message=_task_assign_payload(),
+            message_type="task_assign",
+        )
+        delta = conv.expires_at - before
+        assert abs(delta.total_seconds() - CONVERSATION_TTL["internal"].total_seconds()) < 5
+
+    async def test_explicit_expires_at_overrides_ttl(self, session: AsyncSession) -> None:
+        creator = await _register(session, "ttl-override-creator")
+        target = await _register(session, "ttl-override-target")
+        custom = datetime.now(UTC) + timedelta(hours=3)
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            expires_at=custom,
+        )
+        assert abs((conv.expires_at - custom).total_seconds()) < 1
+
+
+# --- list_conversations (TECH-5118 phase 4) ------------------------------------
+
+
+class TestListConversations:
+    async def test_empty_returns_empty_list(self, session: AsyncSession) -> None:
+        agent = await _register(session, "listconv-empty")
+        result = await list_conversations(session, caller_agent_id=agent.id)
+        assert result["conversations"] == []
+        assert result["has_more"] is False
+        assert result["next_cursor"] is None
+
+    async def test_returns_own_conversations(self, session: AsyncSession) -> None:
+        creator = await _register(session, "listconv-creator")
+        target = await _register(session, "listconv-target")
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        result = await list_conversations(session, caller_agent_id=creator.id)
+        ids = [c["id"] for c in result["conversations"]]
+        assert str(conv.id) in ids
+
+    async def test_invited_participant_sees_conversation(self, session: AsyncSession) -> None:
+        creator = await _register(session, "listconv-inviter")
+        invited = await _register(session, "listconv-invited")
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[invited.id],
+            initial_message=_request_payload(),
+        )
+        result = await list_conversations(session, caller_agent_id=invited.id)
+        ids = [c["id"] for c in result["conversations"]]
+        assert str(conv.id) in ids
+
+    async def test_filter_by_type(self, session: AsyncSession) -> None:
+        creator = await _register(session, "listconv-filter-creator")
+        target = await _register(session, "listconv-filter-target")
+        open_conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        result = await list_conversations(
+            session, caller_agent_id=creator.id, conversation_type="open"
+        )
+        assert any(c["id"] == str(open_conv.id) for c in result["conversations"])
+        # filtering by internal returns nothing (no internal conv created)
+        result2 = await list_conversations(
+            session, caller_agent_id=creator.id, conversation_type="internal"
+        )
+        assert result2["conversations"] == []
+
+    async def test_filter_by_state(self, session: AsyncSession) -> None:
+        creator = await _register(session, "listconv-state-creator")
+        target = await _register(session, "listconv-state-target")
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        result_active = await list_conversations(
+            session, caller_agent_id=creator.id, state="active"
+        )
+        assert any(c["id"] == str(conv.id) for c in result_active["conversations"])
+
+        result_completed = await list_conversations(
+            session, caller_agent_id=creator.id, state="completed"
+        )
+        assert result_completed["conversations"] == []
+
+    async def test_filter_by_role_owner(self, session: AsyncSession) -> None:
+        creator = await _register(session, "listconv-role-owner")
+        target = await _register(session, "listconv-role-target-2")
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+        )
+        # creator is owner
+        result = await list_conversations(session, caller_agent_id=creator.id, role="owner")
+        assert any(c["id"] == str(conv.id) for c in result["conversations"])
+        # target is member (invited) — owner filter should exclude them
+        result2 = await list_conversations(session, caller_agent_id=target.id, role="owner")
+        assert not any(c["id"] == str(conv.id) for c in result2["conversations"])
+
+    async def test_does_not_leak_other_agents_conversations(self, session: AsyncSession) -> None:
+        a = await _register(session, "listconv-a")
+        b = await _register(session, "listconv-b")
+        c = await _register(session, "listconv-c")
+        await start_conversation(
+            session,
+            actor_sub=a.sub,
+            initiator_agent_id=a.id,
+            conversation_type="open",
+            target_agent_ids=[b.id],
+            initial_message=_request_payload(),
+        )
+        # c was never involved
+        result = await list_conversations(session, caller_agent_id=c.id)
+        assert result["conversations"] == []
+
+    async def test_pagination(self, session: AsyncSession) -> None:
+        creator = await _register(session, "listconv-paginate-creator")
+        targets = [await _register(session, f"listconv-paginate-target-{i}") for i in range(3)]
+        for t in targets:
+            await start_conversation(
+                session,
+                actor_sub=creator.sub,
+                initiator_agent_id=creator.id,
+                conversation_type="open",
+                target_agent_ids=[t.id],
+                initial_message=_request_payload(),
+            )
+        page1 = await list_conversations(session, caller_agent_id=creator.id, limit=2)
+        assert len(page1["conversations"]) == 2
+        assert page1["has_more"] is True
+        assert page1["next_cursor"] is not None
+
+        page2 = await list_conversations(
+            session, caller_agent_id=creator.id, limit=2, cursor=page1["next_cursor"]
+        )
+        assert len(page2["conversations"]) == 1
+        assert page2["has_more"] is False
+
+        all_ids = {c["id"] for c in page1["conversations"] + page2["conversations"]}
+        assert len(all_ids) == 3

@@ -216,7 +216,7 @@ async def _register(
         "comms_register",
         {
             "display_name": display_name or sub,
-            "accepted_types": accepted_types or ["open"],
+            "accepted_types": accepted_types or ["availability_request"],
         },
     )
     return result
@@ -272,11 +272,11 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Agent A", "accepted_types": ["open"]},
+            {"display_name": "Agent A", "accepted_types": ["availability_request"]},
         )
         assert result["sub"] == "agent-a"
         assert result["display_name"] == "Agent A"
-        assert result["accepted_types"] == ["open"]
+        assert result["accepted_types"] == ["availability_request"]
         assert result["status"] == "active"
         assert result["owner_email"] == "ownera@redesignhealth.com"
 
@@ -292,14 +292,14 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "B v1", "accepted_types": ["open"]},
+            {"display_name": "B v1", "accepted_types": ["availability_request"]},
         )
         second = await _call(
             main,
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "B v2", "accepted_types": ["open"]},
+            {"display_name": "B v2", "accepted_types": ["availability_request"]},
         )
         assert first["agent_id"] == second["agent_id"]
         assert second["display_name"] == "B v2"
@@ -399,7 +399,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Self", "accepted_types": ["open"]},
+            {"display_name": "Self", "accepted_types": ["availability_request"]},
         )
         # No owner_sub/owner_email claims on the token — self-owned fallback.
         assert result["owner_email"] == "agent-self-owned"
@@ -422,7 +422,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Forged", "accepted_types": ["open"]},
+            {"display_name": "Forged", "accepted_types": ["availability_request"]},
         )
         assert result["owner_email"] != "forged@attacker.com"
         assert result["owner_email"] == "agent-forged-email"
@@ -1150,6 +1150,7 @@ class TestScopesUnaffected:
         expected = {
             "comms_register",
             "comms_list_agents",
+            "comms_list_conversations",
             "comms_start_conversation",
             "comms_post_message",
             "comms_get_conversation",
@@ -1173,7 +1174,7 @@ class TestScopesUnaffected:
                 test_session_factory,
                 token,
                 "comms_register",
-                {"display_name": "x", "accepted_types": ["open"]},
+                {"display_name": "x", "accepted_types": ["availability_request"]},
             )
 
     async def test_unenrolled_tool_still_rejected(
@@ -1372,3 +1373,81 @@ class TestConcurrentPostMessageToolLayer:
 
         assert sorted(seqs) == [2, 3, 4, 5]
         assert len(set(seqs)) == len(seqs)
+
+
+class TestListConversationsTool:
+    async def test_empty_returns_structure(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-empty")
+        token = _token("listconv-tool-empty")
+        result = await _call(main, test_session_factory, token, "comms_list_conversations")
+        assert result["conversations"] == []
+        assert result["has_more"] is False
+        assert result["next_cursor"] is None
+
+    async def test_own_conversation_visible(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-creator")
+        target = await _register(main, test_session_factory, "listconv-tool-target")
+        creator_token = _token("listconv-tool-creator")
+        payload = _availability_request()
+        conv = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_start_conversation",
+            {
+                "conversation_type": "open",
+                "target_agent_ids": [target["agent_id"]],
+                "message_type": "availability_request",
+                "initial_message": payload,
+            },
+        )
+        result = await _call(main, test_session_factory, creator_token, "comms_list_conversations")
+        ids = [c["id"] for c in result["conversations"]]
+        assert conv["conversation_id"] in ids
+
+    async def test_filter_by_type_and_state(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-filter-c")
+        target = await _register(main, test_session_factory, "listconv-tool-filter-t")
+        creator_token = _token("listconv-tool-filter-c")
+        payload = _availability_request()
+        await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_start_conversation",
+            {
+                "conversation_type": "open",
+                "target_agent_ids": [target["agent_id"]],
+                "message_type": "availability_request",
+                "initial_message": payload,
+            },
+        )
+        result_open = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_list_conversations",
+            {"type": "open", "state": "active"},
+        )
+        assert len(result_open["conversations"]) == 1
+
+        result_internal = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_list_conversations",
+            {"type": "internal"},
+        )
+        assert result_internal["conversations"] == []

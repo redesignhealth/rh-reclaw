@@ -248,10 +248,12 @@ mcp: FastMCP[Any] = FastMCP(
         "response, counter_proposal, confirm, decline, needs_clarification) "
         "or coordinates a task (task_assign, task_report, task_complete, "
         "task_decline, task_cancel) within a conversation. comms_inbox / "
-        "comms_get_conversation read, and comms_accept / "
-        "comms_decline_invite / comms_invite / comms_leave manage "
-        "membership. comms_whoami returns the authenticated caller's "
-        "identity and scopes; comms_list_agents lists the board directory."
+        "comms_get_conversation / comms_list_conversations read, and "
+        "comms_accept / comms_decline_invite / comms_invite / comms_leave "
+        "manage membership. comms_whoami returns the authenticated caller's "
+        "identity and scopes; comms_list_agents lists the board directory. "
+        "accepted_types in comms_register declares which message types an "
+        "agent accepts (e.g. 'task_assign', 'availability_request')."
     ),
     auth=build_auth_provider(),
 )

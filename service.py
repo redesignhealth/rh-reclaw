@@ -99,7 +99,7 @@ from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, Protocol
 
-from sqlalchemy import func, select, tuple_
+from sqlalchemy import func, literal, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions import (
@@ -114,6 +114,7 @@ from schemas import (
     MAX_ACCEPTED_TYPE_LENGTH,
     MAX_ACCEPTED_TYPES,
     MAX_DISPLAY_NAME_LENGTH,
+    MESSAGE_TYPES,
     PayloadValidationError,
     is_boundary_safe,
     validate_payload,
@@ -136,13 +137,19 @@ logger = logging.getLogger(__name__)
 
 # --- Policy constants --------------------------------------------------------
 
-# Fixed v1 conversation TTL used when a caller doesn't supply an explicit
-# ``expires_at`` to ``start_conversation``. Not yet client-configurable
-# beyond that override (DESIGN.md §5): negotiations that outlive a week are
-# stale. The explicit-override parameter exists mainly so tests (and any
-# future admin tooling) can construct already-expired conversations without
-# sleeping for a week.
-CONVERSATION_TTL = timedelta(days=7)
+# Default conversation TTL by conversation type (TECH-5118 phase 4).
+# Applied when a caller doesn't supply an explicit ``expires_at`` to
+# ``start_conversation``. Values chosen to match typical use:
+#   open       — scheduling negotiations; a week is already stale
+#   asymmetric — cross-owner task delegation; two weeks gives room to breathe
+#   internal   — same-owner coordination; a month for longer-running tasks
+# The explicit-override parameter exists so tests can construct already-expired
+# conversations without sleeping.
+CONVERSATION_TTL: dict[str, timedelta] = {
+    "open": timedelta(days=7),
+    "asymmetric": timedelta(days=14),
+    "internal": timedelta(days=30),
+}
 
 # Per-sender rate limits, counted from the messages/conversations tables
 # directly (no Redis — DESIGN.md §5: "No Redis until it matters").
@@ -626,7 +633,7 @@ async def register_agent(
     with an empty "got unknown" list; it now raises this plain ``ValueError``
     instead (a deliberate breaking change to the ToolError shape for that one
     input -- there is no unknown value to usefully name for an empty list).
-    An ``accepted_types`` containing a value outside ``CONVERSATION_TYPES``
+    An ``accepted_types`` containing a value outside ``MESSAGE_TYPES``
     instead raises ``UnknownConversationTypeError`` (exceptions.py) --
     specific and client-safe by design, unlike the cases above.
     """
@@ -661,16 +668,17 @@ async def register_agent(
     # without this, 20 arbitrarily large strings would all pass the count
     # check, then get echoed back verbatim in UnknownConversationTypeError
     # below. Checked before computing unknown_types for the same
-    # echo-bounding reason as the count check.
+    # echo-bounding reason as the count check.  Every real MESSAGE_TYPES
+    # value is under 30 characters; 100 is a generous margin.
     if any(len(t) > MAX_ACCEPTED_TYPE_LENGTH for t in accepted_types):
         raise ValueError(
             f"accepted_types entries must not exceed {MAX_ACCEPTED_TYPE_LENGTH} characters"
         )
-    unknown_types = sorted(set(accepted_types) - CONVERSATION_TYPES)
+    unknown_types = sorted(set(accepted_types) - MESSAGE_TYPES)
     if unknown_types:
         raise UnknownConversationTypeError(
             "accepted_types must be a non-empty subset of "
-            f"{sorted(CONVERSATION_TYPES)} (got unknown: {unknown_types})"
+            f"{sorted(MESSAGE_TYPES)} (got unknown: {unknown_types})"
         )
     normalized_types = sorted(set(accepted_types))
 
@@ -744,6 +752,88 @@ async def list_agents(
         "total_count": total_count,
         "has_more": has_more,
         "next_cursor": rows[-1].sub if has_more and rows else None,
+    }
+
+
+async def list_conversations(
+    session: AsyncSession,
+    *,
+    caller_agent_id: uuid.UUID,
+    role: str | None = None,
+    conversation_type: str | None = None,
+    state: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """Paginated list of conversations the caller participates in.
+
+    Filters (all optional, combinable):
+    - ``role``: ``"owner"``, ``"member"``, or ``None`` for any role.
+    - ``conversation_type``: one of ``CONVERSATION_TYPES`` or ``None`` for any.
+    - ``state``: one of ``"active"``, ``"completed"``, ``"canceled"``,
+      ``"expired"``, or ``None`` for any.
+
+    Keyset-paginated over ``(created_at DESC, id DESC)`` — pass back the
+    ``next_cursor`` value from a prior response to get the next page.
+    Visibility is scoped to conversations where the caller has a non-declined,
+    non-left participant row (``invited`` and ``active`` both visible).
+    """
+    limit = max(1, min(limit, 200))
+
+    # Base join: conversations the caller participates in (any non-exit status)
+    stmt = (
+        select(Conversation)
+        .join(
+            Participant,
+            (Participant.conversation_id == Conversation.id)
+            & (Participant.agent_id == caller_agent_id)
+            & (Participant.status.in_(["invited", "active"])),
+        )
+        .order_by(Conversation.created_at.desc(), Conversation.id.desc())
+        .limit(limit + 1)
+    )
+
+    if role is not None:
+        stmt = stmt.where(Participant.role == role)
+    if conversation_type is not None:
+        stmt = stmt.where(Conversation.type == conversation_type)
+    if state is not None:
+        stmt = stmt.where(Conversation.state == state)
+
+    if cursor:
+        # cursor = "<created_at_iso>|<id>"
+        try:
+            ts_part, id_part = cursor.rsplit("|", 1)
+            cursor_ts = datetime.fromisoformat(ts_part)
+            cursor_id = uuid.UUID(id_part)
+        except (ValueError, AttributeError):
+            cursor_ts = None
+            cursor_id = None
+        if cursor_ts is not None and cursor_id is not None:
+            stmt = stmt.where(
+                tuple_(Conversation.created_at, Conversation.id)
+                < tuple_(literal(cursor_ts), literal(cursor_id))
+            )
+
+    rows = list((await session.execute(stmt)).scalars().all())
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+
+    def _conv_summary(c: Conversation) -> dict[str, Any]:
+        return {
+            "id": str(c.id),
+            "type": c.type,
+            "state": c.state,
+            "created_by": str(c.created_by),
+            "expires_at": _iso(c.expires_at),
+            "created_at": _iso(c.created_at),
+        }
+
+    next_cursor = f"{rows[-1].created_at.isoformat()}|{rows[-1].id}" if has_more and rows else None
+    return {
+        "conversations": [_conv_summary(c) for c in rows],
+        "has_more": has_more,
+        "next_cursor": next_cursor,
     }
 
 
@@ -941,7 +1031,7 @@ async def start_conversation(
         type=conversation_type,
         state="active",
         created_by=initiator.id,
-        expires_at=expires_at or (now + CONVERSATION_TTL),
+        expires_at=expires_at or (now + CONVERSATION_TTL[conversation_type]),
         owner_snapshot=owner_snapshot,
     )
     session.add(conversation)
@@ -1871,6 +1961,7 @@ __all__ = [
     "invite",
     "leave",
     "list_agents",
+    "list_conversations",
     "may_assign",
     "may_invite",
     "may_open",
