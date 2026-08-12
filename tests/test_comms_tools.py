@@ -965,7 +965,7 @@ class TestTasks:
         await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         token = _token("bond-007", owner_sub="owner-dan@example.com")
 
-        with pytest.raises(ToolError, match="invalid_request"):
+        with pytest.raises(ToolError, match="invalid_request: the request could not be processed"):
             await _call(
                 main,
                 test_session_factory,

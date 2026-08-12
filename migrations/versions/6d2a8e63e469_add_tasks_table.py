@@ -17,16 +17,22 @@ state older than the one below. Once this PR merges, treat this file as
 frozen: any further schema change requires a NEW Alembic revision, never
 an edit to this one.
 
-Every operation below is written to be idempotent in EITHER direction
-(if_not_exists on every create, if_exists on every corresponding drop,
-raw `ADD COLUMN IF NOT EXISTS`/`DROP COLUMN IF EXISTS` SQL for the one
-column add op.add_column/op.drop_column have no such flag for) —
-belt-and-suspenders per Argus round 3's request, on top of the in-place-
-amendment rationale above, so re-running either direction against a
-partially-applied state never aborts. The two FK/CHECK constraint adds
-are the sole exception: Postgres has no `ADD CONSTRAINT IF NOT EXISTS`
-syntax at all (not a gap in this file), matching the same non-idempotent
-constraint-add precedent already set by ef8394b37c8d/18f2d7735523.
+Every DROP in downgrade() below is guarded (if_exists, or raw `DROP ...
+IF EXISTS` SQL for drop_constraint()/drop_table(), neither of which has an
+if_exists kwarg) so re-running downgrade against a partially-applied state
+never aborts — belt-and-suspenders per Argus round 3/4's request, on top
+of the in-place-amendment rationale above. The CREATEs in upgrade() are
+guarded for indexes (if_not_exists) and the one column add (raw `ADD
+COLUMN IF NOT EXISTS` SQL), but NOT for `create_table("tasks", ...)` or the
+two FK/CHECK constraint adds: Postgres has no `CREATE TABLE IF NOT EXISTS`
+equivalent that also lets Alembic manage the table via `op.create_table`,
+and no `ADD CONSTRAINT IF NOT EXISTS` syntax at all — matching the same
+non-idempotent constraint-add precedent already set by
+ef8394b37c8d/18f2d7735523. In practice this asymmetry is harmless here:
+upgrade() only ever needs to re-run from a clean base per the in-place-
+amendment rationale above (there is no partially-upgraded state to resume
+into), so the guarding effort went into downgrade(), where a partial state
+is the exact case this file's own iterative dev/review cycle exercises.
 
 """
 
@@ -106,9 +112,16 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("idx_audit_log_task_id", table_name="audit_log", if_exists=True)
-    op.drop_constraint("audit_log_task_id_fkey", "audit_log", type_="foreignkey")
+    # op.drop_constraint() has no if_exists kwarg (unlike op.drop_index()) —
+    # raw SQL, same escape hatch already used for the column add/drop above.
+    op.execute("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_task_id_fkey")
     op.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS task_id")
     op.drop_index("idx_tasks_created_at_id", table_name="tasks", if_exists=True)
     op.drop_index("idx_tasks_created_by_status", table_name="tasks", if_exists=True)
     op.drop_index("idx_tasks_assignee_id_status", table_name="tasks", if_exists=True)
-    op.drop_table("tasks")
+    # op.drop_table() has no if_exists kwarg either — same raw-SQL pattern.
+    # No CASCADE: every dependent index/constraint is already dropped above,
+    # in dependency order, so a plain DROP TABLE is sufficient and doesn't
+    # risk silently cascading into some future, as-yet-unwritten dependent
+    # object this line was never updated to account for.
+    op.execute("DROP TABLE IF EXISTS tasks")

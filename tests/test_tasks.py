@@ -343,6 +343,13 @@ class TestAddTaskAdmission:
 
         actions = (await session.execute(select(AuditLog.action))).scalars().all()
         assert "denied.ownership_unverified" in actions
+        detail = (
+            await session.execute(
+                select(AuditLog.detail).where(AuditLog.action == "denied.ownership_unverified")
+            )
+        ).scalar_one()
+        assert detail == {"assignee_agent_id": str(assignee.id), "error_type": "RuntimeError"}
+        assert "error" not in detail
 
     async def test_unknown_assignee_denied(self, session: AsyncSession) -> None:
         creator = await _register(session, "cos", owner_sub="dan-sub")

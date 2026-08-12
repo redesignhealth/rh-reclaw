@@ -205,6 +205,13 @@ class Task(Base):
         CheckConstraint("created_by <> assignee_id", name="ck_tasks_distinct_parties"),
         Index("idx_tasks_assignee_id_status", "assignee_id", "status"),
         Index("idx_tasks_created_by_status", "created_by", "status"),
+        # text() expression columns (DESC, to match get_tasks's ORDER BY) —
+        # `alembic revision --autogenerate` compares these against
+        # pg_indexes reflection unreliably and may propose a spurious
+        # drop/recreate for this specific index. That proposed diff is
+        # noise, not a real drift, given the migration creates this exact
+        # index (see migrations/versions/6d2a8e63e469's own DESC comment);
+        # don't apply it without checking by hand first.
         Index("idx_tasks_created_at_id", text("created_at DESC"), text("id DESC")),
     )
 

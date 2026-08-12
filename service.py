@@ -87,6 +87,7 @@ though the client sees one uniform message), ``denied.unknown_agent``,
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, Protocol
@@ -106,6 +107,16 @@ from schemas import (
     validate_payload,
 )
 from state_machine import is_message_legal, resulting_conversation_state
+
+# Plain stdlib logging, not structlog/observability.py's event-schema
+# helpers (TECH-5094 Argus round 4): this module's own docstring commits to
+# never importing fastmcp, and observability.py's log_* helpers exist for
+# the tools-layer request lifecycle (tool_call/auth_flow/scope_denial),
+# not an arbitrary service-layer diagnostic. This logger exists solely so
+# an ownership-lookup failure's full exception (never persisted to the
+# audit_log itself -- see the except block below) still lands somewhere
+# (CloudWatch, via the ECS log driver) instead of being silently discarded.
+logger = logging.getLogger(__name__)
 
 # --- Policy constants --------------------------------------------------------
 
@@ -1613,6 +1624,12 @@ async def add_task(
         creator_owner_info = await ownership_client.get_agent_owners(creator.id)
         assignee_owner_info = await ownership_client.get_agent_owners(assignee.id)
     except Exception as exc:
+        # Full exception + traceback go to the server-side log only (never
+        # the audit_log row below -- see its comment) so an ownership-
+        # lookup outage is still diagnosable in CloudWatch instead of being
+        # silently indistinguishable from a legitimate denial (TECH-5094
+        # Argus round 4). Logged before _deny(), which raises.
+        logger.error("ownership_unverified: %s", type(exc).__name__, exc_info=True)
         await _deny(
             session,
             actor_sub=actor_sub,

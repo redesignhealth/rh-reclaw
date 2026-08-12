@@ -310,6 +310,18 @@ class TestSchema:
         assert "idx_tasks_created_by_status" in task_indexes
         assert "idx_tasks_created_at_id" in task_indexes
 
+        async with engine.connect() as conn:
+            indexdef = (
+                await conn.execute(
+                    text(
+                        "SELECT indexdef FROM pg_indexes "
+                        "WHERE indexname = 'idx_tasks_created_at_id'"
+                    )
+                )
+            ).scalar_one()
+        assert "created_at DESC" in indexdef
+        assert "id DESC" in indexdef
+
     async def test_messages_seq_unique_per_conversation(self, engine: AsyncEngine) -> None:
         async with engine.connect() as conn:
             result = await conn.execute(
