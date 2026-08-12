@@ -53,7 +53,7 @@ from exceptions import (
 )
 from identity import try_resolve_email
 from models import Agent
-from schemas import MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
+from schemas import MAX_AGENT_KEY_LENGTH, MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
 from scopes import is_interactive_token, scopes_for_token
 
 comms_server: FastMCP[Any] = FastMCP("comms")
@@ -209,12 +209,32 @@ async def whoami() -> dict[str, Any]:
 
 
 @comms_server.tool
-async def register(display_name: str, accepted_types: list[str]) -> dict[str, Any]:
+async def register(
+    display_name: str, accepted_types: list[str], agent_key: str | None = None
+) -> dict[str, Any]:
     """Idempotently self-provision (or re-bind) the caller's board ``Agent`` row.
 
     ``owner_sub``/``owner_email`` are NEVER accepted as parameters
     (DESIGN.md §4 security invariant) — they are derived here from verified
     token claims only:
+
+    ``agent_key`` (optional) is a STOPGAP (TECH-5113), not new trusted
+    identity: today, every EA-managed agent acting for one human is minted
+    an rh-auth token with the SAME ``sub`` (that human's Okta sub), because
+    reclaw has no way yet to carry a distinct, verified per-agent identity
+    in the token or in message metadata. Without ``agent_key``, two such
+    agents registering under that one shared ``sub`` collapse into a single
+    board row — the second `register` silently overwrites the first's
+    `display_name`/`accepted_types` (this is exactly what happened when
+    "Pepper Pots" overwrote "Bond 007"). ``agent_key``, when given, is
+    appended to the caller's verified base identity to form the board
+    ``sub`` (``f"{base_sub}::{agent_key}"``) — a self-chosen partition
+    WITHIN an already-verified identity, never a substitute for one:
+    ``owner_sub``/``owner_email`` below are computed from the base identity
+    BEFORE this composition and are completely unaffected by ``agent_key``,
+    so admission decisions (``may_assign``) stay keyed on real verified
+    ownership regardless of what a caller passes here. Delete this
+    parameter once reclaw can pass real per-agent identity instead.
 
     - ``owner_sub``: the token's ``owner_sub`` claim if present (an rh-auth
       token minted for an EA agent acting on a human's behalf), else the
@@ -244,14 +264,24 @@ async def register(display_name: str, accepted_types: list[str]) -> dict[str, An
       so ``email`` must never be trusted as an ``owner_email`` fallback for
       those tokens, regardless of which check is used to detect them.
 
-    Calling again with the same caller identity re-binds ``display_name``/
-    ``accepted_types`` in place (see ``service.register_agent``).
+    Calling again with the same caller identity AND the same ``agent_key``
+    (both absent counts as the same) re-binds ``display_name``/
+    ``accepted_types`` in place (see ``service.register_agent``); a
+    different ``agent_key`` registers a distinct row instead.
     """
     token = _require_token()
     sub = _require_identity(token)
     owner_sub = str(token.claims.get("owner_sub") or sub)
     upstream_email = token.claims.get("email") if is_interactive_token(token) else None
     owner_email = str(token.claims.get("owner_email") or upstream_email or sub)
+
+    if agent_key is not None:
+        agent_key = agent_key.strip()
+        if not agent_key:
+            raise ToolError("invalid_request: agent_key must be non-empty if provided")
+        if len(agent_key) > MAX_AGENT_KEY_LENGTH:
+            raise ToolError(f"invalid_request: agent_key exceeds {MAX_AGENT_KEY_LENGTH} characters")
+        sub = f"{sub}::{agent_key}"
 
     async with get_session_factory()() as session, _map_service_errors():
         agent = await service.register_agent(
