@@ -115,6 +115,11 @@ MessageType = Literal[
     "decline",
     "needs_clarification",
     "note",
+    "task_assign",
+    "task_report",
+    "task_complete",
+    "task_decline",
+    "task_cancel",
 ]
 
 
@@ -278,6 +283,8 @@ class NoteV1(_StrictModel):
 _TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION = frozenset(
     {"gather_availability", "schedule_meeting", "reschedule_meeting"}
 )
+_TASK_CLOSE_REASONS = Literal["no_longer_needed", "unable_to_complete", "expired", "other"]
+_TASK_REPORT_STATUSES = Literal["in_progress", "blocked"]
 
 
 def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
@@ -285,9 +292,12 @@ def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
         raise ValueError(f"{field_name} must not contain duplicates")
 
 
-class TaskSpecV1(_StrictModel):
-    """task_spec / v1 — the (soon-to-be-removed, TECH-5118 Phase 3)
-    ``tasks.payload`` shape (TECH-5094).
+class TaskAssignV1(_StrictModel):
+    """task_assign / v1 — opens a task-coordination conversation (TECH-5118,
+    DESIGN.md §9; supersedes TECH-5094's ``task_spec``/dedicated ``tasks``
+    table). Posted as the seq-1 message of an ``internal``/``asymmetric``
+    conversation between the assigning agent (participant ``role='owner'``)
+    and the assignee (participant ``role='member'``).
 
     Machine-actionable coordinates only, never prose: an ``action`` enum
     plus structured scheduling parameters (reusing ``TimeWindow`` and the
@@ -297,11 +307,10 @@ class TaskSpecV1(_StrictModel):
 
     ``gather_availability``/``schedule_meeting``/``reschedule_meeting``
     require ``window`` and ``duration_min``; ``confirm_slot`` requires
-    ``window``. ``report_status`` is the report-back direction (EA ->
-    Chief-of-Staff) and needs neither.
+    ``window``. ``report_status`` needs neither.
     """
 
-    type: Literal["task_spec"] = "task_spec"
+    type: Literal["task_assign"] = "task_assign"
     action: Literal[
         "gather_availability",
         "schedule_meeting",
@@ -320,19 +329,56 @@ class TaskSpecV1(_StrictModel):
     constraints: list[_CONSTRAINTS] = Field(default_factory=list, max_length=10)
 
     @model_validator(mode="after")
-    def _no_duplicates(self) -> TaskSpecV1:
+    def _no_duplicates(self) -> TaskAssignV1:
         _check_no_duplicates(self.constraints, "constraints")
         _check_no_duplicates(self.counterparty_agent_ids, "counterparty_agent_ids")
         return self
 
     @model_validator(mode="after")
-    def _required_fields_for_action(self) -> TaskSpecV1:
+    def _required_fields_for_action(self) -> TaskAssignV1:
         if self.action in _TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION:
             if self.window is None or self.duration_min is None:
                 raise ValueError(f"action '{self.action}' requires 'window' and 'duration_min'")
         elif self.action == "confirm_slot" and self.window is None:
             raise ValueError("action 'confirm_slot' requires 'window'")
         return self
+
+
+class TaskReportV1(_StrictModel):
+    """task_report / v1 — non-terminal, structured status update (either
+    direction). ``about_seq``, if given, points at the ``task_assign`` (or
+    an earlier ``task_report``) this update concerns — no free-text
+    progress notes, per the same invariant as ``needs_clarification``."""
+
+    type: Literal["task_report"] = "task_report"
+    status: _TASK_REPORT_STATUSES
+    about_seq: int | None = Field(default=None, ge=1)
+
+
+class TaskCompleteV1(_StrictModel):
+    """task_complete / v1 — terminal, transitions the conversation to
+    ``completed`` (``state_machine.resulting_conversation_state``)."""
+
+    type: Literal["task_complete"] = "task_complete"
+    about_seq: int | None = Field(default=None, ge=1)
+
+
+class TaskDeclineV1(_StrictModel):
+    """task_decline / v1 — the assignee's consent/refusal mechanism;
+    terminal, transitions the conversation to ``canceled``. Sender-role
+    restricted to a non-owner participant (``service._require_message_sender_role``)."""
+
+    type: Literal["task_decline"] = "task_decline"
+    reason: _TASK_CLOSE_REASONS
+
+
+class TaskCancelV1(_StrictModel):
+    """task_cancel / v1 — the assigner's creator-side close; terminal,
+    transitions the conversation to ``canceled``. Sender-role restricted to
+    the conversation's owner participant."""
+
+    type: Literal["task_cancel"] = "task_cancel"
+    reason: _TASK_CLOSE_REASONS
 
 
 class MessageSchema(NamedTuple):
@@ -365,10 +411,11 @@ MESSAGE_SCHEMAS: dict[tuple[str, int], MessageSchema] = {
     ("decline", 1): MessageSchema(DeclineV1, boundary_safe=True),
     ("needs_clarification", 1): MessageSchema(NeedsClarificationV1, boundary_safe=True),
     ("note", 1): MessageSchema(NoteV1, boundary_safe=False),
-    # TODO(TECH-5118 Phase 3): task_spec/TaskSpecV1 is removed along with
-    # the dedicated tasks table, replaced by task_assign/report/complete/
-    # decline/cancel message types.
-    ("task_spec", 1): MessageSchema(TaskSpecV1, boundary_safe=True),
+    ("task_assign", 1): MessageSchema(TaskAssignV1, boundary_safe=True),
+    ("task_report", 1): MessageSchema(TaskReportV1, boundary_safe=True),
+    ("task_complete", 1): MessageSchema(TaskCompleteV1, boundary_safe=True),
+    ("task_decline", 1): MessageSchema(TaskDeclineV1, boundary_safe=True),
+    ("task_cancel", 1): MessageSchema(TaskCancelV1, boundary_safe=True),
 }
 
 
@@ -474,7 +521,11 @@ __all__ = [
     "NoteV1",
     "PayloadValidationError",
     "Slot",
-    "TaskSpecV1",
+    "TaskAssignV1",
+    "TaskCancelV1",
+    "TaskCompleteV1",
+    "TaskDeclineV1",
+    "TaskReportV1",
     "TimeWindow",
     "get_schema",
     "is_boundary_safe",

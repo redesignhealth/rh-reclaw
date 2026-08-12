@@ -155,7 +155,7 @@ async def _clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, tasks, messages, participants, conversations, agents "
+                "TRUNCATE TABLE audit_log, messages, participants, conversations, agents "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -1477,6 +1477,185 @@ class TestPostMessageBoundaryCrossing:
             ownership_client=_FailingOwnershipClient(),
         )
         assert message.type == "note"
+
+
+class TestTaskLifecycleMessages:
+    """TECH-5118 "tasks-as-conversations": task_assign opens a conversation
+    (assigner = owner participant, assignee = member participant);
+    task_report is non-terminal; task_complete/task_decline/task_cancel are
+    terminal and sender-role-restricted."""
+
+    def _task_assign_payload(self, **overrides: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {"action": "report_status"}
+        payload.update(overrides)
+        return payload
+
+    async def _assigned_task(
+        self, session: AsyncSession, assigner_sub: str, assignee_sub: str
+    ) -> Any:
+        assigner = await _register(session, assigner_sub)
+        assignee = await _register(session, assignee_sub)
+        client = _FakeOwnershipClient(
+            {
+                assigner.id: {"is_shared": False, "owners": ["dan"]},
+                assignee.id: {"is_shared": False, "owners": ["dan"]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=assigner.sub,
+            initiator_agent_id=assigner.id,
+            conversation_type="internal",
+            target_agent_ids=[assignee.id],
+            initial_message=self._task_assign_payload(),
+            message_type="task_assign",
+            ownership_client=client,
+        )
+        await accept_invite(
+            session, actor_sub=assignee.sub, agent_id=assignee.id, conversation_id=conversation.id
+        )
+        return assigner, assignee, conversation, client
+
+    async def test_task_assign_opens_conversation(self, session: AsyncSession) -> None:
+        assigner, assignee, conversation, _client = await self._assigned_task(
+            session, "task-assigner-1", "task-assignee-1"
+        )
+        assert conversation.type == "internal"
+        assert conversation.state == "active"
+        owner_row = await session.get(Participant, (conversation.id, assigner.id))
+        member_row = await session.get(Participant, (conversation.id, assignee.id))
+        assert owner_row is not None and owner_row.role == "owner"
+        assert member_row is not None and member_row.role == "member"
+
+    async def test_task_report_is_non_terminal(self, session: AsyncSession) -> None:
+        _assigner, assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-2", "task-assignee-2"
+        )
+        message = await post_message(
+            session,
+            actor_sub=assignee.sub,
+            sender_agent_id=assignee.id,
+            conversation_id=conversation.id,
+            message_type="task_report",
+            payload={"status": "in_progress"},
+            ownership_client=client,
+        )
+        assert message.type == "task_report"
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.state == "active"
+
+    async def test_task_complete_from_either_party_completes(self, session: AsyncSession) -> None:
+        assigner, _assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-3", "task-assignee-3"
+        )
+        await post_message(
+            session,
+            actor_sub=assigner.sub,
+            sender_agent_id=assigner.id,
+            conversation_id=conversation.id,
+            message_type="task_complete",
+            payload={},
+            ownership_client=client,
+        )
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.state == "completed"
+
+    async def test_task_decline_from_assignee_cancels(self, session: AsyncSession) -> None:
+        _assigner, assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-4", "task-assignee-4"
+        )
+        await post_message(
+            session,
+            actor_sub=assignee.sub,
+            sender_agent_id=assignee.id,
+            conversation_id=conversation.id,
+            message_type="task_decline",
+            payload={"reason": "unable_to_complete"},
+            ownership_client=client,
+        )
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.state == "canceled"
+
+    async def test_task_decline_from_assigner_denied(self, session: AsyncSession) -> None:
+        assigner, _assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-5", "task-assignee-5"
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=assigner.sub,
+                sender_agent_id=assigner.id,
+                conversation_id=conversation.id,
+                message_type="task_decline",
+                payload={"reason": "unable_to_complete"},
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.wrong_sender_role"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.wrong_sender_role" in actions
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.state == "active"
+
+    async def test_task_cancel_from_assigner_cancels(self, session: AsyncSession) -> None:
+        assigner, _assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-6", "task-assignee-6"
+        )
+        await post_message(
+            session,
+            actor_sub=assigner.sub,
+            sender_agent_id=assigner.id,
+            conversation_id=conversation.id,
+            message_type="task_cancel",
+            payload={"reason": "no_longer_needed"},
+            ownership_client=client,
+        )
+        refreshed = await session.get(type(conversation), conversation.id)
+        assert refreshed is not None
+        assert refreshed.state == "canceled"
+
+    async def test_task_cancel_from_assignee_denied(self, session: AsyncSession) -> None:
+        _assigner, assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-7", "task-assignee-7"
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=assignee.sub,
+                sender_agent_id=assignee.id,
+                conversation_id=conversation.id,
+                message_type="task_cancel",
+                payload={"reason": "no_longer_needed"},
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.wrong_sender_role"
+
+    async def test_no_transition_out_of_completed(self, session: AsyncSession) -> None:
+        assigner, _assignee, conversation, client = await self._assigned_task(
+            session, "task-assigner-8", "task-assignee-8"
+        )
+        await post_message(
+            session,
+            actor_sub=assigner.sub,
+            sender_agent_id=assigner.id,
+            conversation_id=conversation.id,
+            message_type="task_complete",
+            payload={},
+            ownership_client=client,
+        )
+        with pytest.raises(InvalidConversationStateError):
+            await post_message(
+                session,
+                actor_sub=assigner.sub,
+                sender_agent_id=assigner.id,
+                conversation_id=conversation.id,
+                message_type="task_cancel",
+                payload={"reason": "no_longer_needed"},
+                ownership_client=client,
+            )
 
 
 # --- seq race-safety -----------------------------------------------------------

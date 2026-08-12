@@ -63,14 +63,13 @@ scattered as inline comments):
   ``exceptions.AccessDeniedError``'s docstring — folded into the uniform denial
   rather than given a leakier, more specific message.
 - **Board-level ``Agent.status`` gating**: checked (uniform denial) on the
-  *initiating* side of a write — starting a conversation, inviting,
-  posting, and (TECH-5099) ``update_task`` all require the actor's own
-  agent to be board-``active``, and ``invite``/``start_conversation``
-  require the same of every target. It is deliberately NOT re-checked on
-  ``accept_invite``/``decline_invite``/``leave``: those are a participant
-  exiting or resolving their own already-granted membership, and a
-  participant should always be able to do that even if ops suspends their
-  agent mid-negotiation.
+  *initiating* side of a write — starting a conversation, inviting, and
+  posting all require the actor's own agent to be board-``active``, and
+  ``invite``/``start_conversation`` require the same of every target. It
+  is deliberately NOT re-checked on ``accept_invite``/``decline_invite``/
+  ``leave``: those are a participant exiting or resolving their own
+  already-granted membership, and a participant should always be able to
+  do that even if ops suspends their agent mid-negotiation.
 
 Audit contract
 --------------
@@ -81,14 +80,14 @@ operation it describes. Denial actions are namespaced ``denied.*``:
 <status>`` (participant row exists but is in the wrong status — keeps each
 of "already active", "declined", "left" distinguishable in the trail even
 though the client sees one uniform message), ``denied.unknown_agent``,
-``denied.type_not_accepted``, ``denied.already_participant``,
-``denied.bad_state`` (state-machine violation — conversation *or*, since
-TECH-5099, task-status), ``denied.bad_schema`` (payload validation),
-``denied.rate_limited``, ``denied.not_party`` (caller is neither a task's
-creator nor its assignee, or the task does not exist — uniform anti-
-enumeration, the task-domain analog of ``denied.not_member``), and
-``denied.not_assignee`` (a non-assignee attempted the assignee-only
-``declined`` transition).
+``denied.already_participant``, ``denied.bad_state`` (state-machine
+violation), ``denied.bad_schema`` (payload validation),
+``denied.rate_limited``, ``denied.ownership_unverified`` (an ownership
+lookup failed — fail closed, TECH-5094/TECH-5118), ``denied.not_same_owner``/
+``denied.no_owner_overlap`` (conversation-open admission failed for
+``internal``/``asymmetric``), ``denied.owner_set_frozen`` (an invite would
+expand a frozen owner set), and ``denied.boundary_crossing``/
+``denied.wrong_sender_role`` (DESIGN.md §9 Axis 2's per-message checks).
 """
 
 from __future__ import annotations
@@ -96,12 +95,12 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, Protocol
 
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from exceptions import (
     AccessDeniedError,
@@ -109,7 +108,7 @@ from exceptions import (
     RateLimitExceededError,
     UnknownConversationTypeError,
 )
-from models import Agent, AuditLog, Conversation, Message, Participant, Task
+from models import Agent, AuditLog, Conversation, Message, Participant
 from schemas import (
     CONVERSATION_TYPES,
     MAX_ACCEPTED_TYPE_LENGTH,
@@ -149,7 +148,6 @@ CONVERSATION_TTL = timedelta(days=7)
 # directly (no Redis — DESIGN.md §5: "No Redis until it matters").
 MAX_MESSAGES_PER_CONVERSATION_PER_HOUR = 30
 MAX_CONVERSATION_STARTS_PER_HOUR = 10
-MAX_TASK_CREATES_PER_HOUR = 30
 
 
 def _now() -> datetime:
@@ -167,7 +165,6 @@ def _audit(
     agent_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
     message_id: uuid.UUID | None = None,
-    task_id: uuid.UUID | None = None,
     detail: dict[str, Any] | None = None,
 ) -> None:
     """Stage an append-only audit row (committed by the caller)."""
@@ -178,7 +175,6 @@ def _audit(
             agent_id=agent_id,
             conversation_id=conversation_id,
             message_id=message_id,
-            task_id=task_id,
             detail=detail,
         )
     )
@@ -191,7 +187,6 @@ async def _deny(
     action: str,
     agent_id: uuid.UUID | None = None,
     conversation_id: uuid.UUID | None = None,
-    task_id: uuid.UUID | None = None,
     detail: dict[str, Any] | None = None,
 ) -> NoReturn:
     """Audit a denial, COMMIT it, and raise the uniform ``AccessDeniedError``.
@@ -206,7 +201,6 @@ async def _deny(
         action=action,
         agent_id=agent_id,
         conversation_id=conversation_id,
-        task_id=task_id,
         detail=detail,
     )
     await session.commit()
@@ -365,18 +359,12 @@ async def _require_active_agent(
     *,
     actor_sub: str,
     agent_id: uuid.UUID,
-    task_id: uuid.UUID | None = None,
 ) -> Agent:
     """Resolve ``agent_id`` to its board-ACTIVE ``Agent``, or deny (uniform).
 
     Used on the *initiating* side of writes (starting a conversation,
-    inviting, posting, ``update_task``) — see the module docstring's
-    judgment-call note on why this check is deliberately skipped for
-    accept/decline/leave. ``task_id`` is ``None`` for every caller except
-    ``update_task``, which already has one in scope by the time it calls
-    this — passed through so this denial's audit row is task-attributed
-    like every other ``update_task`` denial (TECH-5099 Argus round 3),
-    rather than the only one landing with ``audit_log.task_id`` NULL.
+    inviting, posting) — see the module docstring's judgment-call note on
+    why this check is deliberately skipped for accept/decline/leave.
     """
     agent = await _find_agent_by_id(session, agent_id)
     if agent is None or agent.status != "active":
@@ -385,7 +373,6 @@ async def _require_active_agent(
             actor_sub=actor_sub,
             action="denied.unknown_agent",
             agent_id=agent.id if agent else None,
-            task_id=task_id,
         )
     return agent
 
@@ -506,7 +493,11 @@ def _pairwise_admitted(
     pairs = itertools.combinations(participants, 2)
     if conversation_type == "internal":
         return all(owner_sets[a.id] == owner_sets[b.id] for a, b in pairs)
-    return all(not owner_sets[a.id].isdisjoint(owner_sets[b.id]) for a, b in pairs)
+    # asymmetric: exactly may_assign's owner-set-intersection predicate,
+    # applied pairwise (this is the reuse the ticket calls out — one
+    # predicate, not two independently-drifting implementations of
+    # "do these owner sets intersect").
+    return all(may_assign(owner_sets[a.id], owner_sets[b.id]) for a, b in pairs)
 
 
 async def may_open(
@@ -1385,6 +1376,42 @@ async def _check_boundary_crossing(
         )
 
 
+# Message types restricted to a specific sender participant role
+# (TECH-5118, "tasks-as-conversations"): ``task_cancel`` is the creator-side
+# close (today's decline-cascade only counts role='member', no creator
+# path — this is that path), ``task_decline`` is the assignee's consent/
+# refusal mechanism, mirroring ``update_task``'s old assignee-only
+# ``declined`` restriction. Every other message type is unrestricted by
+# sender role (any active participant may post it).
+_MESSAGE_TYPE_SENDER_ROLES: dict[str, str] = {
+    "task_cancel": "owner",
+    "task_decline": "member",
+}
+
+
+async def _require_message_sender_role(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    sender_agent_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    message_type: str,
+    sender_role: str,
+) -> None:
+    """Deny if ``message_type`` is sender-role-restricted and the sender's
+    participant role doesn't match. No-op for every unrestricted type."""
+    required_role = _MESSAGE_TYPE_SENDER_ROLES.get(message_type)
+    if required_role is not None and sender_role != required_role:
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.wrong_sender_role",
+            agent_id=sender_agent_id,
+            conversation_id=conversation_id,
+            detail={"message_type": message_type, "required_role": required_role},
+        )
+
+
 async def post_message(
     session: AsyncSession,
     *,
@@ -1414,18 +1441,23 @@ async def post_message(
     message that would cross an ownership boundary for the sender, audited
     as ``denied.boundary_crossing``.
 
-    Side effects: ``confirm`` transitions the conversation to
-    ``completed``; ``decline`` sets the sender's OWN participant status to
-    ``declined`` and, only once every non-owner participant is now
+    Side effects: ``confirm``/``task_complete`` transition the conversation
+    to ``completed``; ``decline`` sets the sender's OWN participant status
+    to ``declined`` and, only once every non-owner participant is now
     ``declined`` (``_all_non_owners_declined``), transitions the
-    conversation to ``canceled``.
+    conversation to ``canceled``; ``task_decline``/``task_cancel``
+    transition the conversation to ``canceled`` unconditionally (each is
+    sender-role-restricted to a single role, so one post is always
+    decisive — see ``_require_message_sender_role``).
 
     Raises ``RateLimitExceededError`` past the per-sender-per-conversation
     hourly cap; ``InvalidConversationStateError`` if ``message_type`` is not
     legal in the conversation's current state (state-machine violation,
-    including after lazy expiry); ``schemas.PayloadValidationError`` if
-    ``payload`` fails schema validation, or if a ``needs_clarification``'s
-    ``about_seq`` does not reference an existing prior message.
+    including after lazy expiry); ``AccessDeniedError`` (uniform) if
+    ``message_type`` is sender-role-restricted and the sender's role
+    doesn't match; ``schemas.PayloadValidationError`` if ``payload`` fails
+    schema validation, or if a ``needs_clarification``'s ``about_seq`` does
+    not reference an existing prior message.
     """
     await _require_active_agent(session, actor_sub=actor_sub, agent_id=sender_agent_id)
     conversation, participant = await _load_participant_for_transition(
@@ -1450,6 +1482,15 @@ async def post_message(
             current_state=conversation.state,
             message_type=message_type,
         )
+
+    await _require_message_sender_role(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=sender_agent_id,
+        conversation_id=conversation.id,
+        message_type=message_type,
+        sender_role=participant.role,
+    )
 
     await _check_boundary_crossing(
         session,
@@ -1538,8 +1579,8 @@ async def post_message(
                 conversation_id=conversation.id,
                 detail={"new_state": new_state, "via": "decline"},
             )
-    elif message_type == "confirm":
-        new_state = resulting_conversation_state("confirm")
+    elif message_type in ("confirm", "task_complete", "task_decline", "task_cancel"):
+        new_state = resulting_conversation_state(message_type)
         if new_state is not None:
             conversation.state = new_state
             _audit(
@@ -1548,7 +1589,7 @@ async def post_message(
                 action="conversation.close",
                 agent_id=sender_agent_id,
                 conversation_id=conversation.id,
-                detail={"new_state": new_state, "via": "confirm"},
+                detail={"new_state": new_state, "via": message_type},
             )
 
     await session.commit()
@@ -1731,21 +1772,7 @@ async def inbox(session: AsyncSession, *, caller_agent_id: uuid.UUID) -> dict[st
     }
 
 
-# --- Tasks (TECH-5094; superseded by TECH-5118 Phase 3 "tasks-as-conversations") --
-#
-# A dedicated table, not conversations/messages (see TECH-5094 §1): a task's
-# ``status`` mutates in place (like ``participants.status``), and visibility
-# is simply "caller is created_by or assignee_id" — no invite/accept
-# ceremony, since a task is intrinsically two-party.
-#
-# TODO(TECH-5118 Phase 3): this whole section (the ``Task`` model, this
-# admission/CRUD code, and the three ``comms_add_task``/``comms_get_tasks``/
-# ``comms_update_task`` tools) is removed once tasks are represented as
-# conversations carrying ``task_assign``/``task_report``/``task_complete``/
-# ``task_decline``/``task_cancel`` messages instead. ``may_assign``'s
-# owner-set-intersection predicate below is *not* removed — Phase 2 reuses
-# it as the pairwise check inside the new ``asymmetric`` conversation-type
-# admission policy.
+# --- Ownership lookups (TECH-5094; reused by Phase 2's admission model) -------
 
 
 class OwnershipClient(Protocol):
@@ -1812,9 +1839,14 @@ class AgentTableOwnershipClient:
         return {"is_shared": False, "owners": [agent.owner_sub]}
 
 
-def may_assign(creator_owners: set[str], assignee_owners: set[str]) -> bool:
-    """v1 ``add_task`` admission policy (TECH-5094 gap #1): symmetric verified
-    owner-set intersection — ``owners(creator) ∩ owners(assignee) ≠ ∅``.
+def may_assign(creator_owners: AbstractSet[str], assignee_owners: AbstractSet[str]) -> bool:
+    """Symmetric verified owner-set intersection — ``owners(a) ∩ owners(b) ≠ ∅``.
+
+    Originally TECH-5094's ``add_task`` admission policy; reused verbatim
+    by ``_pairwise_admitted`` as the ``asymmetric`` conversation-type
+    predicate (TECH-5118 phase 2). ``AbstractSet`` (not ``set``) so callers
+    may pass either mutable ``set``s or the ``frozenset``s the ownership-
+    lookup helpers use.
 
     Degenerates to an exact same-owner check for two non-shared agents
     (each owner set is a singleton); generalizes symmetrically once a
@@ -1825,490 +1857,16 @@ def may_assign(creator_owners: set[str], assignee_owners: set[str]) -> bool:
     return not creator_owners.isdisjoint(assignee_owners)
 
 
-def _task_public(
-    task: Task, *, caller_agent_id: uuid.UUID, created_by_sub: str, assignee_sub: str
-) -> dict[str, Any]:
-    """The one canonical AXI shape for a task — used by both ``add_task`` and
-    ``get_tasks``, so the same resource never comes back with two different
-    shapes depending on which tool returned it. Private/unauthorized by
-    design (TECH-5094 Argus round 2, security/B1): performs no visibility
-    check of its own, so every caller MUST have already established that
-    ``caller_agent_id`` may see ``task`` before calling this. Never export
-    this at module level — a future caller reaching for a "lower-level"
-    export could otherwise bypass whatever authorization its call sites
-    are relying on today (``add_task``'s caller is trivially the task's own
-    creator; ``get_tasks``'s ``role_filter`` already scopes its query to
-    rows the caller may see)."""
-    return {
-        "task_id": str(task.id),
-        "role": "created" if task.created_by == caller_agent_id else "assigned",
-        "status": task.status,
-        "created_by": str(task.created_by),
-        "created_by_sub": created_by_sub,
-        "assignee_agent_id": str(task.assignee_id),
-        "assignee_sub": assignee_sub,
-        "payload": task.payload,
-        "schema_version": task.schema_version,
-        "created_at": _iso(task.created_at),
-        "updated_at": _iso(task.updated_at),
-    }
-
-
-async def _enforce_task_create_rate_limit(
-    session: AsyncSession, *, actor_sub: str, creator: Agent
-) -> None:
-    one_hour_ago = _now() - timedelta(hours=1)
-    count = (
-        await session.execute(
-            select(func.count())
-            .select_from(Task)
-            .where(Task.created_by == creator.id, Task.created_at > one_hour_ago)
-        )
-    ).scalar_one()
-    if count >= MAX_TASK_CREATES_PER_HOUR:
-        await _deny_rate_limited(
-            session,
-            actor_sub=actor_sub,
-            agent_id=creator.id,
-            conversation_id=None,
-            limit_name="task_creates_per_hour",
-            message=f"rate_limited: at most {MAX_TASK_CREATES_PER_HOUR} task creates per hour",
-        )
-
-
-async def add_task(
-    session: AsyncSession,
-    *,
-    actor_sub: str,
-    creator_agent_id: uuid.UUID,
-    assignee_agent_id: uuid.UUID,
-    task: dict[str, Any],
-    ownership_client: OwnershipClient,
-    schema_version: int = 1,
-) -> dict[str, Any]:
-    """Create a task assigned from ``creator_agent_id`` to ``assignee_agent_id``.
-
-    Returns the same canonical AXI shape ``get_tasks`` returns for this
-    resource (``task_id``, ``role``, ``status``, ``created_by``,
-    ``created_by_sub``, ``assignee_agent_id``, ``assignee_sub``,
-    ``payload``, ``schema_version``, ``created_at``, ``updated_at``) —
-    ``role`` is always ``"created"`` here, since the caller is the task's
-    own creator.
-
-    Bidirectional (DESIGN.md/TECH-5094 §5): either party in an admitted
-    pair may call this — a Chief-of-Staff assigning work down, or an EA
-    reporting status back up via a ``report_status``-action task. The
-    ownership predicate (``may_assign``) is the entire authorization story;
-    there is no separate reporting-lines concept.
-
-    Raises ``ValueError`` for malformed input (unknown/inactive assignee is
-    NOT this — see below); ``AccessDeniedError`` (uniform) if the assignee
-    is unknown/inactive, ownership can't be verified, or the two agents'
-    owner sets don't intersect; ``RateLimitExceededError`` past
-    ``MAX_TASK_CREATES_PER_HOUR``; ``schemas.PayloadValidationError`` if
-    ``task`` fails schema validation or ``related_conversation_id`` doesn't
-    reference a conversation the caller belongs to.
-    """
-    creator = await _require_active_agent(session, actor_sub=actor_sub, agent_id=creator_agent_id)
-    if assignee_agent_id == creator_agent_id:
-        raise ValueError("assignee_agent_id must differ from the caller's own agent id")
-
-    assignee = await _find_agent_by_id(session, assignee_agent_id)
-    if assignee is None or assignee.status != "active":
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.unknown_agent",
-            agent_id=creator.id,
-            detail={"assignee_agent_id": str(assignee_agent_id)},
-        )
-
-    # Rate limit before the ownership lookups (not after, per
-    # start_conversation's established ordering; TECH-5094 Argus round 1,
-    # code quality/S15): once OwnershipClient is swapped for a real HTTP
-    # call to the reclaw platform, an unadmitted caller could otherwise
-    # force two external round-trips per request before ever being capped.
-    await _enforce_task_create_rate_limit(session, actor_sub=actor_sub, creator=creator)
-
-    try:
-        creator_owner_info = await ownership_client.get_agent_owners(creator.id)
-        assignee_owner_info = await ownership_client.get_agent_owners(assignee.id)
-    except Exception as exc:
-        # Full exception + traceback go to the server-side log only (never
-        # the audit_log row below -- see its comment) so an ownership-
-        # lookup outage is still diagnosable in CloudWatch instead of being
-        # silently indistinguishable from a legitimate denial (TECH-5094
-        # Argus round 4). Logged before _deny(), which raises.
-        logger.error("ownership_unverified: %s", type(exc).__name__, exc_info=True)
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.ownership_unverified",
-            agent_id=creator.id,
-            detail={
-                "assignee_agent_id": str(assignee.id),
-                # ONLY the exception's type name — never str(exc)/repr(exc)
-                # (TECH-5094 Argus rounds 2-3, security): AgentTableOwnershipClient's
-                # LookupError carries only benign agent UUIDs today, but a
-                # future HTTP-backed OwnershipClient's exceptions routinely
-                # embed Authorization headers, full request URLs with token
-                # query params, and raw response bodies in both str() and
-                # repr() — a length-truncated str(exc) does not bound where
-                # a credential falls inside that string, so nothing but the
-                # type name is safe to persist into the append-only
-                # audit_log ahead of that swap.
-                "error_type": type(exc).__name__,
-            },
-        )
-    creator_owners = set(creator_owner_info.get("owners") or [])
-    assignee_owners = set(assignee_owner_info.get("owners") or [])
-    if not creator_owners or not assignee_owners:
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.ownership_unverified",
-            agent_id=creator.id,
-            detail={"assignee_agent_id": str(assignee.id)},
-        )
-    if not may_assign(creator_owners, assignee_owners):
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.not_same_owner",
-            agent_id=creator.id,
-            detail={
-                "creator_is_shared": bool(creator_owner_info.get("is_shared")),
-                "assignee_is_shared": bool(assignee_owner_info.get("is_shared")),
-                "matched": False,
-            },
-        )
-
-    try:
-        normalized = validate_payload("task_spec", schema_version, task)
-    except PayloadValidationError as exc:
-        await _deny_bad_schema(
-            session,
-            actor_sub=actor_sub,
-            agent_id=creator.id,
-            conversation_id=None,
-            message_type="task_spec",
-            exc=exc,
-        )
-
-    related_conversation_id = normalized.get("related_conversation_id")
-    if related_conversation_id is not None:
-        related = await _find_participant(session, uuid.UUID(related_conversation_id), creator.id)
-        # Must currently be active, not merely "has a participant row" —
-        # a left/declined former participant no longer belongs to the
-        # conversation (same policy _load_participant_for_read enforces
-        # for reads; TECH-5094 Argus round 1, authorization/B2).
-        if related is None or related.status != "active":
-            await _deny_bad_schema(
-                session,
-                actor_sub=actor_sub,
-                agent_id=creator.id,
-                conversation_id=None,
-                message_type="task_spec",
-                exc=PayloadValidationError(
-                    "payload failed schema validation: related_conversation_id does not "
-                    "reference a conversation the caller belongs to"
-                ),
-            )
-
-    new_task = Task(
-        created_by=creator.id,
-        assignee_id=assignee.id,
-        status="open",
-        schema_version=schema_version,
-        payload=normalized,
-    )
-    session.add(new_task)
-    await session.flush()
-    _audit(
-        session,
-        actor_sub=actor_sub,
-        action="task.create",
-        agent_id=creator.id,
-        task_id=new_task.id,
-        detail={"assignee_agent_id": str(assignee.id)},
-    )
-    await session.commit()
-    # Build the same canonical AXI shape get_tasks returns for this
-    # resource (TECH-5094 Argus round 1, api contract/S5) directly from
-    # the creator/assignee Agent rows already loaded above — no second
-    # query, no second service call from the tools layer (round 2,
-    # architecture: providers/comms.py must call exactly one service.py
-    # function per tool), and no separately-exported, unauthorized
-    # formatter for a caller to reach for by mistake (round 2, security/
-    # B1's IDOR fix supersedes the earlier get_task_public seam entirely
-    # rather than patching it). The caller is trivially the task's own
-    # creator here, so no additional visibility check is needed.
-    return _task_public(
-        new_task, caller_agent_id=creator.id, created_by_sub=creator.sub, assignee_sub=assignee.sub
-    )
-
-
-def _parse_task_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
-    try:
-        iso_part, id_part = cursor.split("|", 1)
-        return datetime.fromisoformat(iso_part), uuid.UUID(id_part)
-    except (ValueError, AttributeError) as exc:
-        raise ValueError(f"invalid_request: malformed cursor {cursor!r}") from exc
-
-
-async def get_tasks(
-    session: AsyncSession,
-    *,
-    caller_agent_id: uuid.UUID,
-    role: str = "all",
-    status: str | None = None,
-    limit: int = 50,
-    cursor: str | None = None,
-) -> dict[str, Any]:
-    """Paginated "visible to me" task list: caller is ``created_by`` OR ``assignee_id``.
-
-    No other agent's tasks are ever visible, including same-owner
-    siblings (an owner-wide view is a later extension, not v1). Read-only
-    with no denial path for a registered caller (no audit rows — same as
-    ``inbox``/``list_agents``). ``role`` narrows to ``"created"``/
-    ``"assigned"`` (relative to the caller) or ``"all"`` (default, OR of
-    both); ``status`` optionally narrows further. Keyset-paginated over
-    ``(created_at DESC, id DESC)`` — ``cursor`` is an opaque
-    ``"{iso_created_at}|{task_id}"`` string from a previous page's
-    ``next_cursor``.
-    """
-    limit = max(1, min(limit, 200))
-    if role == "assigned":
-        role_filter = Task.assignee_id == caller_agent_id
-    elif role == "created":
-        role_filter = Task.created_by == caller_agent_id
-    elif role == "all":
-        role_filter = or_(Task.assignee_id == caller_agent_id, Task.created_by == caller_agent_id)
-    else:
-        raise ValueError(f"invalid role {role!r} — expected 'assigned', 'created', or 'all'")
-
-    creator_agent = aliased(Agent)
-    assignee_agent = aliased(Agent)
-    stmt = (
-        select(Task, creator_agent.sub, assignee_agent.sub)
-        .join(creator_agent, creator_agent.id == Task.created_by)
-        .join(assignee_agent, assignee_agent.id == Task.assignee_id)
-        .where(role_filter)
-    )
-    count_stmt = select(func.count()).select_from(Task).where(role_filter)
-    if status is not None:
-        stmt = stmt.where(Task.status == status)
-        count_stmt = count_stmt.where(Task.status == status)
-    if cursor:
-        cursor_created_at, cursor_id = _parse_task_cursor(cursor)
-        stmt = stmt.where(tuple_(Task.created_at, Task.id) < (cursor_created_at, cursor_id))
-    stmt = stmt.order_by(Task.created_at.desc(), Task.id.desc()).limit(limit + 1)
-
-    rows = (await session.execute(stmt)).all()
-    has_more = len(rows) > limit
-    rows = rows[:limit]
-    total_count = (await session.execute(count_stmt)).scalar_one()
-
-    tasks = [
-        _task_public(
-            t,
-            caller_agent_id=caller_agent_id,
-            created_by_sub=created_by_sub,
-            assignee_sub=assignee_sub,
-        )
-        for t, created_by_sub, assignee_sub in rows
-    ]
-    next_cursor = None
-    if has_more and rows:
-        last_task = rows[-1][0]
-        next_cursor = f"{last_task.created_at.isoformat()}|{last_task.id}"
-    return {
-        "tasks": tasks,
-        "total_count": total_count,
-        "has_more": has_more,
-        "next_cursor": next_cursor,
-    }
-
-
-async def _find_task(session: AsyncSession, task_id: uuid.UUID, *, for_update: bool) -> Task | None:
-    """No default for ``for_update``: its only call site (``update_task``)
-    always needs the row lock (see that function's comment), so a default
-    would be dead configurability suggesting an unlocked path is exercised
-    somewhere — it isn't."""
-    stmt = select(Task).where(Task.id == task_id)
-    if for_update:
-        stmt = stmt.with_for_update()
-    return (await session.execute(stmt)).scalar_one_or_none()
-
-
-async def _task_with_subs(session: AsyncSession, task_id: uuid.UUID) -> tuple[Task, str, str]:
-    """Load ``task_id`` plus its creator/assignee subs in one query.
-
-    Also serves as the post-commit refresh for ``update_task``: since this
-    issues a fresh SELECT on real ``Task`` columns, SQLAlchemy's identity
-    map repopulates the already-tracked ``Task`` instance's ``updated_at``
-    (server-computed by the ``UPDATE`` just committed, otherwise expired
-    and unreadable without an explicit refresh) as a side effect — no
-    separate ``session.refresh()`` call needed.
-    """
-    creator_agent = aliased(Agent)
-    assignee_agent = aliased(Agent)
-    row = (
-        await session.execute(
-            select(Task, creator_agent.sub, assignee_agent.sub)
-            .join(creator_agent, creator_agent.id == Task.created_by)
-            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
-            .where(Task.id == task_id)
-        )
-    ).one_or_none()
-    if row is None:
-        # No deletion endpoint exists as of TECH-5099, so this is
-        # unreachable today -- an explicit RuntimeError beats letting
-        # NoResultFound propagate as an unexplained 500 for whoever hits
-        # it first if that ever changes; the caller's transition already
-        # committed successfully by the time this runs.
-        raise RuntimeError(f"task {task_id} vanished after its own status transition committed")
-    task, created_by_sub, assignee_sub = row
-    return task, created_by_sub, assignee_sub
-
-
-async def _deny_bad_task_state(
-    session: AsyncSession,
-    *,
-    actor_sub: str,
-    agent_id: uuid.UUID,
-    task_id: uuid.UUID,
-    current_status: str,
-    attempted_status: str,
-) -> NoReturn:
-    """Audit + raise the specific (non-uniform) task-status transition violation."""
-    _audit(
-        session,
-        actor_sub=actor_sub,
-        action="denied.bad_state",
-        agent_id=agent_id,
-        task_id=task_id,
-        detail={"status": current_status, "attempted_status": attempted_status},
-    )
-    await session.commit()
-    raise InvalidConversationStateError(
-        f"task cannot transition to '{attempted_status}' while its status is '{current_status}'"
-    )
-
-
-async def update_task(
-    session: AsyncSession,
-    *,
-    actor_sub: str,
-    caller_agent_id: uuid.UUID,
-    task_id: uuid.UUID,
-    status: str,
-) -> dict[str, Any]:
-    """Transition a task: ``open`` -> ``done`` (either party) or ``open`` ->
-    ``declined`` (assignee only — the consent/refusal mechanism, terminal).
-
-    TECH-5099. Only the task's creator or assignee may call this (uniform
-    ``AccessDeniedError`` for a non-party or an unknown task_id — anti-
-    enumeration, identical treatment to a non-existent task). ``declined``
-    is further restricted to the assignee; the creator attempting it on a
-    still-``open`` task gets the same uniform denial. No transition out of
-    a terminal status (``done``/``declined``) is legal — that is a
-    state-machine violation (``InvalidConversationStateError``, specific:
-    the caller already knows the task's current status via ``get_tasks``),
-    not an authorization one, and it is checked BEFORE the assignee-only
-    restriction: any party (creator or assignee) attempting any status
-    change on an already-terminal task gets ``InvalidConversationStateError``,
-    never ``AccessDeniedError`` — role-eligibility for a status value is
-    moot once no transition is legal at all.
-
-    Raises ``ValueError`` for a ``status`` this tool never accepts (``open``
-    is only ever written by ``add_task``; anything outside
-    ``{"done", "declined"}`` is malformed input).
-    """
-    if status not in ("done", "declined"):
-        raise ValueError(f"status must be 'done' or 'declined', got {status!r}")
-
-    # Initiating-write check, same as every other write in this module
-    # (add_task/post_message/start_conversation) — a suspended
-    # agent must not be able to mutate a task's status.
-    await _require_active_agent(
-        session, actor_sub=actor_sub, agent_id=caller_agent_id, task_id=task_id
-    )
-
-    # for_update=True: without a row lock, two concurrent update_task calls
-    # can both observe status='open', both pass the terminal-state guard
-    # below, and both commit — e.g. a creator's 'done' silently overwriting
-    # an assignee's 'declined'. Serializes concurrent transitions on the
-    # same task, exactly like post_message's seq assignment does for
-    # concurrent posts to the same conversation.
-    task = await _find_task(session, task_id, for_update=True)
-    is_creator = task is not None and task.created_by == caller_agent_id
-    is_assignee = task is not None and task.assignee_id == caller_agent_id
-    if task is None or not (is_creator or is_assignee):
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.not_party",
-            agent_id=caller_agent_id,
-            task_id=task.id if task is not None else None,
-            detail={"attempted_task_id": str(task_id)},
-        )
-    # Terminal-state check before the assignee-only restriction (TECH-5099
-    # Argus round 2): a party on an already-terminal task must get the
-    # specific InvalidConversationStateError regardless of role, not
-    # denied.not_assignee — role-eligibility for a status value is moot
-    # once no transition is legal at all.
-    if task.status != "open":
-        await _deny_bad_task_state(
-            session,
-            actor_sub=actor_sub,
-            agent_id=caller_agent_id,
-            task_id=task.id,
-            current_status=task.status,
-            attempted_status=status,
-        )
-    if status == "declined" and not is_assignee:
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.not_assignee",
-            agent_id=caller_agent_id,
-            task_id=task.id,
-            detail={"attempted_status": status},
-        )
-
-    task.status = status
-    _audit(
-        session,
-        actor_sub=actor_sub,
-        action="task.update_status",
-        agent_id=caller_agent_id,
-        task_id=task.id,
-        detail={"from": "open", "to": status},
-    )
-    await session.commit()
-    task, created_by_sub, assignee_sub = await _task_with_subs(session, task.id)
-    return _task_public(
-        task,
-        caller_agent_id=caller_agent_id,
-        created_by_sub=created_by_sub,
-        assignee_sub=assignee_sub,
-    )
-
-
 __all__ = [
     "CONVERSATION_TTL",
     "MAX_CONVERSATION_STARTS_PER_HOUR",
     "MAX_MESSAGES_PER_CONVERSATION_PER_HOUR",
-    "MAX_TASK_CREATES_PER_HOUR",
     "AgentTableOwnershipClient",
     "OwnershipClient",
     "accept_invite",
-    "add_task",
     "decline_invite",
     "get_agent_by_sub",
     "get_conversation",
-    "get_tasks",
     "inbox",
     "invite",
     "leave",
@@ -2319,5 +1877,4 @@ __all__ = [
     "post_message",
     "register_agent",
     "start_conversation",
-    "update_task",
 ]

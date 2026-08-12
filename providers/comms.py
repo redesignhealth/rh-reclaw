@@ -180,11 +180,9 @@ async def _map_service_errors() -> AsyncIterator[None]:
     an over-length field) and its message text can embed internal
     schema/config detail that IS not client-safe in the general case.
     Those are mapped to a single generic, non-leaking message instead of
-    being forwarded verbatim. A bare ``RuntimeError`` (TECH-5099:
-    ``service._task_with_subs``'s theoretical "task vanished after its
-    own transition committed" guard) gets the same generic treatment —
-    it signals an internal invariant violation, not anything the caller
-    did wrong, and its message can embed internal state detail.
+    being forwarded verbatim. A bare ``RuntimeError`` gets the same generic
+    treatment — it signals an internal invariant violation, not anything
+    the caller did wrong, and its message can embed internal state detail.
     """
     try:
         yield
@@ -666,118 +664,3 @@ async def leave(conversation_id: str, agent_key: str | None = None) -> dict[str,
             )
 
     return {"conversation_id": conversation_id, "agent_id": str(caller.id), "status": "left"}
-
-
-# --- Tasks (internal.coordination, TECH-5094) -----------------------------------
-
-
-@comms_server.tool
-async def add_task(
-    assignee_agent_id: str,
-    task: dict[str, Any],
-    schema_version: Literal[1] = 1,
-    agent_key: str | None = None,
-) -> dict[str, Any]:
-    """Create a task assigned from the caller to ``assignee_agent_id``.
-
-    Bidirectional: either party of an admitted pair may call this — a
-    Chief-of-Staff agent assigning work down, or an EA agent reporting
-    status back up (a ``report_status``-action task). Admission is gated
-    solely by the two agents' verified owner sets intersecting (never by
-    ``agents.owner_sub``/``owner_email`` directly) — uniform denial on
-    mismatch or on an ownership-lookup failure (fails closed).
-    ``assignee_agent_id`` is an agent id (UUID string, e.g. from
-    ``comms_list_agents``). ``task`` must validate against the
-    ``TaskSpecV1`` schema (no free text). ``schema_version`` is explicit
-    rather than an invisible default — only ``1`` exists today.
-    """
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
-    assignee_uuid = _parse_uuid("assignee_agent_id", assignee_agent_id)
-
-    async with get_session_factory()() as session:
-        caller = await _resolve_caller_agent(session, sub)
-        async with _map_service_errors():
-            # service.add_task returns the same canonical AXI shape
-            # comms_get_tasks does for this resource (TECH-5094 Argus round
-            # 1, api contract/S5) — one session, one service.py function
-            # call, per this file's module-level invariant.
-            return await service.add_task(
-                session,
-                actor_sub=sub,
-                creator_agent_id=caller.id,
-                assignee_agent_id=assignee_uuid,
-                task=task,
-                ownership_client=service.AgentTableOwnershipClient(session),
-                schema_version=schema_version,
-            )
-
-
-@comms_server.tool
-async def get_tasks(
-    role: Literal["assigned", "created", "all"] = "all",
-    status: Literal["open", "done", "declined"] | None = None,
-    limit: int = 50,
-    cursor: str | None = None,
-    agent_key: str | None = None,
-) -> dict[str, Any]:
-    """List tasks visible to the caller: where the caller is creator or assignee.
-
-    No other agent's tasks are ever visible or enumerable, including
-    same-owner siblings. ``role`` narrows to ``"created"``/``"assigned"``
-    (relative to the caller) or ``"all"`` (default). ``status`` optionally
-    narrows further. Pass the returned ``next_cursor`` back as ``cursor``
-    to page forward (keyset, newest first).
-    """
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
-
-    async with get_session_factory()() as session:
-        caller = await _resolve_caller_agent(session, sub)
-        async with _map_service_errors():
-            return await service.get_tasks(
-                session,
-                caller_agent_id=caller.id,
-                role=role,
-                status=status,
-                limit=limit,
-                cursor=cursor,
-            )
-
-
-@comms_server.tool
-async def update_task(
-    task_id: str, status: Literal["done", "declined"], agent_key: str | None = None
-) -> dict[str, Any]:
-    """Transition a task's status: ``done`` (either party) or ``declined``
-    (assignee only — the consent/refusal mechanism, terminal).
-
-    Only the task's creator or assignee may call this (uniform denial for
-    a non-party or an unknown ``task_id``). ``declined`` is further
-    restricted to the assignee — but that check applies only to a
-    still-``open`` task; any party attempting any transition on an
-    already-terminal task gets the specific "task cannot transition"
-    error, not the uniform denial. No transition out of a terminal status
-    (``done``/``declined``) is legal. ``status='open'`` is not a valid
-    target here — only ``comms_add_task`` ever writes ``open``.
-    """
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
-    task_uuid = _parse_uuid("task_id", task_id)
-
-    async with get_session_factory()() as session:
-        caller = await _resolve_caller_agent(session, sub)
-        async with _map_service_errors():
-            return await service.update_task(
-                session,
-                actor_sub=sub,
-                caller_agent_id=caller.id,
-                task_id=task_uuid,
-                status=status,
-            )

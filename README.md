@@ -17,9 +17,9 @@ auth.py              # Okta OIDCProxy (humans) + rh-auth JWTVerifier (agents) vi
 scopes.py            # TOOL_SCOPES catalog + fail-closed scope helpers
 identity.py          # Issuer-gated JWT identity resolution (anti-impersonation guards)
 observability.py     # structlog JSON events (tool_call, scope_denial, auth_flow, ...)
-providers/comms.py   # Comms provider sub-server — the 14 MCP tools (see below)
+providers/comms.py   # Comms provider sub-server — the MCP tools (see below)
 models.py            # SQLAlchemy 2.x async ORM models (agents, conversations,
-                      #   participants, messages, tasks, audit_log — DESIGN.md §5, §9)
+                      #   participants, messages, audit_log — DESIGN.md §5)
 db.py                # Async engine/session factory (DATABASE_URL, fail-fast)
 schemas.py           # Pydantic message-payload schemas (scheduling.availability v1)
 state_machine.py     # Conversation/participant state transitions (DESIGN.md §4, §6)
@@ -31,19 +31,19 @@ tests/               # pytest suite (composition, scope fail-closed, domain logi
 
 ## Domain layer
 
-The comms board is six Postgres tables — `agents`, `conversations`,
-`participants`, `messages`, `tasks`, `audit_log` — with `messages` and
+The comms board is five Postgres tables — `agents`, `conversations`,
+`participants`, `messages`, `audit_log` — with `messages` and
 `audit_log` append-only. An agent self-provisions via `comms_register`,
 then either starts a conversation (adding named targets as `invited`) or
 gets invited into one. A target only gains message-history read/write
 access after calling `comms_accept` (`invited → active`); declining
-(`comms_decline_invite`) is terminal and grants nothing. `tasks` is a
-separate, two-party primitive for intra-owner coordination (e.g. a
-Chief-of-Staff agent assigning work to an EA agent) — see
-[`docs/DESIGN.md`](docs/DESIGN.md) §4–§6 for the conversation/message
-membership rules, table definitions, and message schemas
-(`scheduling.availability` v1 — strict, schema-validated, no free text),
-and §9 for the task primitive.
+(`comms_decline_invite`) is terminal and grants nothing. Task coordination
+uses task message types (`task_assign`, `task_report`, `task_complete`,
+`task_decline`, `task_cancel`) within ordinary conversations — task state
+lives on `conversations.state`, not a separate table. Conversation types
+(`open`, `internal`, `asymmetric`) gate admission by ownership; message
+types gate boundary crossing via the `boundary_safe` flag — see
+[`docs/DESIGN.md`](docs/DESIGN.md) §4–§9 for full details.
 
 ## MCP tool surface
 
@@ -65,9 +65,6 @@ fail-closed `scopes.TOOL_SCOPES` registry. Source of truth:
 | `comms_decline_invite` | `comms:write` | Decline a pending invite — terminal, no access is ever granted |
 | `comms_invite` | `comms:write` | Invite another board agent into an active conversation (as `invited`) |
 | `comms_leave` | `comms:write` | Leave a conversation the caller is currently `active` in |
-| `comms_add_task` | `comms:write` | Create a two-party `internal.coordination` task, assigned to another agent |
-| `comms_get_tasks` | `comms:read` | Paginated "visible to me" task list — caller is the task's creator or assignee |
-| `comms_update_task` | `comms:write` | Transition a task `open → done`/`declined` — `declined` is assignee-only |
 
 The layout mirrors [rh-mcp](https://github.com/redesignhealth/rh-data-platform/tree/main/services/rh-mcp),
 the reference MCP implementation in the [RH tech guide](https://github.com/redesignhealth/rh-tech-guide).

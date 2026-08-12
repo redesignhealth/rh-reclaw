@@ -69,16 +69,27 @@ def resulting_conversation_state(
       participant-status update (to ``'declined'``) is a separate,
       participant-level effect the service layer applies itself — this
       function only reports the *conversation*-level transition.
-    - Every other message type -> ``None`` (no conversation-state effect).
+    - ``task_complete`` -> always transitions to ``'completed'`` (TECH-5118
+      "tasks-as-conversations": unlike scheduling's ``decline``, a task
+      conversation's ``task_decline``/``task_cancel`` transition
+      unconditionally, not via the all-non-owners-declined cascade — see
+      the module docstring and ``service._require_message_sender_role``
+      for why: each is restricted to a single sender role, so one post is
+      always decisive).
+    - ``task_decline`` / ``task_cancel`` -> always transition to ``'canceled'``.
+    - Every other message type (including ``task_report``) -> ``None``
+      (no conversation-state effect).
 
     This function does not validate that ``message_type`` is legal in the
     first place — call ``is_message_legal`` first; that keeps the two
     concerns (legality vs. resulting transition) independently testable.
     """
-    if message_type == "confirm":
+    if message_type in ("confirm", "task_complete"):
         return "completed"
     if message_type == "decline":
         return "canceled" if all_non_owners_declined else None
+    if message_type in ("task_decline", "task_cancel"):
+        return "canceled"
     return None
 
 
