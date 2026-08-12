@@ -319,7 +319,7 @@ class TestRegister:
             "comms_register",
             {
                 "display_name": "Bond 007",
-                "accepted_types": ["scheduling.availability"],
+                "accepted_types": ["availability_request"],
                 "agent_key": "bond-007",
             },
         )
@@ -330,7 +330,7 @@ class TestRegister:
             "comms_register",
             {
                 "display_name": "Pepper Pots",
-                "accepted_types": ["scheduling.availability"],
+                "accepted_types": ["availability_request"],
                 "agent_key": "pepper-pots",
             },
         )
@@ -352,7 +352,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "No Key", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "No Key", "accepted_types": ["availability_request"]},
         )
         assert result["sub"] == "agent-no-key"
 
@@ -368,7 +368,7 @@ class TestRegister:
                 "comms_register",
                 {
                     "display_name": "Empty Key",
-                    "accepted_types": ["scheduling.availability"],
+                    "accepted_types": ["availability_request"],
                     "agent_key": "   ",
                 },
             )
@@ -385,7 +385,7 @@ class TestRegister:
                 "comms_register",
                 {
                     "display_name": "Oversized Key",
-                    "accepted_types": ["scheduling.availability"],
+                    "accepted_types": ["availability_request"],
                     "agent_key": "x" * 101,
                 },
             )

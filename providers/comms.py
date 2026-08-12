@@ -576,7 +576,8 @@ async def list_conversations(
 
 
 @comms_server.tool
-async def accept(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:    """Accept a pending invite: flips the caller's status ``invited`` → ``active``.
+async def accept(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:
+    """Accept a pending invite: flips the caller's status ``invited`` → ``active``.
 
     Grants full history read and posting rights from this point forward.
     Requires the caller to currently be ``invited`` on this conversation
