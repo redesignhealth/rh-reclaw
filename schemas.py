@@ -86,6 +86,13 @@ MAX_ACCEPTED_TYPES = 20
 MAX_ACCEPTED_TYPE_LENGTH = 100
 MAX_PAYLOAD_BYTES = 65536
 
+# Caller-supplied suffix a caller may append to its own verified identity to
+# register multiple distinct agent rows under one token (providers/comms.py
+# `register`'s `agent_key` param, TECH-5113) -- see the comment there for
+# why this exists and why it's a stopgap. Same generous-margin sizing
+# rationale as MAX_ACCEPTED_TYPE_LENGTH above.
+MAX_AGENT_KEY_LENGTH = 100
+
 # Message types known to the board (v1: all under scheduling.availability).
 # Mirrors the DB CHECK-free, code-owned open vocabulary described in
 # models.py's module docstring.

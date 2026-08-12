@@ -53,7 +53,7 @@ from exceptions import (
 )
 from identity import try_resolve_email
 from models import Agent
-from schemas import MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
+from schemas import MAX_AGENT_KEY_LENGTH, MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
 from scopes import is_interactive_token, scopes_for_token
 
 comms_server: FastMCP[Any] = FastMCP("comms")
@@ -73,6 +73,51 @@ def _require_token() -> AccessToken:
     if token is None:
         raise ToolError("no access token provided")
     return token
+
+
+def _validate_agent_key(agent_key: str | None) -> str | None:
+    """Validate agent_key if provided: reject :: delimiters and control characters.
+
+    Returns the validated (stripped) agent_key, or None if not provided.
+    Raises ToolError if validation fails.
+    """
+    if agent_key is None:
+        return None
+
+    agent_key = agent_key.strip()
+    if not agent_key:
+        raise ToolError("invalid_request: agent_key must be non-empty if provided")
+    if len(agent_key) > MAX_AGENT_KEY_LENGTH:
+        raise ToolError(f"invalid_request: agent_key exceeds {MAX_AGENT_KEY_LENGTH} characters")
+
+    # Reject :: delimiter to prevent identity collisions
+    if "::" in agent_key:
+        raise ToolError("invalid_request: agent_key must not contain '::'")
+
+    # Reject control characters (null, newline, tab, etc.)
+    for i, char in enumerate(agent_key):
+        if ord(char) < 32 or ord(char) == 127:  # ASCII control chars + DEL
+            raise ToolError(f"invalid_request: agent_key contains invalid control character at position {i}")
+
+    # Strict allowlist: alphanumeric, dot, underscore, hyphen
+    import re
+    if not re.match(r'^[A-Za-z0-9._-]+$', agent_key):
+        raise ToolError("invalid_request: agent_key must contain only alphanumeric characters, dots, underscores, or hyphens")
+
+    return agent_key
+
+
+def _compose_sub(base_sub: str, agent_key: str | None) -> str:
+    """Compose the full sub by combining base_sub with optional agent_key.
+
+    Guards against identity collisions by rejecting any base_sub or agent_key
+    containing the '::' delimiter.
+    """
+    if "::" in base_sub:
+        raise ToolError("invalid_request: base identity cannot contain '::' delimiter")
+    if agent_key is None:
+        return base_sub
+    return f"{base_sub}::{agent_key}"
 
 
 def _require_identity(token: AccessToken) -> str:
@@ -187,18 +232,24 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 @comms_server.tool
-async def whoami() -> dict[str, Any]:
+async def whoami(agent_key: str | None = None) -> dict[str, Any]:
     """Return the authenticated caller's identity, issuer, caller type, and scopes.
 
     Diagnostic tool: use it to verify that auth (Okta OIDC for humans,
     rh-auth Bearer JWT for agents) and scope enforcement are wired
     correctly. ``scopes`` is the rh-auth ``scopes`` claim for service
     callers; empty for interactive Okta callers (who bypass scope checks).
+
+    When ``agent_key`` is provided, returns the composed identity
+    (base_sub::agent_key) that will be used for agent lookups by other tools.
     """
     token = _require_token()
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    composed_sub = _compose_sub(base_sub, agent_key)
     interactive = is_interactive_token(token)
     return {
-        "identity": try_resolve_email(token),
+        "identity": composed_sub,
         "issuer": token.claims.get("iss"),
         "caller_type": "interactive" if interactive else "service",
         "scopes": scopes_for_token(token),
@@ -209,12 +260,32 @@ async def whoami() -> dict[str, Any]:
 
 
 @comms_server.tool
-async def register(display_name: str, accepted_types: list[str]) -> dict[str, Any]:
+async def register(
+    display_name: str, accepted_types: list[str], agent_key: str | None = None
+) -> dict[str, Any]:
     """Idempotently self-provision (or re-bind) the caller's board ``Agent`` row.
 
     ``owner_sub``/``owner_email`` are NEVER accepted as parameters
     (DESIGN.md §4 security invariant) — they are derived here from verified
     token claims only:
+
+    ``agent_key`` (optional) is a STOPGAP (TECH-5113), not new trusted
+    identity: today, every EA-managed agent acting for one human is minted
+    an rh-auth token with the SAME ``sub`` (that human's Okta sub), because
+    reclaw has no way yet to carry a distinct, verified per-agent identity
+    in the token or in message metadata. Without ``agent_key``, two such
+    agents registering under that one shared ``sub`` collapse into a single
+    board row — the second `register` silently overwrites the first's
+    `display_name`/`accepted_types` (this is exactly what happened when
+    "Pepper Pots" overwrote "Bond 007"). ``agent_key``, when given, is
+    appended to the caller's verified base identity to form the board
+    ``sub`` (``f"{base_sub}::{agent_key}"``) — a self-chosen partition
+    WITHIN an already-verified identity, never a substitute for one:
+    ``owner_sub``/``owner_email`` below are computed from the base identity
+    BEFORE this composition and are completely unaffected by ``agent_key``,
+    so admission decisions (``may_assign``) stay keyed on real verified
+    ownership regardless of what a caller passes here. Delete this
+    parameter once reclaw can pass real per-agent identity instead.
 
     - ``owner_sub``: the token's ``owner_sub`` claim if present (an rh-auth
       token minted for an EA agent acting on a human's behalf), else the
@@ -244,14 +315,19 @@ async def register(display_name: str, accepted_types: list[str]) -> dict[str, An
       so ``email`` must never be trusted as an ``owner_email`` fallback for
       those tokens, regardless of which check is used to detect them.
 
-    Calling again with the same caller identity re-binds ``display_name``/
-    ``accepted_types`` in place (see ``service.register_agent``).
+    Calling again with the same caller identity AND the same ``agent_key``
+    (both absent counts as the same) re-binds ``display_name``/
+    ``accepted_types`` in place (see ``service.register_agent``); a
+    different ``agent_key`` registers a distinct row instead.
     """
     token = _require_token()
-    sub = _require_identity(token)
-    owner_sub = str(token.claims.get("owner_sub") or sub)
+    base_sub = _require_identity(token)
+    owner_sub = str(token.claims.get("owner_sub") or base_sub)
     upstream_email = token.claims.get("email") if is_interactive_token(token) else None
-    owner_email = str(token.claims.get("owner_email") or upstream_email or sub)
+    owner_email = str(token.claims.get("owner_email") or upstream_email or base_sub)
+
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
 
     async with get_session_factory()() as session, _map_service_errors():
         agent = await service.register_agent(
@@ -296,6 +372,7 @@ async def start_conversation(
     message_type: str = "availability_request",
     expires_at: str | None = None,
     schema_version: Literal[1] = 1,
+    agent_key: str | None = None,
 ) -> dict[str, Any]:
     """Open a conversation with N other agents, posting the seq-1 message.
 
@@ -310,7 +387,9 @@ async def start_conversation(
     explicit rather than an invisible default — only ``1`` exists today.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     if len(target_agent_ids) > MAX_PARTICIPANTS_PER_CONVERSATION:
         raise ToolError(
             "invalid_request: target_agent_ids exceeds the participant cap "
@@ -351,6 +430,7 @@ async def post_message(
     message_type: str,
     payload: dict[str, Any],
     schema_version: Literal[1] = 1,
+    agent_key: str | None = None,
 ) -> dict[str, Any]:
     """Post a typed, schema-validated message to an active conversation.
 
@@ -363,7 +443,9 @@ async def post_message(
     than an invisible default — only ``1`` exists today.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     conv_id = _parse_uuid("conversation_id", conversation_id)
 
     async with get_session_factory()() as session:
@@ -390,7 +472,9 @@ async def post_message(
 
 
 @comms_server.tool
-async def get_conversation(conversation_id: str, since_seq: int = 0) -> dict[str, Any]:
+async def get_conversation(
+    conversation_id: str, since_seq: int = 0, agent_key: str | None = None
+) -> dict[str, Any]:
     """Combined read: conversation + participants + messages since ``since_seq``.
 
     An ``invited`` (not yet accepted) caller gets metadata only — no
@@ -407,7 +491,9 @@ async def get_conversation(conversation_id: str, since_seq: int = 0) -> dict[str
     implying otherwise.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     conv_id = _parse_uuid("conversation_id", conversation_id)
     if since_seq < 0:
         raise ToolError("invalid_request: since_seq must be >= 0")
@@ -429,7 +515,7 @@ async def get_conversation(conversation_id: str, since_seq: int = 0) -> dict[str
 
 
 @comms_server.tool
-async def inbox() -> dict[str, Any]:
+async def inbox(agent_key: str | None = None) -> dict[str, Any]:
     """Return the caller's unread active conversations plus pending invites.
 
     Always returns the same three keys (``unread``, ``pending_invites``,
@@ -437,7 +523,9 @@ async def inbox() -> dict[str, Any]:
     "nothing needs your attention" rather than an ambiguous bare empty list.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
 
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)
@@ -445,7 +533,7 @@ async def inbox() -> dict[str, Any]:
 
 
 @comms_server.tool
-async def accept(conversation_id: str) -> dict[str, Any]:
+async def accept(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:
     """Accept a pending invite: flips the caller's status ``invited`` → ``active``.
 
     Grants full history read and posting rights from this point forward.
@@ -453,7 +541,9 @@ async def accept(conversation_id: str) -> dict[str, Any]:
     (uniform denial otherwise).
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     conv_id = _parse_uuid("conversation_id", conversation_id)
 
     async with get_session_factory()() as session:
@@ -476,7 +566,7 @@ async def accept(conversation_id: str) -> dict[str, Any]:
 
 
 @comms_server.tool
-async def decline_invite(conversation_id: str) -> dict[str, Any]:
+async def decline_invite(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:
     """Decline a pending invite. Terminal — no access is ever granted.
 
     Requires the caller to currently be ``invited`` on this conversation
@@ -485,7 +575,9 @@ async def decline_invite(conversation_id: str) -> dict[str, Any]:
     separate.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     conv_id = _parse_uuid("conversation_id", conversation_id)
 
     async with get_session_factory()() as session:
@@ -502,7 +594,9 @@ async def decline_invite(conversation_id: str) -> dict[str, Any]:
 
 
 @comms_server.tool
-async def invite(conversation_id: str, target_agent_id: str) -> dict[str, Any]:
+async def invite(
+    conversation_id: str, target_agent_id: str, agent_key: str | None = None
+) -> dict[str, Any]:
     """Invite another board agent into an active conversation.
 
     Requires the caller to currently be an ``active`` participant (v1: any
@@ -512,7 +606,9 @@ async def invite(conversation_id: str, target_agent_id: str) -> dict[str, Any]:
     every failure mode.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     conv_id = _parse_uuid("conversation_id", conversation_id)
     target_id = _parse_uuid("target_agent_id", target_agent_id)
 
@@ -536,7 +632,7 @@ async def invite(conversation_id: str, target_agent_id: str) -> dict[str, Any]:
 
 
 @comms_server.tool
-async def leave(conversation_id: str) -> dict[str, Any]:
+async def leave(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:
     """Leave a conversation: caller's participant status → ``left``.
 
     Requires the caller to currently be ``active``. Pure exit bookkeeping —
@@ -544,7 +640,9 @@ async def leave(conversation_id: str) -> dict[str, Any]:
     ``decline`` message via ``comms_post_message`` instead.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     conv_id = _parse_uuid("conversation_id", conversation_id)
 
     async with get_session_factory()() as session:
@@ -568,6 +666,7 @@ async def add_task(
     assignee_agent_id: str,
     task: dict[str, Any],
     schema_version: Literal[1] = 1,
+    agent_key: str | None = None,
 ) -> dict[str, Any]:
     """Create a task assigned from the caller to ``assignee_agent_id``.
 
@@ -583,7 +682,9 @@ async def add_task(
     rather than an invisible default — only ``1`` exists today.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     assignee_uuid = _parse_uuid("assignee_agent_id", assignee_agent_id)
 
     async with get_session_factory()() as session:
@@ -610,6 +711,7 @@ async def get_tasks(
     status: Literal["open", "done", "declined"] | None = None,
     limit: int = 50,
     cursor: str | None = None,
+    agent_key: str | None = None,
 ) -> dict[str, Any]:
     """List tasks visible to the caller: where the caller is creator or assignee.
 
@@ -620,7 +722,9 @@ async def get_tasks(
     to page forward (keyset, newest first).
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
 
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)
@@ -636,7 +740,9 @@ async def get_tasks(
 
 
 @comms_server.tool
-async def update_task(task_id: str, status: Literal["done", "declined"]) -> dict[str, Any]:
+async def update_task(
+    task_id: str, status: Literal["done", "declined"], agent_key: str | None = None
+) -> dict[str, Any]:
     """Transition a task's status: ``done`` (either party) or ``declined``
     (assignee only — the consent/refusal mechanism, terminal).
 
@@ -650,7 +756,9 @@ async def update_task(task_id: str, status: Literal["done", "declined"]) -> dict
     target here — only ``comms_add_task`` ever writes ``open``.
     """
     token = _require_token()
-    sub = _require_identity(token)
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
     task_uuid = _parse_uuid("task_id", task_id)
 
     async with get_session_factory()() as session:

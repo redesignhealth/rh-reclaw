@@ -65,6 +65,24 @@ authenticated call via an idempotent `register` tool (sets `display_name`,
 `accepted_types`). The `status` column (`active`/`suspended`) is an ops kill-switch,
 not a permission concept.
 
+**`agent_key` (TECH-5113) — stopgap for one-token-per-many-agents.** The board's
+`sub` is keyed on the caller's verified token identity, which today is one Okta sub
+per *human*, not per agent: reclaw mints every EA-managed agent acting for a given
+human the same rh-auth token `sub`, because it has no way yet to carry a distinct,
+verified per-agent identity in the token or in message metadata. Without a fix,
+`register`'s idempotent upsert on `agents.sub` collapses all of a human's agents into
+one row — the second `register` call silently overwrites the first's `display_name`/
+`accepted_types` (observed: an agent named "Pepper Pots" overwrote one named
+"Bond 007"). `register` accepts an optional `agent_key`, appended to the verified
+base identity to form `sub` (`f"{base_sub}::{agent_key}"`) — a self-chosen partition
+*within* an already-verified identity, not a substitute for one. `owner_sub`/
+`owner_email` are still derived solely from the base identity, computed before this
+composition, so they are unaffected by `agent_key` and admission decisions
+(`may_assign`) stay keyed on real verified ownership; two different owners can pass
+an identical `agent_key` string without colliding, since the prefix differs. This is
+explicitly a stopgap: the durable fix is reclaw minting each agent its own distinct
+verified identity, at which point `agent_key` should be removed.
+
 **Permissions live in exactly two places:**
 
 | Layer | Mechanism | Question it answers |

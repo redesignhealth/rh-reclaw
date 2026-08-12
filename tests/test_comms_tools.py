@@ -304,6 +304,92 @@ class TestRegister:
         assert first["agent_id"] == second["agent_id"]
         assert second["display_name"] == "B v2"
 
+    async def test_register_with_agent_key_creates_distinct_row(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """TECH-5113: two agents sharing one token's base identity (today's
+        reality for multiple EA-managed agents acting for the same human)
+        must not collapse into one board row — a distinct ``agent_key``
+        each is what keeps them apart."""
+        token = _token("shared-human-sub", owner_sub="shared-human-sub")
+        first = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {
+                "display_name": "Bond 007",
+                "accepted_types": ["scheduling.availability"],
+                "agent_key": "bond-007",
+            },
+        )
+        second = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {
+                "display_name": "Pepper Pots",
+                "accepted_types": ["scheduling.availability"],
+                "agent_key": "pepper-pots",
+            },
+        )
+        assert first["agent_id"] != second["agent_id"]
+        assert first["sub"] == "shared-human-sub::bond-007"
+        assert second["sub"] == "shared-human-sub::pepper-pots"
+        assert first["display_name"] == "Bond 007"
+        assert second["display_name"] == "Pepper Pots"
+        # owner_sub is unaffected by agent_key — both rows are still owned
+        # by the same verified human, which is what admission decisions key on.
+        assert first["owner_email"] == second["owner_email"]
+
+    async def test_register_without_agent_key_matches_prior_behavior(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        token = _token("agent-no-key")
+        result = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {"display_name": "No Key", "accepted_types": ["scheduling.availability"]},
+        )
+        assert result["sub"] == "agent-no-key"
+
+    async def test_register_empty_agent_key_rejected(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        token = _token("agent-empty-key")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {
+                    "display_name": "Empty Key",
+                    "accepted_types": ["scheduling.availability"],
+                    "agent_key": "   ",
+                },
+            )
+
+    async def test_register_oversized_agent_key_rejected(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        token = _token("agent-oversized-key")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {
+                    "display_name": "Oversized Key",
+                    "accepted_types": ["scheduling.availability"],
+                    "agent_key": "x" * 101,
+                },
+            )
+
     async def test_register_without_owner_claims_falls_back_to_self(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
