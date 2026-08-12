@@ -154,7 +154,7 @@ async def _register(session: AsyncSession, sub: str, **overrides: Any) -> Agent:
         "owner_sub": f"owner-{sub}",
         "owner_email": f"{sub}@example.com",
         "display_name": sub,
-        "accepted_types": ["scheduling.availability"],
+        "accepted_types": ["open"],
     }
     kwargs.update(overrides)
     return await register_agent(session, **kwargs)
@@ -246,7 +246,7 @@ class TestRegisterAgent:
             await _register(
                 session,
                 "agent-too-many-types",
-                accepted_types=["scheduling.availability"] * 21,
+                accepted_types=["open"] * 21,
             )
 
     async def test_accepted_types_at_max_count_accepted(self, session: AsyncSession) -> None:
@@ -254,16 +254,16 @@ class TestRegisterAgent:
         accepted — the inclusive boundary of the ``len() > 20`` check in
         ``register_agent``. The count check runs against the raw list
         (before dedup), so 20 repeats of the only valid v1 conversation
-        type (``scheduling.availability``) exercise this boundary without
+        type (``open``) exercise this boundary without
         tripping the "unknown type" check; ``register_agent`` then
         dedupes/sorts, so the persisted ``accepted_types`` collapses to a
         single entry."""
         agent = await _register(
             session,
             "agent-max-types",
-            accepted_types=["scheduling.availability"] * 20,
+            accepted_types=["open"] * 20,
         )
-        assert agent.accepted_types == ["scheduling.availability"]
+        assert agent.accepted_types == ["open"]
 
     async def test_oversized_accepted_types_of_unknown_values_still_hits_count_cap(
         self, session: AsyncSession
@@ -318,9 +318,9 @@ class TestRegisterAgent:
         agent = await _register(
             session,
             "agent-at-cap",
-            accepted_types=["scheduling.availability"],
+            accepted_types=["open"],
         )
-        assert agent.accepted_types == ["scheduling.availability"]
+        assert agent.accepted_types == ["open"]
 
     async def test_empty_or_whitespace_sub_raises_plain_value_error(
         self, session: AsyncSession
@@ -352,7 +352,7 @@ class TestRegisterAgent:
             await _register(
                 session,
                 "agent-mixed-types",
-                accepted_types=["scheduling.availability", "bogus"],
+                accepted_types=["open", "bogus"],
             )
 
 
@@ -368,7 +368,7 @@ class TestStartConversation:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -422,7 +422,7 @@ class TestStartConversation:
                 session,
                 actor_sub=owner.sub,
                 initiator_agent_id=owner.id,
-                conversation_type="scheduling.availability",
+                conversation_type="open",
                 target_agent_ids=[bogus_target_id],
                 initial_message=_request_payload(),
             )
@@ -443,7 +443,7 @@ class TestStartConversation:
                 session,
                 actor_sub=owner2.sub,
                 initiator_agent_id=owner2.id,
-                conversation_type="scheduling.availability",
+                conversation_type="open",
                 target_agent_ids=[target_wrong_type.id],
                 initial_message=_request_payload(),
             )
@@ -477,7 +477,7 @@ class TestAcceptDeclineInvite:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -607,7 +607,7 @@ class TestInvite:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -746,7 +746,7 @@ class TestGetConversation:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -828,7 +828,7 @@ class TestPostMessage:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -862,7 +862,7 @@ class TestPostMessage:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -932,7 +932,7 @@ class TestPostMessage:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[member_a.id, member_b.id],
             initial_message=_request_payload(),
         )
@@ -1051,7 +1051,7 @@ class TestSeqRaceSafety:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[m.id for m in members],
             initial_message=_request_payload(),
         )
@@ -1088,7 +1088,7 @@ class TestRateLimits:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -1124,7 +1124,7 @@ class TestRateLimits:
                 session,
                 actor_sub=owner.sub,
                 initiator_agent_id=owner.id,
-                conversation_type="scheduling.availability",
+                conversation_type="open",
                 target_agent_ids=[target.id],
                 initial_message=_request_payload(),
             )
@@ -1134,7 +1134,7 @@ class TestRateLimits:
                 session,
                 actor_sub=owner.sub,
                 initiator_agent_id=owner.id,
-                conversation_type="scheduling.availability",
+                conversation_type="open",
                 target_agent_ids=[overflow_target.id],
                 initial_message=_request_payload(),
             )
@@ -1158,7 +1158,7 @@ class TestExpiry:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
             expires_at=already_expired,
@@ -1197,7 +1197,7 @@ class TestAuditCompleteness:
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message=_request_payload(),
         )
@@ -1309,7 +1309,7 @@ class TestInbox:
                 session,
                 actor_sub=sender.sub,
                 initiator_agent_id=sender.id,
-                conversation_type="scheduling.availability",
+                conversation_type="open",
                 target_agent_ids=[agent.id],
                 initial_message=_request_payload(),
             )
@@ -1333,7 +1333,7 @@ class TestInbox:
             session,
             actor_sub=sender.sub,
             initiator_agent_id=sender.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[agent.id],
             initial_message=_request_payload(),
         )
@@ -1353,7 +1353,7 @@ class TestInbox:
             session,
             actor_sub=active_sender.sub,
             initiator_agent_id=active_sender.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[agent.id],
             initial_message=_request_payload(),
         )
@@ -1368,7 +1368,7 @@ class TestInbox:
             session,
             actor_sub=pending_sender.sub,
             initiator_agent_id=pending_sender.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[agent.id],
             initial_message=_request_payload(),
         )

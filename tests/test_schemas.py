@@ -1,4 +1,4 @@
-"""Tests for the scheduling.availability v1 message schemas (schemas.py)."""
+"""Tests for the board's typed message schemas (schemas.py)."""
 
 from __future__ import annotations
 
@@ -9,16 +9,17 @@ import pytest
 from pydantic import ValidationError
 
 from schemas import (
-    TASK_NAMESPACE,
     AvailabilityRequestV1,
     AvailabilityResponseV1,
     ConfirmV1,
     CounterProposalV1,
     DeclineV1,
     NeedsClarificationV1,
+    NoteV1,
     PayloadValidationError,
     TaskSpecV1,
     get_schema,
+    is_boundary_safe,
     validate_payload,
 )
 
@@ -301,34 +302,37 @@ class TestNeedsClarification:
 
 class TestGetSchema:
     def test_returns_registered_class(self) -> None:
-        assert get_schema("scheduling.availability", "confirm", 1) is ConfirmV1
+        assert get_schema("confirm", 1) is ConfirmV1
 
     def test_unknown_message_type_raises(self) -> None:
         with pytest.raises(PayloadValidationError):
-            get_schema("scheduling.availability", "not_a_type", 1)
+            get_schema("not_a_type", 1)
 
     def test_unknown_schema_version_raises(self) -> None:
         with pytest.raises(PayloadValidationError):
-            get_schema("scheduling.availability", "confirm", 2)
+            get_schema("confirm", 2)
 
-    def test_unknown_conversation_type_raises(self) -> None:
+
+class TestIsBoundarySafe:
+    def test_scheduling_types_are_boundary_safe(self) -> None:
+        assert is_boundary_safe("confirm", 1) is True
+        assert is_boundary_safe("availability_request", 1) is True
+
+    def test_note_is_not_boundary_safe(self) -> None:
+        assert is_boundary_safe("note", 1) is False
+
+    def test_unknown_message_type_raises(self) -> None:
         with pytest.raises(PayloadValidationError):
-            get_schema("not.a.type", "confirm", 1)
+            is_boundary_safe("not_a_type", 1)
 
 
 class TestValidatePayload:
     def test_normalizes_valid_payload(self) -> None:
-        result = validate_payload(
-            "scheduling.availability",
-            "decline",
-            1,
-            {"reason": "expired"},
-        )
+        result = validate_payload("decline", 1, {"reason": "expired"})
         assert result == {"type": "decline", "reason": "expired"}
 
     def test_normalizes_datetimes_to_iso_strings(self) -> None:
         result = validate_payload(
-            "scheduling.availability",
             "confirm",
             1,
             {"slot": {"start": _iso(_NOW), "end": _iso(_LATER)}},
@@ -337,16 +341,29 @@ class TestValidatePayload:
 
     def test_raises_payload_validation_error_on_bad_data(self) -> None:
         with pytest.raises(PayloadValidationError):
-            validate_payload(
-                "scheduling.availability",
-                "decline",
-                1,
-                {"reason": "not_valid"},
-            )
+            validate_payload("decline", 1, {"reason": "not_valid"})
 
     def test_raises_payload_validation_error_on_unknown_schema(self) -> None:
         with pytest.raises(PayloadValidationError):
-            validate_payload("scheduling.availability", "unknown_type", 1, {})
+            validate_payload("unknown_type", 1, {})
+
+
+class TestNoteV1:
+    def test_accepts_valid_text(self) -> None:
+        model = NoteV1.model_validate({"text": "hello"})
+        assert model.type == "note"
+
+    def test_rejects_empty_text(self) -> None:
+        with pytest.raises(ValidationError):
+            NoteV1.model_validate({"text": ""})
+
+    def test_rejects_overlong_text(self) -> None:
+        with pytest.raises(ValidationError):
+            NoteV1.model_validate({"text": "x" * 4001})
+
+    def test_rejects_extra_field(self) -> None:
+        with pytest.raises(ValidationError):
+            NoteV1.model_validate({"text": "hi", "other": 1})
 
 
 class TestTaskSpecV1:
@@ -412,10 +429,10 @@ class TestTaskSpecV1:
         with pytest.raises(ValidationError, match="duplicates"):
             TaskSpecV1.model_validate(self._valid(counterparty_agent_ids=[dup, dup]))
 
-    def test_registered_under_task_namespace(self) -> None:
-        assert get_schema(TASK_NAMESPACE, "task_spec", 1) is TaskSpecV1
+    def test_registered_in_schema_registry(self) -> None:
+        assert get_schema("task_spec", 1) is TaskSpecV1
 
     def test_validate_payload_normalizes_task_spec(self) -> None:
-        result = validate_payload(TASK_NAMESPACE, "task_spec", 1, self._valid())
+        result = validate_payload("task_spec", 1, self._valid())
         assert result["type"] == "task_spec"
         assert isinstance(result["window"]["start"], str)

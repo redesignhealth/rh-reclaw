@@ -216,7 +216,7 @@ async def _register(
         "comms_register",
         {
             "display_name": display_name or sub,
-            "accepted_types": accepted_types or ["scheduling.availability"],
+            "accepted_types": accepted_types or ["open"],
         },
     )
     return result
@@ -272,11 +272,11 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Agent A", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "Agent A", "accepted_types": ["open"]},
         )
         assert result["sub"] == "agent-a"
         assert result["display_name"] == "Agent A"
-        assert result["accepted_types"] == ["scheduling.availability"]
+        assert result["accepted_types"] == ["open"]
         assert result["status"] == "active"
         assert result["owner_email"] == "ownera@redesignhealth.com"
 
@@ -292,14 +292,14 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "B v1", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "B v1", "accepted_types": ["open"]},
         )
         second = await _call(
             main,
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "B v2", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "B v2", "accepted_types": ["open"]},
         )
         assert first["agent_id"] == second["agent_id"]
         assert second["display_name"] == "B v2"
@@ -399,7 +399,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Self", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "Self", "accepted_types": ["open"]},
         )
         # No owner_sub/owner_email claims on the token — self-owned fallback.
         assert result["owner_email"] == "agent-self-owned"
@@ -422,7 +422,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Forged", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "Forged", "accepted_types": ["open"]},
         )
         assert result["owner_email"] != "forged@attacker.com"
         assert result["owner_email"] == "agent-forged-email"
@@ -563,7 +563,7 @@ class TestFullNegotiationFlow:
             token_a,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [by_sub["agent-b"], by_sub["agent-c"]],
                 "initial_message": _availability_request(),
             },
@@ -687,7 +687,7 @@ class TestFullNegotiationFlow:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [invitee_id],
                 "initial_message": _availability_request(),
             },
@@ -767,7 +767,7 @@ class TestRateLimitAndSchemaErrors:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [target_id],
                 "initial_message": _availability_request(),
             },
@@ -780,7 +780,7 @@ class TestRateLimitAndSchemaErrors:
                 token_owner,
                 "comms_start_conversation",
                 {
-                    "conversation_type": "scheduling.availability",
+                    "conversation_type": "open",
                     "target_agent_ids": [target_id],
                     "initial_message": _availability_request(),
                 },
@@ -806,7 +806,7 @@ class TestRateLimitAndSchemaErrors:
                 token_owner,
                 "comms_start_conversation",
                 {
-                    "conversation_type": "scheduling.availability",
+                    "conversation_type": "open",
                     "target_agent_ids": [target_id],
                     # missing required fields (duration_min, modality, priority)
                     "initial_message": {"window": _availability_request()["window"]},
@@ -880,7 +880,7 @@ class TestRateLimitAndSchemaErrors:
                 token_owner,
                 "comms_start_conversation",
                 {
-                    "conversation_type": "scheduling.availability",
+                    "conversation_type": "open",
                     "target_agent_ids": too_many_ids,
                     "initial_message": _availability_request(),
                 },
@@ -911,7 +911,7 @@ class TestMembershipTools:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [ids["mem-b"]],
                 "initial_message": _availability_request(),
             },
@@ -1304,7 +1304,7 @@ class TestScopesUnaffected:
                 test_session_factory,
                 token,
                 "comms_register",
-                {"display_name": "x", "accepted_types": ["scheduling.availability"]},
+                {"display_name": "x", "accepted_types": ["open"]},
             )
 
     async def test_unenrolled_tool_still_rejected(
@@ -1336,7 +1336,7 @@ class TestAvailabilityResponseNoneAvailable:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [target_id],
                 "initial_message": _availability_request(),
             },
@@ -1401,7 +1401,7 @@ class TestLazyExpiryEndToEnd:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [target_id],
                 "initial_message": _availability_request(),
                 "expires_at": past,
@@ -1460,7 +1460,7 @@ class TestConcurrentPostMessageToolLayer:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": member_ids,
                 "initial_message": _availability_request(),
             },

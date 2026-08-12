@@ -1,8 +1,9 @@
 """Versioned Pydantic payload schemas for typed board messages.
 
 Every message posted to the board must validate against the schema
-registered for ``(conversation_type, message_type, schema_version)`` —
-there is no free text anywhere in v1 (DESIGN.md §6). Validation rules:
+registered for ``(message_type, schema_version)`` — there is no free text
+anywhere in v1 outside the explicitly-marked ``note`` type (DESIGN.md §6,
+§9). Validation rules:
 
 - ``extra="forbid"`` on every model (strict — unknown fields rejected).
 - All datetimes are timezone-aware ISO 8601 (``AwareDatetime``); naive
@@ -18,14 +19,19 @@ that only pass the ``message_type`` service-layer argument need not repeat
 it in the payload) but always present in the normalized/dumped form, and
 if a caller *does* include it, it must match — a defense-in-depth check
 against a payload accidentally validated against the wrong schema class,
-independent of the ``(conversation.type, message.type)`` lookup that
-selects the schema in the first place.
+independent of the ``message.type`` lookup that selects the schema in the
+first place.
 
 The registry (``MESSAGE_SCHEMAS``, accessed via ``get_schema``) is the
-single source of truth for which message types exist per conversation
-type and schema version. Adding a message type or a new
-``schema_version`` is a code change here plus (nothing else) — old
-versions stay registered so historical payloads remain validatable.
+single source of truth for every message type in the system, keyed by
+``(message_type, schema_version)`` — deliberately independent of
+``conversations.type`` (DESIGN.md §9's "two axes, not a new conversation
+type per scenario"): which message types a conversation may legally carry
+is a function of ``conversations.type`` and ``boundary_safe`` (see
+``MessageSchema`` below and ``state_machine.py``), not of the registry key.
+Adding a message type or a new ``schema_version`` is a code change here
+plus (nothing else) — old versions stay registered so historical payloads
+remain validatable.
 
 Design note — ``availability_response``'s either/or shape (DESIGN.md §6:
 "slots[...] max 10, OR none_available+reason"): modeled as a *single*
@@ -45,7 +51,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 from uuid import UUID
 
 from pydantic import (
@@ -57,17 +63,20 @@ from pydantic import (
     model_validator,
 )
 
-# Conversation types known to the board (v1: scheduling only). Used to
-# validate ``agents.accepted_types`` at bind time and ``conversations.type``
+# Conversation types known to the board (TECH-5118, DESIGN.md §9 "two axes"):
+# admission policy only, decoupled from which message types a conversation
+# carries (see MESSAGE_SCHEMAS below). Used to validate ``conversations.type``
 # at start time.
-CONVERSATION_TYPES: frozenset[str] = frozenset({"scheduling.availability"})
-
-# Schema-registry namespace for the ``tasks`` table's payload (TECH-5094)
-# — NOT a member of ``CONVERSATION_TYPES``: agents cannot ``start_conversation``
-# of this "type", it exists only as the first coordinate of the
-# ``MESSAGE_SCHEMAS`` lookup key (reused for tasks, see below) and as the
-# domain label in docs/audit output.
-TASK_NAMESPACE = "internal.coordination"
+#
+#   internal   — every participant's verified owner set identical; no
+#                accept ceremony, starts active immediately; owner set
+#                frozen at creation.
+#   asymmetric — verified owner sets intersect; standard invite->accept;
+#                owner set frozen at creation.
+#   open       — unrestricted (the v1 "scheduling.availability" rule,
+#                renamed here since it's no longer the only type); standard
+#                invite->accept.
+CONVERSATION_TYPES: frozenset[str] = frozenset({"internal", "asymmetric", "open"})
 
 # Shared size/count limits (DESIGN.md §8 "message size caps" invariant).
 # Defined once here so the tool boundary (providers/comms.py), the service
@@ -93,9 +102,11 @@ MAX_PAYLOAD_BYTES = 65536
 # rationale as MAX_ACCEPTED_TYPE_LENGTH above.
 MAX_AGENT_KEY_LENGTH = 100
 
-# Message types known to the board (v1: all under scheduling.availability).
-# Mirrors the DB CHECK-free, code-owned open vocabulary described in
-# models.py's module docstring.
+# Message types known to the board. Mirrors the DB CHECK-free, code-owned
+# open vocabulary described in models.py's module docstring. Each type's
+# ``boundary_safe`` flag (see MessageSchema/MESSAGE_SCHEMAS below) governs
+# whether it may cross an ownership boundary under an ``asymmetric``
+# conversation, and whether it's legal at all under ``open``.
 MessageType = Literal[
     "availability_request",
     "availability_response",
@@ -103,6 +114,7 @@ MessageType = Literal[
     "confirm",
     "decline",
     "needs_clarification",
+    "note",
 ]
 
 
@@ -148,7 +160,7 @@ _NONE_AVAILABLE_REASONS = Literal["no_overlap", "window_too_narrow", "owner_unav
 
 
 class AvailabilityRequestV1(_StrictModel):
-    """scheduling.availability / availability_request / v1. Opens the negotiation."""
+    """availability_request / v1. Opens a scheduling negotiation."""
 
     type: Literal["availability_request"] = "availability_request"
     window: TimeWindow
@@ -165,7 +177,7 @@ class AvailabilityRequestV1(_StrictModel):
 
 
 class AvailabilityResponseV1(_StrictModel):
-    """scheduling.availability / availability_response / v1.
+    """availability_response / v1.
 
     Exactly one of two mutually-exclusive branches must be populated:
 
@@ -199,7 +211,7 @@ class AvailabilityResponseV1(_StrictModel):
 
 
 class CounterProposalV1(_StrictModel):
-    """scheduling.availability / counter_proposal / v1.
+    """counter_proposal / v1.
 
     Same slots shape as ``AvailabilityResponseV1``'s slots branch — a
     fresh set of candidate slots offered in reply to a prior proposal.
@@ -210,7 +222,7 @@ class CounterProposalV1(_StrictModel):
 
 
 class ConfirmV1(_StrictModel):
-    """scheduling.availability / confirm / v1.
+    """confirm / v1.
 
     Confirms one slot (not a list); posting it transitions the
     conversation to 'completed'. Booking itself is EA-side.
@@ -221,7 +233,7 @@ class ConfirmV1(_StrictModel):
 
 
 class DeclineV1(_StrictModel):
-    """scheduling.availability / decline / v1.
+    """decline / v1.
 
     Sets the SENDER's participant status to 'declined'. If all non-owner
     participants have declined, the conversation state becomes 'canceled'
@@ -233,7 +245,7 @@ class DeclineV1(_StrictModel):
 
 
 class NeedsClarificationV1(_StrictModel):
-    """scheduling.availability / needs_clarification / v1.
+    """needs_clarification / v1.
 
     Points at a prior message by seq — no free-text questions in v1.
     ``about_seq`` must reference an existing message in the same
@@ -243,6 +255,24 @@ class NeedsClarificationV1(_StrictModel):
 
     type: Literal["needs_clarification"] = "needs_clarification"
     about_seq: int = Field(ge=1)
+
+
+class NoteV1(_StrictModel):
+    """note / v1 — free text, ``boundary_safe=False``.
+
+    The one deliberate exception to "no free text" (DESIGN.md §8 invariant
+    3 is a leakage control under this model, not an injection control —
+    see DESIGN.md §9): legal only where ``boundary_safe=False`` is allowed
+    to travel (``internal`` always; ``asymmetric`` only when the post does
+    not cross an ownership boundary for the sender; never under ``open``).
+    ``text`` is stored verbatim — this is provisional pending the
+    quarantine/review pipeline DESIGN.md §10 defers ("raw text stored for
+    audit/human display but never enters a privileged agent's context");
+    nothing in this schema enforces that downstream handling today.
+    """
+
+    type: Literal["note"] = "note"
+    text: str = Field(min_length=1, max_length=4000)
 
 
 _TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION = frozenset(
@@ -256,13 +286,14 @@ def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
 
 
 class TaskSpecV1(_StrictModel):
-    """internal.coordination / task_spec / v1 — the ``tasks.payload`` shape (TECH-5094).
+    """task_spec / v1 — the (soon-to-be-removed, TECH-5118 Phase 3)
+    ``tasks.payload`` shape (TECH-5094).
 
     Machine-actionable coordinates only, never prose: an ``action`` enum
     plus structured scheduling parameters (reusing ``TimeWindow`` and the
-    same constraint/modality/priority enums as the scheduling.availability
-    messages). Prose stays in the EA's own context (DESIGN.md §8 invariant
-    3) — there is no free-text field here for it to travel in.
+    same constraint/modality/priority enums as the scheduling messages).
+    Prose stays in the EA's own context (DESIGN.md §8 invariant 3) — there
+    is no free-text field here for it to travel in.
 
     ``gather_availability``/``schedule_meeting``/``reschedule_meeting``
     require ``window`` and ``duration_min``; ``confirm_slot`` requires
@@ -304,21 +335,40 @@ class TaskSpecV1(_StrictModel):
         return self
 
 
-# Registry: (namespace, payload_type, schema_version) -> model class. Reused
-# verbatim from the message registry's ``(conversation_type, message_type,
-# schema_version)`` key shape (TECH-5094 §4) so ``get_schema``/``validate_payload``
-# have exactly one lookup path for every typed payload in this service,
-# messages and tasks alike. Every value is a concrete BaseModel subclass
-# (never a Union/TypeAdapter), so callers can uniformly do
+class MessageSchema(NamedTuple):
+    """A registered message type's validation model plus its boundary policy.
+
+    ``boundary_safe`` (DESIGN.md §9 Axis 2) governs whether this message
+    type may cross an ownership boundary: required unconditionally under
+    ``open``; free under ``internal``; under ``asymmetric`` only when the
+    specific post doesn't cross for the sender (see
+    ``state_machine.is_boundary_crossing_safe``). It is a property of the
+    message type, independent of which conversation type carries it.
+    """
+
+    model: type[BaseModel]
+    boundary_safe: bool
+
+
+# Registry: (message_type, schema_version) -> MessageSchema. Deliberately
+# independent of conversation type (TECH-5118, DESIGN.md §9) — legality of
+# a given message type under a given conversation type is decided by
+# state_machine.py from ``boundary_safe`` + conversation type, not baked
+# into this key. Every ``model`` is a concrete BaseModel subclass (never a
+# Union/TypeAdapter), so callers can uniformly do
 # ``get_schema(...).model_validate(payload)``.
-MESSAGE_SCHEMAS: dict[tuple[str, str, int], type[BaseModel]] = {
-    ("scheduling.availability", "availability_request", 1): AvailabilityRequestV1,
-    ("scheduling.availability", "availability_response", 1): AvailabilityResponseV1,
-    ("scheduling.availability", "counter_proposal", 1): CounterProposalV1,
-    ("scheduling.availability", "confirm", 1): ConfirmV1,
-    ("scheduling.availability", "decline", 1): DeclineV1,
-    ("scheduling.availability", "needs_clarification", 1): NeedsClarificationV1,
-    (TASK_NAMESPACE, "task_spec", 1): TaskSpecV1,
+MESSAGE_SCHEMAS: dict[tuple[str, int], MessageSchema] = {
+    ("availability_request", 1): MessageSchema(AvailabilityRequestV1, boundary_safe=True),
+    ("availability_response", 1): MessageSchema(AvailabilityResponseV1, boundary_safe=True),
+    ("counter_proposal", 1): MessageSchema(CounterProposalV1, boundary_safe=True),
+    ("confirm", 1): MessageSchema(ConfirmV1, boundary_safe=True),
+    ("decline", 1): MessageSchema(DeclineV1, boundary_safe=True),
+    ("needs_clarification", 1): MessageSchema(NeedsClarificationV1, boundary_safe=True),
+    ("note", 1): MessageSchema(NoteV1, boundary_safe=False),
+    # TODO(TECH-5118 Phase 3): task_spec/TaskSpecV1 is removed along with
+    # the dedicated tasks table, replaced by task_assign/report/complete/
+    # decline/cancel message types.
+    ("task_spec", 1): MessageSchema(TaskSpecV1, boundary_safe=True),
 }
 
 
@@ -330,14 +380,12 @@ class PayloadValidationError(ValueError):
     """
 
 
-def get_schema(conversation_type: str, message_type: str, schema_version: int) -> type[BaseModel]:
-    """Look up the Pydantic model registered for this message coordinate.
+def get_schema(message_type: str, schema_version: int) -> type[BaseModel]:
+    """Look up the Pydantic model registered for this message type/version.
 
-    This is the seam the (not-yet-built) service layer calls to resolve
-    which schema governs an incoming payload, given the three values it
-    already has on hand: the conversation's ``type`` column, the
-    caller-supplied ``message_type``, and the caller-supplied
-    ``schema_version`` (defaulting to 1 upstream). Always returns a
+    This is the seam the service layer calls to resolve which schema
+    governs an incoming payload, given the caller-supplied ``message_type``
+    and ``schema_version`` (defaulting to 1 upstream). Always returns a
     concrete model class — never a ``Union`` or ``TypeAdapter`` — so the
     caller can do ``get_schema(...).model_validate(payload)`` uniformly.
 
@@ -345,18 +393,32 @@ def get_schema(conversation_type: str, message_type: str, schema_version: int) -
     combinations so callers can catch one exception type across lookup
     and validation failures.
     """
-    schema_cls = MESSAGE_SCHEMAS.get((conversation_type, message_type, schema_version))
-    if schema_cls is None:
+    entry = MESSAGE_SCHEMAS.get((message_type, schema_version))
+    if entry is None:
         raise PayloadValidationError(
             f"unknown message schema: type '{message_type}' schema_version "
-            f"{schema_version} is not registered for conversation type "
-            f"'{conversation_type}'"
+            f"{schema_version} is not registered"
         )
-    return schema_cls
+    return entry.model
+
+
+def is_boundary_safe(message_type: str, schema_version: int) -> bool:
+    """Whether this message type/version may cross an ownership boundary
+    unconditionally (see ``MessageSchema.boundary_safe``).
+
+    Raises ``PayloadValidationError`` for an unknown coordinate, same as
+    ``get_schema``, so callers don't need a separate not-found path.
+    """
+    entry = MESSAGE_SCHEMAS.get((message_type, schema_version))
+    if entry is None:
+        raise PayloadValidationError(
+            f"unknown message schema: type '{message_type}' schema_version "
+            f"{schema_version} is not registered"
+        )
+    return entry.boundary_safe
 
 
 def validate_payload(
-    conversation_type: str,
     message_type: str,
     schema_version: int,
     payload: dict[str, Any],
@@ -373,7 +435,7 @@ def validate_payload(
     without each schema class needing its own size validator.
     """
     _check_payload_size(payload)
-    schema_cls = get_schema(conversation_type, message_type, schema_version)
+    schema_cls = get_schema(message_type, schema_version)
     try:
         model = schema_cls.model_validate(payload)
     except ValidationError as exc:
@@ -401,18 +463,20 @@ def _check_payload_size(payload: dict[str, Any]) -> None:
 __all__ = [
     "CONVERSATION_TYPES",
     "MESSAGE_SCHEMAS",
-    "TASK_NAMESPACE",
     "AvailabilityRequestV1",
     "AvailabilityResponseV1",
     "ConfirmV1",
     "CounterProposalV1",
     "DeclineV1",
+    "MessageSchema",
     "MessageType",
     "NeedsClarificationV1",
+    "NoteV1",
     "PayloadValidationError",
     "Slot",
     "TaskSpecV1",
     "TimeWindow",
     "get_schema",
+    "is_boundary_safe",
     "validate_payload",
 ]

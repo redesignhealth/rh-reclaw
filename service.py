@@ -114,7 +114,6 @@ from schemas import (
     MAX_ACCEPTED_TYPE_LENGTH,
     MAX_ACCEPTED_TYPES,
     MAX_DISPLAY_NAME_LENGTH,
-    TASK_NAMESPACE,
     PayloadValidationError,
     validate_payload,
 )
@@ -826,7 +825,7 @@ async def start_conversation(
     )
 
     try:
-        payload = validate_payload(conversation_type, message_type, schema_version, initial_message)
+        payload = validate_payload(message_type, schema_version, initial_message)
     except PayloadValidationError as exc:
         await _deny_bad_schema(
             session,
@@ -1216,7 +1215,7 @@ async def post_message(
         )
 
     try:
-        validated = validate_payload(conversation.type, message_type, schema_version, payload)
+        validated = validate_payload(message_type, schema_version, payload)
     except PayloadValidationError as exc:
         await _deny_bad_schema(
             session,
@@ -1485,15 +1484,21 @@ async def inbox(session: AsyncSession, *, caller_agent_id: uuid.UUID) -> dict[st
     }
 
 
-# --- Tasks (internal.coordination, TECH-5094) -----------------------------------
+# --- Tasks (TECH-5094; superseded by TECH-5118 Phase 3 "tasks-as-conversations") --
 #
 # A dedicated table, not conversations/messages (see TECH-5094 §1): a task's
 # ``status`` mutates in place (like ``participants.status``), and visibility
 # is simply "caller is created_by or assignee_id" — no invite/accept
-# ceremony, since a task is intrinsically two-party. No
-# ``internal.coordination`` entry is added to ``CONVERSATION_TYPES``: agents
-# cannot ``start_conversation`` of that "type" — ``TASK_NAMESPACE`` exists
-# only as the schema-registry coordinate for ``TaskSpecV1``.
+# ceremony, since a task is intrinsically two-party.
+#
+# TODO(TECH-5118 Phase 3): this whole section (the ``Task`` model, this
+# admission/CRUD code, and the three ``comms_add_task``/``comms_get_tasks``/
+# ``comms_update_task`` tools) is removed once tasks are represented as
+# conversations carrying ``task_assign``/``task_report``/``task_complete``/
+# ``task_decline``/``task_cancel`` messages instead. ``may_assign``'s
+# owner-set-intersection predicate below is *not* removed — Phase 2 reuses
+# it as the pairwise check inside the new ``asymmetric`` conversation-type
+# admission policy.
 
 
 class OwnershipClient(Protocol):
@@ -1732,7 +1737,7 @@ async def add_task(
         )
 
     try:
-        normalized = validate_payload(TASK_NAMESPACE, "task_spec", schema_version, task)
+        normalized = validate_payload("task_spec", schema_version, task)
     except PayloadValidationError as exc:
         await _deny_bad_schema(
             session,

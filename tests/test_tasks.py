@@ -133,7 +133,7 @@ async def _register(session: AsyncSession, sub: str, **overrides: Any) -> Agent:
         "owner_sub": overrides.pop("owner_sub", f"owner-{sub}"),
         "owner_email": f"{sub}@example.com",
         "display_name": sub,
-        "accepted_types": ["scheduling.availability"],
+        "accepted_types": ["open"],
     }
     kwargs.update(overrides)
     return await register_agent(session, **kwargs)
@@ -496,7 +496,7 @@ class TestAddTaskPayloadValidation:
             session,
             actor_sub="cos",
             initiator_agent_id=creator.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message={
                 "window": {
@@ -532,7 +532,7 @@ class TestAddTaskPayloadValidation:
             session,
             actor_sub="cos",
             initiator_agent_id=creator.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[target.id],
             initial_message={
                 "window": {
@@ -566,7 +566,7 @@ class TestAddTaskPayloadValidation:
             session,
             actor_sub="other-owner-agent",
             initiator_agent_id=other.id,
-            conversation_type="scheduling.availability",
+            conversation_type="open",
             target_agent_ids=[creator.id],
             initial_message={
                 "window": {
