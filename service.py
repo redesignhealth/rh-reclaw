@@ -919,6 +919,7 @@ async def _authorize_conversation_open(
     participants = [initiator, *targets]
     if conversation_type == "open":
         return None
+    owner_sets: dict[uuid.UUID, frozenset[str]] = {}
     try:
         owner_sets = await _owner_sets_for(participants, ownership_client)
     except Exception as exc:
@@ -1439,14 +1440,13 @@ async def _check_boundary_crossing(
             .all()
         )
         try:
-            sender_owners = frozenset(
-                (await ownership_client.get_agent_owners(sender_agent_id)).get("owners") or []
+            sender_info, *other_infos = await asyncio.gather(
+                ownership_client.get_agent_owners(sender_agent_id),
+                *(ownership_client.get_agent_owners(pid) for pid in other_ids),
             )
+            sender_owners = frozenset(sender_info.get("owners") or [])
             other_owners = frozenset().union(
-                *[
-                    frozenset((await ownership_client.get_agent_owners(pid)).get("owners") or [])
-                    for pid in other_ids
-                ]
+                *(frozenset(info.get("owners") or []) for info in other_infos)
             )
         except Exception as exc:
             logger.warning(

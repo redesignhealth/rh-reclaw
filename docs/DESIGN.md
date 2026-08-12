@@ -270,6 +270,36 @@ Currently registered message types (all `boundary_safe=True` unless noted):
 member-only (non-owner). These map directly to `participants.role` and are checked
 before the state-machine transition.
 
+### Per-type TTL policy
+
+Conversation expiry is enforced lazily on access (`expires_at`, checked in
+`get_conversation` and `post_message`). Default TTLs by conversation type:
+
+| Conversation type | Default TTL | Rationale |
+|---|---|---|
+| `open` | 7 days | Scheduling negotiations should resolve quickly; stale slots are noise |
+| `asymmetric` | 14 days | Task delegation across owners needs more runway than scheduling |
+| `internal` | 30 days | Same-owner coordination may span longer planning horizons |
+
+All three are overridable via the `expires_at` parameter at conversation creation.
+A completed or canceled conversation's `expires_at` is not retroactively cleared —
+it simply becomes irrelevant once the conversation is terminal.
+
+### Known gap: `platform_get_agent_owners`
+
+The `internal`/`asymmetric` admission logic (and `note`'s boundary-crossing check)
+requires resolving each agent's verified owner set. In v1, the interim
+`AgentTableOwnershipClient` wraps `agents.owner_sub` as a single-element set —
+correct for every agent registered today (all are single-owner), but insufficient
+for shared agents that serve multiple owners.
+
+The real `platform_get_agent_owners` endpoint does not yet exist; no Linear ticket
+tracks it. Until it does, `asymmetric` conversations can be exercised end-to-end
+only in tests (with faked ownership), not in production against real agents.
+The seam is already injected (`OwnershipClient` parameter on all functions that
+need it) — swapping `AgentTableOwnershipClient` for a real HTTP client is the
+only change needed when the platform endpoint ships.
+
 ## 10. Known extensions (explicitly deferred)
 
 - **Grants/consent layer**: required the moment a counterparty is outside the RH
