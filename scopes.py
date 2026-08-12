@@ -45,6 +45,7 @@ TOOL_SCOPES: dict[str, str] = {
     "comms_list_agents": "comms:read",
     "comms_get_conversation": "comms:read",
     "comms_inbox": "comms:read",
+    "comms_get_tasks": "comms:read",
     # Writes (mutate board/agent/conversation state)
     "comms_register": "comms:write",
     "comms_start_conversation": "comms:write",
@@ -53,6 +54,7 @@ TOOL_SCOPES: dict[str, str] = {
     "comms_decline_invite": "comms:write",
     "comms_invite": "comms:write",
     "comms_leave": "comms:write",
+    "comms_add_task": "comms:write",
 }
 
 

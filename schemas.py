@@ -44,7 +44,9 @@ once mutual exclusivity is enforced by the validator.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any, Literal
+from uuid import UUID
 
 from pydantic import (
     AwareDatetime,
@@ -59,6 +61,13 @@ from pydantic import (
 # validate ``agents.accepted_types`` at bind time and ``conversations.type``
 # at start time.
 CONVERSATION_TYPES: frozenset[str] = frozenset({"scheduling.availability"})
+
+# Schema-registry namespace for the ``tasks`` table's payload (TECH-5094)
+# — NOT a member of ``CONVERSATION_TYPES``: agents cannot ``start_conversation``
+# of this "type", it exists only as the first coordinate of the
+# ``MESSAGE_SCHEMAS`` lookup key (reused for tasks, see below) and as the
+# domain label in docs/audit output.
+TASK_NAMESPACE = "internal.coordination"
 
 # Shared size/count limits (DESIGN.md §8 "message size caps" invariant).
 # Defined once here so the tool boundary (providers/comms.py), the service
@@ -221,9 +230,72 @@ class NeedsClarificationV1(_StrictModel):
     about_seq: int = Field(ge=1)
 
 
-# Registry: (conversation_type, message_type, schema_version) -> model class.
-# Every value is a concrete BaseModel subclass (never a Union/TypeAdapter),
-# so callers can uniformly do ``get_schema(...).model_validate(payload)``.
+_TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION = frozenset(
+    {"gather_availability", "schedule_meeting", "reschedule_meeting"}
+)
+
+
+def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
+    if len(set(values)) != len(values):
+        raise ValueError(f"{field_name} must not contain duplicates")
+
+
+class TaskSpecV1(_StrictModel):
+    """internal.coordination / task_spec / v1 — the ``tasks.payload`` shape (TECH-5094).
+
+    Machine-actionable coordinates only, never prose: an ``action`` enum
+    plus structured scheduling parameters (reusing ``TimeWindow`` and the
+    same constraint/modality/priority enums as the scheduling.availability
+    messages). Prose stays in the EA's own context (DESIGN.md §8 invariant
+    3) — there is no free-text field here for it to travel in.
+
+    ``gather_availability``/``schedule_meeting``/``reschedule_meeting``
+    require ``window`` and ``duration_min``; ``confirm_slot`` requires
+    ``window``. ``report_status`` is the report-back direction (EA ->
+    Chief-of-Staff) and needs neither.
+    """
+
+    type: Literal["task_spec"] = "task_spec"
+    action: Literal[
+        "gather_availability",
+        "schedule_meeting",
+        "reschedule_meeting",
+        "cancel_meeting",
+        "confirm_slot",
+        "report_status",
+    ]
+    counterparty_agent_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    related_conversation_id: UUID | None = None
+    window: TimeWindow | None = None
+    duration_min: int | None = Field(default=None, ge=5, le=480)
+    modality: Literal["video", "phone", "in_person"] | None = None
+    priority: Literal["low", "normal", "high"] = "normal"
+    due_at: AwareDatetime | None = None
+    constraints: list[_CONSTRAINTS] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def _no_duplicates(self) -> TaskSpecV1:
+        _check_no_duplicates(self.constraints, "constraints")
+        _check_no_duplicates(self.counterparty_agent_ids, "counterparty_agent_ids")
+        return self
+
+    @model_validator(mode="after")
+    def _required_fields_for_action(self) -> TaskSpecV1:
+        if self.action in _TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION:
+            if self.window is None or self.duration_min is None:
+                raise ValueError(f"action '{self.action}' requires 'window' and 'duration_min'")
+        elif self.action == "confirm_slot" and self.window is None:
+            raise ValueError("action 'confirm_slot' requires 'window'")
+        return self
+
+
+# Registry: (namespace, payload_type, schema_version) -> model class. Reused
+# verbatim from the message registry's ``(conversation_type, message_type,
+# schema_version)`` key shape (TECH-5094 §4) so ``get_schema``/``validate_payload``
+# have exactly one lookup path for every typed payload in this service,
+# messages and tasks alike. Every value is a concrete BaseModel subclass
+# (never a Union/TypeAdapter), so callers can uniformly do
+# ``get_schema(...).model_validate(payload)``.
 MESSAGE_SCHEMAS: dict[tuple[str, str, int], type[BaseModel]] = {
     ("scheduling.availability", "availability_request", 1): AvailabilityRequestV1,
     ("scheduling.availability", "availability_response", 1): AvailabilityResponseV1,
@@ -231,6 +303,7 @@ MESSAGE_SCHEMAS: dict[tuple[str, str, int], type[BaseModel]] = {
     ("scheduling.availability", "confirm", 1): ConfirmV1,
     ("scheduling.availability", "decline", 1): DeclineV1,
     ("scheduling.availability", "needs_clarification", 1): NeedsClarificationV1,
+    (TASK_NAMESPACE, "task_spec", 1): TaskSpecV1,
 }
 
 
@@ -313,6 +386,7 @@ def _check_payload_size(payload: dict[str, Any]) -> None:
 __all__ = [
     "CONVERSATION_TYPES",
     "MESSAGE_SCHEMAS",
+    "TASK_NAMESPACE",
     "AvailabilityRequestV1",
     "AvailabilityResponseV1",
     "ConfirmV1",
@@ -322,6 +396,7 @@ __all__ = [
     "NeedsClarificationV1",
     "PayloadValidationError",
     "Slot",
+    "TaskSpecV1",
     "TimeWindow",
     "get_schema",
     "validate_payload",

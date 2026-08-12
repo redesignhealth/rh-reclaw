@@ -121,7 +121,7 @@ async def _clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, messages, participants, conversations, agents "
+                "TRUNCATE TABLE audit_log, tasks, messages, participants, conversations, agents "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -537,7 +537,7 @@ class TestInvite:
                 conversation_id=conversation.id,
                 target_agent_id=target.id,
             )
-        assert str(exc_info.value) == "access_denied: conversation requires active membership"
+        assert str(exc_info.value) == "access_denied: not authorized for this resource"
         assert exc_info.value.reason == "denied.already_participant"
 
         actions = await _audit_actions(session, conversation.id)

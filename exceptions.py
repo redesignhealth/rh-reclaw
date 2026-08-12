@@ -4,15 +4,18 @@ Stage 3 (the not-yet-built MCP tools layer) catches these and maps them to
 ``fastmcp.exceptions.ToolError`` messages. Only three shapes ever cross the
 service/tools boundary:
 
-- ``AccessDeniedError``: the uniform "not authorized to see/act on this
-  conversation" denial (DESIGN.md §4/§8's anti-enumeration rule). ``str()``
-  of every ``AccessDeniedError`` instance is the *same constant string*,
-  regardless of cause — not a participant, invited-but-not-accepted,
-  left/declined, an unknown/inactive target agent, or a target that
-  doesn't accept the conversation type. The specific cause is available to
-  server-side code only via the ``reason`` attribute (mirrored 1:1 into the
-  audit log's ``action`` column by ``service._deny``); it must never be
-  interpolated into a client-visible message.
+- ``AccessDeniedError``: the uniform "not authorized for this resource"
+  denial (DESIGN.md §4/§8's anti-enumeration rule), covering both
+  conversation-membership denials and task-admission denials
+  (``denied.not_same_owner``/``denied.ownership_unverified``, TECH-5094).
+  ``str()`` of every ``AccessDeniedError`` instance is the *same constant
+  string*, regardless of cause — not a participant, invited-but-not-
+  accepted, left/declined, an unknown/inactive target agent, a target
+  that doesn't accept the conversation type, or an unadmitted task
+  assignment. The specific cause is available to server-side code only
+  via the ``reason`` attribute (mirrored 1:1 into the audit log's
+  ``action`` column by ``service._deny``); it must never be interpolated
+  into a client-visible message.
 
   Unknown-agent and type-not-accepted during ``start_conversation``/
   ``invite`` are deliberately folded into this SAME uniform shape rather
@@ -40,7 +43,7 @@ specific exception type.
 
 from __future__ import annotations
 
-_ACCESS_DENIED_MESSAGE = "access_denied: conversation requires active membership"
+_ACCESS_DENIED_MESSAGE = "access_denied: not authorized for this resource"
 
 
 class AccessDeniedError(Exception):

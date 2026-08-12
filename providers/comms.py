@@ -262,7 +262,7 @@ async def register(display_name: str, accepted_types: list[str]) -> dict[str, An
 async def list_agents(limit: int = 50, cursor: str | None = None) -> dict[str, Any]:
     """List the board directory (paginated, keyset on ``sub``).
 
-    Internal domain — enumeration is acceptable per DESIGN.md §9. Pass the
+    Internal domain — enumeration is acceptable per DESIGN.md §10. Pass the
     returned ``next_cursor`` back as ``cursor`` to page forward.
     """
     _require_token()
@@ -543,3 +543,78 @@ async def leave(conversation_id: str) -> dict[str, Any]:
             )
 
     return {"conversation_id": conversation_id, "agent_id": str(caller.id), "status": "left"}
+
+
+# --- Tasks (internal.coordination, TECH-5094) -----------------------------------
+
+
+@comms_server.tool
+async def add_task(
+    assignee_agent_id: str,
+    task: dict[str, Any],
+    schema_version: Literal[1] = 1,
+) -> dict[str, Any]:
+    """Create a task assigned from the caller to ``assignee_agent_id``.
+
+    Bidirectional: either party of an admitted pair may call this — a
+    Chief-of-Staff agent assigning work down, or an EA agent reporting
+    status back up (a ``report_status``-action task). Admission is gated
+    solely by the two agents' verified owner sets intersecting (never by
+    ``agents.owner_sub``/``owner_email`` directly) — uniform denial on
+    mismatch or on an ownership-lookup failure (fails closed).
+    ``assignee_agent_id`` is an agent id (UUID string, e.g. from
+    ``comms_list_agents``). ``task`` must validate against the
+    ``TaskSpecV1`` schema (no free text). ``schema_version`` is explicit
+    rather than an invisible default — only ``1`` exists today.
+    """
+    token = _require_token()
+    sub = _require_identity(token)
+    assignee_uuid = _parse_uuid("assignee_agent_id", assignee_agent_id)
+
+    async with get_session_factory()() as session:
+        caller = await _resolve_caller_agent(session, sub)
+        async with _map_service_errors():
+            # service.add_task returns the same canonical AXI shape
+            # comms_get_tasks does for this resource (TECH-5094 Argus round
+            # 1, api contract/S5) — one session, one service.py function
+            # call, per this file's module-level invariant.
+            return await service.add_task(
+                session,
+                actor_sub=sub,
+                creator_agent_id=caller.id,
+                assignee_agent_id=assignee_uuid,
+                task=task,
+                ownership_client=service.AgentTableOwnershipClient(session),
+                schema_version=schema_version,
+            )
+
+
+@comms_server.tool
+async def get_tasks(
+    role: Literal["assigned", "created", "all"] = "all",
+    status: Literal["open", "done", "declined"] | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+) -> dict[str, Any]:
+    """List tasks visible to the caller: where the caller is creator or assignee.
+
+    No other agent's tasks are ever visible or enumerable, including
+    same-owner siblings. ``role`` narrows to ``"created"``/``"assigned"``
+    (relative to the caller) or ``"all"`` (default). ``status`` optionally
+    narrows further. Pass the returned ``next_cursor`` back as ``cursor``
+    to page forward (keyset, newest first).
+    """
+    token = _require_token()
+    sub = _require_identity(token)
+
+    async with get_session_factory()() as session:
+        caller = await _resolve_caller_agent(session, sub)
+        async with _map_service_errors():
+            return await service.get_tasks(
+                session,
+                caller_agent_id=caller.id,
+                role=role,
+                status=status,
+                limit=limit,
+                cursor=cursor,
+            )

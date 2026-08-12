@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
 
 from schemas import (
+    TASK_NAMESPACE,
     AvailabilityRequestV1,
     AvailabilityResponseV1,
     ConfirmV1,
@@ -15,6 +17,7 @@ from schemas import (
     DeclineV1,
     NeedsClarificationV1,
     PayloadValidationError,
+    TaskSpecV1,
     get_schema,
     validate_payload,
 )
@@ -344,3 +347,75 @@ class TestValidatePayload:
     def test_raises_payload_validation_error_on_unknown_schema(self) -> None:
         with pytest.raises(PayloadValidationError):
             validate_payload("scheduling.availability", "unknown_type", 1, {})
+
+
+class TestTaskSpecV1:
+    def _valid(self, **overrides: object) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "action": "gather_availability",
+            "window": {"start": _iso(_NOW), "end": _iso(_LATER)},
+            "duration_min": 30,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_accepts_valid_gather_availability(self) -> None:
+        model = TaskSpecV1.model_validate(self._valid())
+        assert model.type == "task_spec"
+        assert model.priority == "normal"
+        assert model.counterparty_agent_ids == []
+
+    @pytest.mark.parametrize(
+        "action", ["gather_availability", "schedule_meeting", "reschedule_meeting"]
+    )
+    def test_scheduling_actions_require_window_and_duration(self, action: str) -> None:
+        with pytest.raises(ValidationError, match="requires 'window' and 'duration_min'"):
+            TaskSpecV1.model_validate({"action": action})
+
+    def test_confirm_slot_requires_window(self) -> None:
+        with pytest.raises(ValidationError, match="requires 'window'"):
+            TaskSpecV1.model_validate({"action": "confirm_slot"})
+
+        model = TaskSpecV1.model_validate(
+            {"action": "confirm_slot", "window": {"start": _iso(_NOW), "end": _iso(_LATER)}}
+        )
+        assert model.action == "confirm_slot"
+
+    @pytest.mark.parametrize("action", ["cancel_meeting", "report_status"])
+    def test_actions_with_no_required_fields(self, action: str) -> None:
+        model = TaskSpecV1.model_validate({"action": action})
+        assert model.window is None
+        assert model.duration_min is None
+
+    def test_duplicate_constraints_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="duplicates"):
+            TaskSpecV1.model_validate(self._valid(constraints=["mornings_only", "mornings_only"]))
+
+    def test_naive_datetime_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskSpecV1.model_validate(
+                self._valid(window={"start": _NAIVE.isoformat(), "end": _iso(_LATER)})
+            )
+
+    def test_extra_field_rejected_no_free_text(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskSpecV1.model_validate(self._valid(notes="please handle ASAP"))
+
+    def test_counterparty_agent_ids_capped_at_ten(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskSpecV1.model_validate(
+                self._valid(counterparty_agent_ids=[str(uuid.uuid4()) for _ in range(11)])
+            )
+
+    def test_duplicate_counterparty_agent_ids_rejected(self) -> None:
+        dup = str(uuid.uuid4())
+        with pytest.raises(ValidationError, match="duplicates"):
+            TaskSpecV1.model_validate(self._valid(counterparty_agent_ids=[dup, dup]))
+
+    def test_registered_under_task_namespace(self) -> None:
+        assert get_schema(TASK_NAMESPACE, "task_spec", 1) is TaskSpecV1
+
+    def test_validate_payload_normalizes_task_spec(self) -> None:
+        result = validate_payload(TASK_NAMESPACE, "task_spec", 1, self._valid())
+        assert result["type"] == "task_spec"
+        assert isinstance(result["window"]["start"], str)
