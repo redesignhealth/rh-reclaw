@@ -244,7 +244,7 @@ async def whoami(agent_key: str | None = None) -> dict[str, Any]:
     (base_sub::agent_key) that will be used for agent lookups by other tools.
     """
     token = _require_token()
-    base_sub = try_resolve_email(token)
+    base_sub = _require_identity(token)
     agent_key = _validate_agent_key(agent_key)
     composed_sub = _compose_sub(base_sub, agent_key)
     interactive = is_interactive_token(token)
