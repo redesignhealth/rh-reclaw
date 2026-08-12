@@ -78,7 +78,7 @@ from scheduler_mcp.negotiation.schema import CandidateSlot
 from scheduler_mcp.rules import InMemoryRuleStore, Rule, Situation, apply_defaults
 
 from identity import require_owner_identity, try_resolve_email
-from observability import log_security_event
+from observability import email_local_part, log_security_event
 from scopes import is_interactive_token, scopes_for_token
 
 ea_server: FastMCP[Any] = FastMCP("ea")
@@ -136,7 +136,16 @@ def _tool_error(operation: str, exc: Exception) -> ToolError:
     already-known-to-the-caller inputs, not secrets), but it isn't
     currently done -- if a future incident needs the specific
     conversation_id, add it explicitly rather than assuming it's already
-    captured here."""
+    captured here.
+
+    Argus round 6 finding, noted for consistency: `respond_to_approval`'s
+    OWN `except ValueError` branch (not this function) DOES end up logging
+    `conversation_id` implicitly, via `exc_info=True`'s rendered traceback
+    of `respond_to_booking_approval`'s f-string error messages
+    (orchestrator.py:827,848 both embed it). That's a different code path
+    with a different, intentional logging contract (see that function's
+    own comments) -- this function's "not currently done" above still
+    describes `_tool_error`'s own behavior accurately."""
     log_security_event(
         "conversation_access_rejected",
         operation=operation,
@@ -514,12 +523,18 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         # owner rejecting a booking via `approved=False`, which would make
         # a CloudWatch Metric Filter on this event name ambiguous between
         # "this tool call was denied" and "the owner said no." Also adds
-        # `owner` (already in scope) for incident correlation.
+        # `user_id` (Argus round 6 finding: originally `owner=owner_identity`
+        # verbatim -- for an interactive/Okta caller `owner_identity` IS a
+        # full email address, `require_owner_identity` never strips it, so
+        # that logged a raw email to CloudWatch with no local-part
+        # truncation, the only place in this service that would have.
+        # `email_local_part` + the `user_id` key match every other identity
+        # attribution in this codebase, e.g. `log_tool_call`).
         log_security_event(
             "booking_approval_call_denied",
             operation="ea_respond_to_approval",
             reason="no_pending",
-            owner=owner_identity,
+            user_id=email_local_part(owner_identity),
         )
         raise ToolError("no pending booking approval for this conversation")
 
@@ -529,17 +544,21 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         )
     except _CONVERSATION_ERRORS as exc:
         raise _tool_error("ea_respond_to_approval", exc) from exc
-    except ValueError as exc:
-        # Argus round 5 finding: bind the exception and log error_type/
-        # exc_info -- the prior version discarded the original ValueError
-        # entirely, so the two known raise sites this branch can reach
-        # (orchestrator.py:827,848) were indistinguishable in the logs.
+    except ValueError:
+        # Argus round 5 finding: bind the exception and log exc_info --
+        # the prior version discarded the original ValueError entirely, so
+        # the two known raise sites this branch can reach (orchestrator.py
+        # :827,848) were indistinguishable in the logs. `error_type` is
+        # deliberately NOT included (Argus round 6 finding: it would
+        # always be the literal string "ValueError", since that's the only
+        # type this except clause matches -- dead weight; `exc_info`'s
+        # rendered traceback is what actually distinguishes the two raise
+        # sites, via their different messages).
         log_security_event(
             "booking_approval_call_denied",
             operation="ea_respond_to_approval",
             reason="lapsed_between_precheck_and_call",
-            owner=owner_identity,
-            error_type=type(exc).__name__,
+            user_id=email_local_part(owner_identity),
             exc_info=True,
         )
         raise ToolError("no pending booking approval for this conversation") from None

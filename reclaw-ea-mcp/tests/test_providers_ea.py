@@ -237,7 +237,7 @@ class TestCrossOwnerIsolation:
             "booking_approval_call_denied",
             operation="ea_respond_to_approval",
             reason="no_pending",
-            owner="mallory5-agent",
+            user_id="mallory5-agent",
         )
 
     async def test_race_between_precheck_and_call_is_denied_safely(self, main: Any) -> None:
@@ -291,8 +291,7 @@ class TestCrossOwnerIsolation:
             "booking_approval_call_denied",
             operation="ea_respond_to_approval",
             reason="lapsed_between_precheck_and_call",
-            owner="alice6-agent",
-            error_type="ValueError",
+            user_id="alice6-agent",
             exc_info=True,
         )
 

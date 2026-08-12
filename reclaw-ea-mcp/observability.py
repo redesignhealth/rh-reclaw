@@ -17,6 +17,33 @@ renders a traceback instead of a bare ``{"exc_info": true}``) and
 See reclaw-comms-mcp/observability.py's docstring for the base event
 schema (``tool_call``, ``auth_flow``, ``auth_rejected``, ``scope_denial``,
 ``user_active``), which both files still share.
+
+``log_security_event``-emitted event names in this service (Argus round 6
+finding: these previously existed only in providers/ea.py/auth.py, not
+discoverable from this module's own schema docstring):
+
+okta_id_token_rejected:
+    {"event": "okta_id_token_rejected", "reason": "non_object_header" |
+     "alg_none" | "non_object_payload" | "decode_failed", ...}
+    ``alg_none`` additionally carries ``"severity": "critical"``.
+
+conversation_access_rejected:
+    {"event": "conversation_access_rejected", "operation": "<ea_* tool
+     name>", "error_type": "UnknownConversationError" |
+     "NotAParticipantError"}
+
+booking_approval_call_denied:
+    {"event": "booking_approval_call_denied", "operation":
+     "ea_respond_to_approval", "reason": "no_pending" |
+     "lapsed_between_precheck_and_call", "user_id": "<local-part|sub>"}
+    Renamed from ``booking_approval_rejected`` in the same PR that added
+    it (round 5) -- that name collided with the legitimate domain concept
+    of an owner rejecting a booking via ``approved=False``. Grep confirmed
+    no Terraform/dashboard/README referenced the old name at rename time.
+
+identity_extraction_failed:
+    {"event": "identity_extraction_failed", "tool": "<tool name>",
+     "error_type": "<ExcClassName>"}
 """
 
 from __future__ import annotations
