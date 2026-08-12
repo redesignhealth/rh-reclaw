@@ -265,6 +265,39 @@ class TestRegisterAgent:
         )
         assert agent.accepted_types == ["scheduling.availability"]
 
+    async def test_oversized_accepted_types_of_unknown_values_still_hits_count_cap(
+        self, session: AsyncSession
+    ) -> None:
+        """The ``MAX_ACCEPTED_TYPES`` count check runs before the
+        unknown-type check (Argus round 1, security): an oversized list of
+        entirely-unknown type strings must still be rejected by the count
+        cap, not have every entry echoed back verbatim in an
+        ``UnknownConversationTypeError`` message with no size bound of its
+        own."""
+        with pytest.raises(ValueError, match="accepted_types exceeds 20 entries"):
+            await _register(
+                session,
+                "agent-oversized-unknown-types",
+                accepted_types=[f"bogus-{i}" for i in range(21)],
+            )
+
+    async def test_empty_accepted_types_raises_plain_value_error(
+        self, session: AsyncSession
+    ) -> None:
+        """An empty ``accepted_types`` list is a distinct failure from
+        "contains an unknown type" (Argus round 1): there is no unknown
+        value to usefully enumerate, so this stays a bare ``ValueError``
+        rather than ``UnknownConversationTypeError`` — the prior behavior
+        raised the latter with the confusing message
+        ``"... (got unknown: [])"``, naming zero unknown values while still
+        claiming something was unknown."""
+        with pytest.raises(ValueError, match="accepted_types must be non-empty"):
+            await _register(
+                session,
+                "agent-empty-types",
+                accepted_types=[],
+            )
+
     async def test_unknown_accepted_type_raises_specific_error(self, session: AsyncSession) -> None:
         """An ``accepted_types`` entry outside ``schemas.CONVERSATION_TYPES``
         raises ``UnknownConversationTypeError`` (not a bare ``ValueError``),

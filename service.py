@@ -573,9 +573,12 @@ async def register_agent(
     Raises ``ValueError`` (not ``AccessDeniedError``) for malformed input — this
     is a data-validation failure, not an authorization decision (the
     caller has not claimed a resource yet). This includes an empty or
-    over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``, and
-    an empty, unknown-typed, or over-count (``schemas.MAX_ACCEPTED_TYPES``)
-    ``accepted_types``.
+    over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``, an
+    empty ``sub``, and an over-count (``schemas.MAX_ACCEPTED_TYPES``)
+    ``accepted_types``. An ``accepted_types`` containing a value outside
+    ``CONVERSATION_TYPES`` instead raises ``UnknownConversationTypeError``
+    (exceptions.py) — specific and client-safe by design, unlike the cases
+    above.
     """
     sub = sub.strip()
     if not sub:
@@ -585,14 +588,30 @@ async def register_agent(
         raise ValueError("display_name must be non-empty")
     if len(display_name) > MAX_DISPLAY_NAME_LENGTH:
         raise ValueError(f"display_name exceeds {MAX_DISPLAY_NAME_LENGTH} characters")
+    # Cap check runs FIRST, before computing unknown_types (Argus round 1,
+    # security): the old order let a caller submit an arbitrarily large
+    # list of unknown-type strings and get every one of them echoed back
+    # verbatim in the error message, silently bypassing the declared
+    # MAX_ACCEPTED_TYPES cap for this input shape. Bounding the input size
+    # up front means unknown_types is now computed over an already-capped
+    # list, whatever the values.
+    if len(accepted_types) > MAX_ACCEPTED_TYPES:
+        raise ValueError(f"accepted_types exceeds {MAX_ACCEPTED_TYPES} entries")
+    # Empty list is a distinct failure from "contains an unknown type" —
+    # it's not client-safe/specific in the same way (there's no unknown
+    # value to usefully enumerate), so it stays a bare ValueError rather
+    # than UnknownConversationTypeError. Splitting these (Argus round 1)
+    # avoids the confusing prior message "... (got unknown: [])" for an
+    # empty list, which named zero unknown values while still claiming
+    # something was unknown.
+    if not accepted_types:
+        raise ValueError("accepted_types must be non-empty")
     unknown_types = sorted(set(accepted_types) - CONVERSATION_TYPES)
-    if not accepted_types or unknown_types:
+    if unknown_types:
         raise UnknownConversationTypeError(
             "accepted_types must be a non-empty subset of "
             f"{sorted(CONVERSATION_TYPES)} (got unknown: {unknown_types})"
         )
-    if len(accepted_types) > MAX_ACCEPTED_TYPES:
-        raise ValueError(f"accepted_types exceeds {MAX_ACCEPTED_TYPES} entries")
     normalized_types = sorted(set(accepted_types))
 
     existing = (await session.execute(select(Agent).where(Agent.sub == sub))).scalar_one_or_none()
