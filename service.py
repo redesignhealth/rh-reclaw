@@ -350,14 +350,22 @@ def _maybe_expire(session: AsyncSession, actor_sub: str, conversation: Conversat
 
 
 async def _require_active_agent(
-    session: AsyncSession, *, actor_sub: str, agent_id: uuid.UUID
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    agent_id: uuid.UUID,
+    task_id: uuid.UUID | None = None,
 ) -> Agent:
     """Resolve ``agent_id`` to its board-ACTIVE ``Agent``, or deny (uniform).
 
     Used on the *initiating* side of writes (starting a conversation,
     inviting, posting, ``update_task``) — see the module docstring's
     judgment-call note on why this check is deliberately skipped for
-    accept/decline/leave.
+    accept/decline/leave. ``task_id`` is ``None`` for every caller except
+    ``update_task``, which already has one in scope by the time it calls
+    this — passed through so this denial's audit row is task-attributed
+    like every other ``update_task`` denial (TECH-5099 Argus round 3),
+    rather than the only one landing with ``audit_log.task_id`` NULL.
     """
     agent = await _find_agent_by_id(session, agent_id)
     if agent is None or agent.status != "active":
@@ -366,6 +374,7 @@ async def _require_active_agent(
             actor_sub=actor_sub,
             action="denied.unknown_agent",
             agent_id=agent.id if agent else None,
+            task_id=task_id,
         )
     return agent
 
@@ -1907,11 +1916,16 @@ async def update_task(
     TECH-5099. Only the task's creator or assignee may call this (uniform
     ``AccessDeniedError`` for a non-party or an unknown task_id — anti-
     enumeration, identical treatment to a non-existent task). ``declined``
-    is further restricted to the assignee; the creator attempting it gets
-    the same uniform denial. No transition out of a terminal status
-    (``done``/``declined``) is legal — that is a state-machine violation
-    (``InvalidConversationStateError``, specific: the caller already knows
-    the task's current status via ``get_tasks``), not an authorization one.
+    is further restricted to the assignee; the creator attempting it on a
+    still-``open`` task gets the same uniform denial. No transition out of
+    a terminal status (``done``/``declined``) is legal — that is a
+    state-machine violation (``InvalidConversationStateError``, specific:
+    the caller already knows the task's current status via ``get_tasks``),
+    not an authorization one, and it is checked BEFORE the assignee-only
+    restriction: any party (creator or assignee) attempting any status
+    change on an already-terminal task gets ``InvalidConversationStateError``,
+    never ``AccessDeniedError`` — role-eligibility for a status value is
+    moot once no transition is legal at all.
 
     Raises ``ValueError`` for a ``status`` this tool never accepts (``open``
     is only ever written by ``add_task``; anything outside
@@ -1921,9 +1935,11 @@ async def update_task(
         raise ValueError(f"status must be 'done' or 'declined', got {status!r}")
 
     # Initiating-write check, same as every other write in this module
-    # (add_task/post_message/start_conversation) — a suspended/revoked
+    # (add_task/post_message/start_conversation) — a suspended
     # agent must not be able to mutate a task's status.
-    await _require_active_agent(session, actor_sub=actor_sub, agent_id=caller_agent_id)
+    await _require_active_agent(
+        session, actor_sub=actor_sub, agent_id=caller_agent_id, task_id=task_id
+    )
 
     # for_update=True: without a row lock, two concurrent update_task calls
     # can both observe status='open', both pass the terminal-state guard

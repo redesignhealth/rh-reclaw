@@ -119,7 +119,11 @@ async def _map_service_errors() -> AsyncIterator[None]:
     ``conversation_type``) and its message text can embed internal
     schema/config detail (allowed-value lists, etc.). Those are not
     client-safe, so they are mapped to a single generic, non-leaking
-    message instead of being forwarded verbatim.
+    message instead of being forwarded verbatim. A bare ``RuntimeError``
+    (TECH-5099: ``service._task_with_subs``'s theoretical "task vanished
+    after its own transition committed" guard) gets the same generic
+    treatment — it signals an internal invariant violation, not anything
+    the caller did wrong, and its message can embed internal state detail.
     """
     try:
         yield
@@ -131,7 +135,7 @@ async def _map_service_errors() -> AsyncIterator[None]:
         PayloadValidationError,
     ) as exc:
         raise ToolError(str(exc)) from None
-    except ValueError:
+    except (ValueError, RuntimeError):
         raise ToolError("invalid_request: the request could not be processed") from None
 
 
@@ -627,7 +631,10 @@ async def update_task(task_id: str, status: Literal["done", "declined"]) -> dict
 
     Only the task's creator or assignee may call this (uniform denial for
     a non-party or an unknown ``task_id``). ``declined`` is further
-    restricted to the assignee. No transition out of a terminal status
+    restricted to the assignee — but that check applies only to a
+    still-``open`` task; any party attempting any transition on an
+    already-terminal task gets the specific "task cannot transition"
+    error, not the uniform denial. No transition out of a terminal status
     (``done``/``declined``) is legal. ``status='open'`` is not a valid
     target here — only ``comms_add_task`` ever writes ``open``.
     """

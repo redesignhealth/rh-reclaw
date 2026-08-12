@@ -925,6 +925,9 @@ class TestUpdateTask:
                 task_id=uuid.UUID(task_id),
                 status="declined",
             )
+        actions = await _audit_actions(session, uuid.UUID(task_id))
+        assert "denied.bad_state" in actions
+        assert "denied.not_assignee" not in actions
 
     async def test_suspended_agent_denied(self, session: AsyncSession) -> None:
         creator, _assignee, task_id = await self._open_task(session)
@@ -940,6 +943,11 @@ class TestUpdateTask:
                 status="done",
             )
         assert exc_info.value.reason == "denied.unknown_agent"
+        # No task_id filter: _require_active_agent now threads task_id
+        # through, but confirm via the unfiltered helper too so this test
+        # doesn't assume that wiring stays correct.
+        assert "denied.unknown_agent" in await _audit_actions(session)
+        assert "denied.unknown_agent" in await _audit_actions(session, uuid.UUID(task_id))
 
     async def test_unknown_task_id_denied_uniformly(self, session: AsyncSession) -> None:
         outsider = await _register(session, "outsider", owner_sub="other-sub")

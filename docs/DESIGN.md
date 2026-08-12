@@ -226,11 +226,14 @@ fail-closed scoping).
   `status`), and `comms_update_task` (`comms:write`, TECH-5099: the
   `open → done`/`declined` transition — either party may mark `done`;
   `declined` is assignee-only, the consent/refusal mechanism; no
-  transition out of a terminal status). Denials: `denied.not_party`
-  (caller is neither creator nor assignee, or the task doesn't exist —
-  uniform), `denied.not_assignee` (non-assignee attempted `declined`),
-  `denied.bad_state` (terminal-status re-transition), and
-  `denied.unknown_agent` (caller's board agent is suspended/revoked).
+  transition out of a terminal status). Denials, checked in this order:
+  `denied.unknown_agent` (caller's board agent is suspended),
+  `denied.not_party` (caller is neither creator nor assignee, or the task
+  doesn't exist — uniform), `denied.bad_state` (terminal-status
+  re-transition — fires for **every** party before the next check, so a
+  creator attempting `declined` on an already-`done` task gets this, not
+  `denied.not_assignee`), and `denied.not_assignee` (non-assignee
+  attempted `declined` on a still-`open` task).
 
 ## 10. Known extensions (explicitly deferred)
 
