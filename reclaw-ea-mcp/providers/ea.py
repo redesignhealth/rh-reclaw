@@ -462,16 +462,17 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
     back. `approved=False` releases the ledger hold and records the
     rejection for the confidence system.
 
-    Raises `"no pending booking approval for this conversation"` if there
-    is no pending approval (already resolved, never requested, or swept as
-    expired -- TECH-5076) -- this is a distinct, safe message: it reflects
-    only THIS caller's own local pending-approval state
-    (`has_pending_booking_approval`, keyed per owner), never board state,
-    so it cannot be used to probe whether some other conversation_id
-    exists. Also raises (with the uniform conversation-not-found message)
-    if `conversation_id` doesn't exist or isn't this caller's, and
-    propagates any other error uncaught -- see this function's own
-    implementation comment for why that's the safe default here."""
+    Raises `ToolError("no pending booking approval for this conversation")`
+    if no pending approval exists for this conversation -- this covers
+    `conversation_id` being unknown, belonging to a different owner,
+    already resolved, never requested, or swept as expired (TECH-5076),
+    AND the rarer case where completion itself has lapsed (the negotiation
+    is no longer fully confirmed) between this call starting and
+    `respond_to_booking_approval` actually running. All of these reduce to
+    the same message because all of them are keyed off THIS caller's own
+    local state (`has_pending_booking_approval`, or a race against it),
+    never board state -- none can be used to probe whether some other
+    conversation_id exists."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -480,23 +481,33 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         nonlocal booked_slot
         booked_slot = slot
 
-    # Argus round 2 finding, corrected in round 3: a bare `except
-    # ValueError` here both conflated `respond_to_booking_approval`'s two
-    # distinct raise sites (no-pending-approval vs. completion-lapsed,
-    # orchestrator.py:827,848) under the SAME wrong "no pending approval"
-    # message, and could silently mask an unrelated ValueError from
-    # somewhere deeper in the call stack (e.g. a genuine validation bug in
-    # `outcomes.OwnerResponseOutcome`) as if it were routine. Checking
-    # `has_pending_booking_approval` explicitly, BEFORE calling into the
-    # library, handles the no-pending-approval case accurately without
-    # needing to interpret an exception at all. Nothing else is caught
-    # here: if `respond_to_booking_approval` still raises (the
-    # completion-lapsed case, or a genuine bug), it propagates uncaught --
-    # safe to do because this caller's ownership of `conversation_id` is
-    # already established by the `has_pending_booking_approval` check
-    # above (only the owner's own Negotiator can have a pending approval
-    # for it), so nothing about board state or existence leaks either way.
+    # Argus round 2 finding, corrected in round 3, corrected again in round
+    # 4: a bare `except ValueError` here originally conflated
+    # `respond_to_booking_approval`'s two distinct raise sites
+    # (no-pending-approval vs. completion-lapsed, orchestrator.py:827,848)
+    # under the wrong message. Round 3's fix replaced it with this
+    # `has_pending_booking_approval` pre-check -- correct for the common
+    # case, but it left a real race uncaught: `sweep_expired_booking_
+    # approvals` (called at the top of every `Negotiator.react()`) can run
+    # between this pre-check and the call below, on ANOTHER thread/request
+    # sharing this same in-process `Negotiator`, flipping a hold from
+    # pending to expired in between -- at which point
+    # `respond_to_booking_approval` raises its OWN "no pending approval"
+    # ValueError (or, less likely, "completion lapsed" if the negotiation
+    # itself changed underneath the approval), and round 3's version let
+    # that propagate uncaught: raw library internals reaching an MCP
+    # client, the only tool in this provider that did so. Both of
+    # `respond_to_booking_approval`'s ValueError messages are locally-safe
+    # (see this function's docstring), so catching `ValueError` here
+    # specifically -- narrower than `_CONVERSATION_ERRORS`, and only after
+    # the pre-check has already ruled out the common no-pending-approval
+    # case -- is safe: anything reaching this except clause is one of
+    # those two known, non-leaking conditions from THIS exact call, not an
+    # unrelated bug several layers down being silently reclassified.
     if not negotiator.has_pending_booking_approval(conversation_id):
+        log_security_event(
+            "booking_approval_rejected", operation="ea_respond_to_approval", reason="no_pending"
+        )
         raise ToolError("no pending booking approval for this conversation")
 
     try:
@@ -505,6 +516,13 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         )
     except _CONVERSATION_ERRORS as exc:
         raise _tool_error("ea_respond_to_approval", exc) from exc
+    except ValueError:
+        log_security_event(
+            "booking_approval_rejected",
+            operation="ea_respond_to_approval",
+            reason="lapsed_between_precheck_and_call",
+        )
+        raise ToolError("no pending booking approval for this conversation") from None
     return {
         "conversation_id": conversation_id,
         "booked": booked_slot is not None,

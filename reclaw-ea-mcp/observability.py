@@ -196,7 +196,9 @@ def log_scope_denial(
         _fallback_logger.warning("log_scope_denial failed to emit event", exc_info=True)
 
 
-def log_security_event(event: str, **fields: Any) -> None:
+def log_security_event(
+    event: str, *, severity: Literal["critical"] | None = None, **fields: Any
+) -> None:
     """Emit an arbitrary security-relevant event through the structured
     JSON pipeline, at ``warning``.
 
@@ -217,14 +219,21 @@ def log_security_event(event: str, **fields: Any) -> None:
     called elsewhere, structlog has no exception to capture and the field
     is silently omitted, not an error.
 
-    ``severity`` is an optional, free-form field some callers pass (e.g.
+    ``severity`` is an optional field some callers pass (e.g.
     ``severity="critical"`` for an explicit signature-bypass attempt in
     auth.py) to let a downstream CloudWatch Metric Filter distinguish an
     especially adversarial event from a routine one of the same ``event``
     name -- structlog itself has no level between ``warning`` and
     ``error`` for that distinction. Inert until a corresponding
     filter/alarm is actually configured; not yet wired up anywhere.
+    Typed as a closed ``Literal`` (Argus round 4 finding: previously just
+    another free-form ``**fields`` entry, so a typo like ``"cricital"``
+    would silently emit a non-matching value with no type-check signal) --
+    add new values here as they gain a real meaning, not ad hoc at a call
+    site.
     """
+    if severity is not None:
+        fields["severity"] = severity
     try:
         obs_log.warning(event, **fields)
     except Exception:

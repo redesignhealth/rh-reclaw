@@ -193,10 +193,12 @@ class TestCrossOwnerIsolation:
         """Argus round 2 finding: `TestCrossOwnerIsolation` omitted
         `ea_respond_to_approval` -- the highest-privilege tool (the
         human-in-the-loop booking gate). Mallory has no pending approval
-        for a conversation she was never part of, so this hits the
-        `ValueError` -> "no pending booking approval" path, not the
-        conversation-not-found path -- both are safe (neither reveals
-        board state), just via different messages."""
+        for a conversation she was never part of, so `has_pending_booking_
+        approval` returns False and `ToolError` is raised directly at that
+        pre-check (Argus round 4 finding: an earlier version of this
+        docstring described a since-removed `except ValueError` block) --
+        not the conversation-not-found path -- both are safe (neither
+        reveals board state), just via different messages."""
         bob = _token("bob5-agent")
         mallory = _token("mallory5-agent")
         window = _window()

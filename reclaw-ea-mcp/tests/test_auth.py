@@ -53,6 +53,22 @@ class TestExtractUpstreamClaims:
         assert result is None
         mock_log.assert_called_once_with("okta_id_token_rejected", reason="non_object_header")
 
+    async def test_non_object_payload_rejected(self, proxy: OktaOIDCProxy) -> None:
+        """Argus round 4 finding: this was the one of five security-event
+        branches in `_extract_upstream_claims` this test file (added
+        specifically to close that coverage gap) still missed -- a
+        well-formed header paired with a payload that decodes to valid
+        JSON that isn't a dict (e.g. a JSON array)."""
+        header_b64 = (
+            base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).rstrip(b"=").decode()
+        )
+        payload_b64 = base64.urlsafe_b64encode(b'["sub"]').rstrip(b"=").decode()
+        token = f"{header_b64}.{payload_b64}.sig"
+        with patch("auth.log_security_event") as mock_log:
+            result = await proxy._extract_upstream_claims({"id_token": token})
+        assert result is None
+        mock_log.assert_called_once_with("okta_id_token_rejected", reason="non_object_payload")
+
     async def test_malformed_base64_logs_decode_failed_with_error_type(
         self, proxy: OktaOIDCProxy
     ) -> None:
