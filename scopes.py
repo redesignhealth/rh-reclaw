@@ -55,6 +55,7 @@ TOOL_SCOPES: dict[str, str] = {
     "comms_invite": "comms:write",
     "comms_leave": "comms:write",
     "comms_add_task": "comms:write",
+    "comms_update_task": "comms:write",
 }
 
 

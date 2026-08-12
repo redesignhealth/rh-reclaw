@@ -618,3 +618,30 @@ async def get_tasks(
                 limit=limit,
                 cursor=cursor,
             )
+
+
+@comms_server.tool
+async def update_task(task_id: str, status: Literal["done", "declined"]) -> dict[str, Any]:
+    """Transition a task's status: ``done`` (either party) or ``declined``
+    (assignee only — the consent/refusal mechanism, terminal).
+
+    Only the task's creator or assignee may call this (uniform denial for
+    a non-party or an unknown ``task_id``). ``declined`` is further
+    restricted to the assignee. No transition out of a terminal status
+    (``done``/``declined``) is legal. ``status='open'`` is not a valid
+    target here — only ``comms_add_task`` ever writes ``open``.
+    """
+    token = _require_token()
+    sub = _require_identity(token)
+    task_uuid = _parse_uuid("task_id", task_id)
+
+    async with get_session_factory()() as session:
+        caller = await _resolve_caller_agent(session, sub)
+        async with _map_service_errors():
+            return await service.update_task(
+                session,
+                actor_sub=sub,
+                caller_agent_id=caller.id,
+                task_id=task_uuid,
+                status=status,
+            )

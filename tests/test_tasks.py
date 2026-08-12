@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from exceptions import AccessDeniedError, RateLimitExceededError
+from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
 from models import Agent, AuditLog, Task
 from schemas import PayloadValidationError
 from service import (
@@ -48,6 +48,7 @@ from service import (
     may_assign,
     register_agent,
     start_conversation,
+    update_task,
 )
 
 SERVICE_ROOT = Path(__file__).parent.parent
@@ -761,6 +762,169 @@ class TestGetTasks:
 
         after = len((await session.execute(select(AuditLog.action))).scalars().all())
         assert before == after
+
+
+# --- update_task ---------------------------------------------------------------
+
+
+class TestUpdateTask:
+    async def _open_task(self, session: AsyncSession) -> tuple[Agent, Agent, str]:
+        creator = await _register(session, "cos", owner_sub="dan-sub")
+        assignee = await _register(session, "ea", owner_sub="dan-sub")
+        client = FakeOwnershipClient(
+            {
+                creator.id: {"is_shared": False, "owners": ["dan-sub"]},
+                assignee.id: {"is_shared": False, "owners": ["dan-sub"]},
+            }
+        )
+        task = await add_task(
+            session,
+            actor_sub="cos",
+            creator_agent_id=creator.id,
+            assignee_agent_id=assignee.id,
+            task=_task_spec(),
+            ownership_client=client,
+        )
+        return creator, assignee, task["task_id"]
+
+    async def test_creator_marks_done(self, session: AsyncSession) -> None:
+        creator, _assignee, task_id = await self._open_task(session)
+        result = await update_task(
+            session,
+            actor_sub="cos",
+            caller_agent_id=creator.id,
+            task_id=uuid.UUID(task_id),
+            status="done",
+        )
+        assert result["status"] == "done"
+        assert result["role"] == "created"
+
+    async def test_assignee_marks_done(self, session: AsyncSession) -> None:
+        _creator, assignee, task_id = await self._open_task(session)
+        result = await update_task(
+            session,
+            actor_sub="ea",
+            caller_agent_id=assignee.id,
+            task_id=uuid.UUID(task_id),
+            status="done",
+        )
+        assert result["status"] == "done"
+        assert result["role"] == "assigned"
+
+    async def test_assignee_declines(self, session: AsyncSession) -> None:
+        _creator, assignee, task_id = await self._open_task(session)
+        result = await update_task(
+            session,
+            actor_sub="ea",
+            caller_agent_id=assignee.id,
+            task_id=uuid.UUID(task_id),
+            status="declined",
+        )
+        assert result["status"] == "declined"
+
+    async def test_creator_cannot_decline(self, session: AsyncSession) -> None:
+        creator, _assignee, task_id = await self._open_task(session)
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await update_task(
+                session,
+                actor_sub="cos",
+                caller_agent_id=creator.id,
+                task_id=uuid.UUID(task_id),
+                status="declined",
+            )
+        assert exc_info.value.reason == "denied.not_assignee"
+
+    async def test_non_party_denied(self, session: AsyncSession) -> None:
+        _creator, _assignee, task_id = await self._open_task(session)
+        outsider = await _register(session, "outsider", owner_sub="other-sub")
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await update_task(
+                session,
+                actor_sub="outsider",
+                caller_agent_id=outsider.id,
+                task_id=uuid.UUID(task_id),
+                status="done",
+            )
+        assert exc_info.value.reason == "denied.not_party"
+
+    async def test_unknown_task_id_denied_uniformly(self, session: AsyncSession) -> None:
+        outsider = await _register(session, "outsider", owner_sub="other-sub")
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await update_task(
+                session,
+                actor_sub="outsider",
+                caller_agent_id=outsider.id,
+                task_id=uuid.uuid4(),
+                status="done",
+            )
+        assert exc_info.value.reason == "denied.not_party"
+
+    async def test_no_transition_out_of_done(self, session: AsyncSession) -> None:
+        creator, _assignee, task_id = await self._open_task(session)
+        await update_task(
+            session,
+            actor_sub="cos",
+            caller_agent_id=creator.id,
+            task_id=uuid.UUID(task_id),
+            status="done",
+        )
+        with pytest.raises(InvalidConversationStateError):
+            await update_task(
+                session,
+                actor_sub="cos",
+                caller_agent_id=creator.id,
+                task_id=uuid.UUID(task_id),
+                status="done",
+            )
+
+    async def test_no_transition_out_of_declined(self, session: AsyncSession) -> None:
+        _creator, assignee, task_id = await self._open_task(session)
+        await update_task(
+            session,
+            actor_sub="ea",
+            caller_agent_id=assignee.id,
+            task_id=uuid.UUID(task_id),
+            status="declined",
+        )
+        with pytest.raises(InvalidConversationStateError):
+            await update_task(
+                session,
+                actor_sub="ea",
+                caller_agent_id=assignee.id,
+                task_id=uuid.UUID(task_id),
+                status="done",
+            )
+
+    async def test_invalid_status_rejected(self, session: AsyncSession) -> None:
+        creator, _assignee, task_id = await self._open_task(session)
+        with pytest.raises(ValueError, match="status must be"):
+            await update_task(
+                session,
+                actor_sub="cos",
+                caller_agent_id=creator.id,
+                task_id=uuid.UUID(task_id),
+                status="open",
+            )
+
+    async def test_audit_completeness(self, session: AsyncSession) -> None:
+        creator, _assignee, task_id = await self._open_task(session)
+        await update_task(
+            session,
+            actor_sub="cos",
+            caller_agent_id=creator.id,
+            task_id=uuid.UUID(task_id),
+            status="done",
+        )
+        actions = (
+            (
+                await session.execute(
+                    select(AuditLog.action).where(AuditLog.task_id == uuid.UUID(task_id))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert "task.update_status" in actions
 
 
 # --- Task model constraints ---------------------------------------------------

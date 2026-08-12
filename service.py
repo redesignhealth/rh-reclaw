@@ -1820,6 +1820,127 @@ async def get_tasks(
     }
 
 
+async def _find_task(session: AsyncSession, task_id: uuid.UUID) -> Task | None:
+    return (await session.execute(select(Task).where(Task.id == task_id))).scalar_one_or_none()
+
+
+async def _deny_bad_task_state(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    agent_id: uuid.UUID,
+    task_id: uuid.UUID,
+    current_status: str,
+    attempted_status: str,
+) -> NoReturn:
+    """Audit + raise the specific (non-uniform) task-status transition violation."""
+    _audit(
+        session,
+        actor_sub=actor_sub,
+        action="denied.bad_state",
+        agent_id=agent_id,
+        task_id=task_id,
+        detail={"status": current_status, "attempted_status": attempted_status},
+    )
+    await session.commit()
+    raise InvalidConversationStateError(
+        f"task cannot transition to '{attempted_status}' while its status is '{current_status}'"
+    )
+
+
+async def update_task(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    caller_agent_id: uuid.UUID,
+    task_id: uuid.UUID,
+    status: str,
+) -> dict[str, Any]:
+    """Transition a task: ``open`` -> ``done`` (either party) or ``open`` ->
+    ``declined`` (assignee only — the consent/refusal mechanism, terminal).
+
+    TECH-5099. Only the task's creator or assignee may call this (uniform
+    ``AccessDeniedError`` for a non-party or an unknown task_id — anti-
+    enumeration, identical treatment to a non-existent task). ``declined``
+    is further restricted to the assignee; the creator attempting it gets
+    the same uniform denial. No transition out of a terminal status
+    (``done``/``declined``) is legal — that is a state-machine violation
+    (``InvalidConversationStateError``, specific: the caller already knows
+    the task's current status via ``get_tasks``), not an authorization one.
+
+    Raises ``ValueError`` for a ``status`` this tool never accepts (``open``
+    is only ever written by ``add_task``; anything outside
+    ``{"done", "declined"}`` is malformed input).
+    """
+    if status not in ("done", "declined"):
+        raise ValueError(f"status must be 'done' or 'declined', got {status!r}")
+
+    task = await _find_task(session, task_id)
+    is_creator = task is not None and task.created_by == caller_agent_id
+    is_assignee = task is not None and task.assignee_id == caller_agent_id
+    if task is None or not (is_creator or is_assignee):
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.not_party",
+            agent_id=caller_agent_id,
+            task_id=task.id if task is not None else None,
+            detail={"attempted_task_id": str(task_id)},
+        )
+    if status == "declined" and not is_assignee:
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.not_assignee",
+            agent_id=caller_agent_id,
+            task_id=task.id,
+            detail={"attempted_status": status},
+        )
+    if task.status != "open":
+        await _deny_bad_task_state(
+            session,
+            actor_sub=actor_sub,
+            agent_id=caller_agent_id,
+            task_id=task.id,
+            current_status=task.status,
+            attempted_status=status,
+        )
+
+    task.status = status
+    _audit(
+        session,
+        actor_sub=actor_sub,
+        action="task.update_status",
+        agent_id=caller_agent_id,
+        task_id=task.id,
+        detail={"from": "open", "to": status},
+    )
+    await session.commit()
+    # updated_at's onupdate=text("now()") is computed server-side on the
+    # UPDATE just committed -- SQLAlchemy marks it expired regardless of
+    # expire_on_commit, so a plain attribute read would trigger an async
+    # lazy-load outside any await (MissingGreenlet). Refresh explicitly.
+    await session.refresh(task)
+
+    creator_agent = aliased(Agent)
+    assignee_agent = aliased(Agent)
+    created_by_sub, assignee_sub = (
+        await session.execute(
+            select(creator_agent.sub, assignee_agent.sub)
+            .select_from(Task)
+            .join(creator_agent, creator_agent.id == Task.created_by)
+            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
+            .where(Task.id == task.id)
+        )
+    ).one()
+    return _task_public(
+        task,
+        caller_agent_id=caller_agent_id,
+        created_by_sub=created_by_sub,
+        assignee_sub=assignee_sub,
+    )
+
+
 __all__ = [
     "CONVERSATION_TTL",
     "MAX_CONVERSATION_STARTS_PER_HOUR",
@@ -1843,4 +1964,5 @@ __all__ = [
     "post_message",
     "register_agent",
     "start_conversation",
+    "update_task",
 ]

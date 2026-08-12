@@ -165,6 +165,7 @@ explicit empty states.
 | `comms_invite` / `comms_leave` | comms:write | membership changes. `invite` adds a target as `invited` (not `active`). `leave` covers already-active members |
 | `comms_add_task` | comms:write | two-party `internal.coordination` task, either party of an admitted pair may call it (§9) |
 | `comms_get_tasks` | comms:read | paginated "visible to me" task list: caller is creator or assignee (§9) |
+| `comms_update_task` | comms:write | transitions a task `open → done`/`declined`; `declined` is assignee-only (§9) |
 
 ## 8. Security invariants
 
@@ -219,14 +220,13 @@ fail-closed scoping).
   **not** added to `CONVERSATION_TYPES` — agents cannot `start_conversation`
   of that "type"; the string exists only as this registry coordinate.
 - **Tools**: `comms_add_task` (`comms:write`, either party of an admitted
-  pair may call it — bidirectional, no reporting-lines concept) and
+  pair may call it — bidirectional, no reporting-lines concept),
   `comms_get_tasks` (`comms:read`, keyset-paginated over
   `(created_at DESC, id DESC)`, filterable by `role`(created|assigned|all) and
-  `status`).
-- **Deferred as a named follow-up**: `comms_update_task` (the `open` →
-  `done`/`declined` transition tool) — `add_task`/`get_tasks` don't need it,
-  and the transition rules (assignee-only `declined`, no transitions out of
-  `done`/`declined`) are already agreed, so it's mechanical when it lands.
+  `status`), and `comms_update_task` (`comms:write`, TECH-5099: the
+  `open → done`/`declined` transition — either party may mark `done`;
+  `declined` is assignee-only, the consent/refusal mechanism; no
+  transition out of a terminal status).
 
 ## 10. Known extensions (explicitly deferred)
 
