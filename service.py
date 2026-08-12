@@ -573,12 +573,12 @@ async def register_agent(
 
     Raises ``ValueError`` (not ``AccessDeniedError``) for malformed input --
     this is a data-validation failure, not an authorization decision (the
-    caller has not claimed a resource yet). This includes an empty or
-    over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``, an
-    empty ``sub``, an empty ``accepted_types``, an over-count
-    (``schemas.MAX_ACCEPTED_TYPES``) ``accepted_types``, and any entry
-    over-length (``schemas.MAX_ACCEPTED_TYPE_LENGTH``). NOTE: an empty
-    ``accepted_types`` previously raised ``UnknownConversationTypeError``
+    caller has not claimed a resource yet). In validation order: empty ``sub``;
+    empty or over-length (``schemas.MAX_DISPLAY_NAME_LENGTH``) ``display_name``;
+    empty ``accepted_types``; over-count (``schemas.MAX_ACCEPTED_TYPES``)
+    ``accepted_types``; or any entry over-length
+    (``schemas.MAX_ACCEPTED_TYPE_LENGTH``) within ``accepted_types``. NOTE: an
+    empty ``accepted_types`` previously raised ``UnknownConversationTypeError``
     with an empty "got unknown" list; it now raises this plain ``ValueError``
     instead (a deliberate breaking change to the ToolError shape for that one
     input -- there is no unknown value to usefully name for an empty list).
@@ -618,8 +618,7 @@ async def register_agent(
     # check, then get echoed back verbatim in UnknownConversationTypeError
     # below. Checked before computing unknown_types for the same
     # echo-bounding reason as the count check.
-    oversized = [t for t in accepted_types if len(t) > MAX_ACCEPTED_TYPE_LENGTH]
-    if oversized:
+    if any(len(t) > MAX_ACCEPTED_TYPE_LENGTH for t in accepted_types):
         raise ValueError(
             f"accepted_types entries must not exceed {MAX_ACCEPTED_TYPE_LENGTH} characters"
         )
@@ -806,6 +805,8 @@ async def start_conversation(
     initiator = await _require_active_agent(
         session, actor_sub=actor_sub, agent_id=initiator_agent_id
     )
+    if len(conversation_type) > MAX_ACCEPTED_TYPE_LENGTH:
+        raise ValueError(f"conversation_type exceeds {MAX_ACCEPTED_TYPE_LENGTH} characters")
     if conversation_type not in CONVERSATION_TYPES:
         raise UnknownConversationTypeError(
             f"unknown conversation_type {conversation_type!r} — supported: "

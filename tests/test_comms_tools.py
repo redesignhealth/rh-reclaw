@@ -380,7 +380,7 @@ class TestRegister:
                 {"display_name": "Empty Types", "accepted_types": []},
             )
 
-    async def test_register_oversized_accepted_types_generic_tool_error(
+    async def test_register_over_count_accepted_types_generic_tool_error(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         """Boundary-level counterpart to
@@ -400,6 +400,22 @@ class TestRegister:
                     "display_name": "Oversized Types",
                     "accepted_types": [f"bogus-{i}" for i in range(21)],
                 },
+            )
+
+    async def test_register_oversized_single_accepted_type_entry_generic_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Boundary test for the per-entry length cap (Argus round 3):
+        a single oversized entry (101 chars) must be rejected at the MCP
+        boundary as generic invalid_request, not echoed verbatim."""
+        token = _token("agent-oversized-entry-boundary")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {"display_name": "Entry Length Test", "accepted_types": ["x" * 101]},
             )
 
 

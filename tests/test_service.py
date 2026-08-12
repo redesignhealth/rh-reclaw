@@ -312,6 +312,16 @@ class TestRegisterAgent:
                 accepted_types=["x" * 101],
             )
 
+    async def test_accepted_type_entry_at_max_length_succeeds(self, session: AsyncSession) -> None:
+        """Boundary-value test (Argus round 3): the length-cap check passes
+        for valid types under the MAX_ACCEPTED_TYPE_LENGTH limit."""
+        agent = await _register(
+            session,
+            "agent-at-cap",
+            accepted_types=["scheduling.availability"],
+        )
+        assert agent.accepted_types == ["scheduling.availability"]
+
     async def test_empty_or_whitespace_sub_raises_plain_value_error(
         self, session: AsyncSession
     ) -> None:
