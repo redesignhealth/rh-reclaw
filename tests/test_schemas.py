@@ -389,9 +389,7 @@ class TestTaskSpecV1:
 
     def test_duplicate_constraints_rejected(self) -> None:
         with pytest.raises(ValidationError, match="duplicates"):
-            TaskSpecV1.model_validate(
-                self._valid(constraints=["mornings_only", "mornings_only"])
-            )
+            TaskSpecV1.model_validate(self._valid(constraints=["mornings_only", "mornings_only"]))
 
     def test_naive_datetime_rejected(self) -> None:
         with pytest.raises(ValidationError):

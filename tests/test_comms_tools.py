@@ -839,9 +839,7 @@ class TestTasks:
     async def test_different_owner_agents_uniformly_denied(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await _register(
-            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
-        )
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         other = await _register(
             main, test_session_factory, "someone-elses-ea", owner_sub="owner-priya@example.com"
         )
@@ -864,9 +862,7 @@ class TestTasks:
     async def test_get_tasks_visible_only_to_creator_and_assignee(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await _register(
-            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
-        )
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         assignee = await _register(
             main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
         )
@@ -905,9 +901,7 @@ class TestTasks:
     async def test_add_task_rejects_free_text_payload(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await _register(
-            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
-        )
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         assignee = await _register(
             main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
         )
@@ -928,9 +922,7 @@ class TestTasks:
     async def test_get_tasks_cursor_pages_through_tool_layer(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await _register(
-            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
-        )
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         assignee = await _register(
             main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
         )
@@ -948,9 +940,7 @@ class TestTasks:
                 },
             )
 
-        page1 = await _call(
-            main, test_session_factory, token, "comms_get_tasks", {"limit": 2}
-        )
+        page1 = await _call(main, test_session_factory, token, "comms_get_tasks", {"limit": 2})
         assert len(page1["tasks"]) == 2
         assert page1["has_more"] is True
         assert page1["next_cursor"] is not None
@@ -971,9 +961,7 @@ class TestTasks:
     async def test_get_tasks_malformed_cursor_maps_to_tool_error(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await _register(
-            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
-        )
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         token = _token("bond-007", owner_sub="owner-dan@example.com")
 
         with pytest.raises(ToolError):
