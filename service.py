@@ -1620,15 +1620,17 @@ async def add_task(
             agent_id=creator.id,
             detail={
                 "assignee_agent_id": str(assignee.id),
-                # type(exc).__name__ + a truncated str(exc), never repr(exc)
-                # (TECH-5094 Argus round 2, security): AgentTableOwnershipClient's
-                # LookupError is benign today, but a future HTTP-backed
-                # OwnershipClient's exceptions routinely embed Authorization
-                # headers, full request URLs with token query params, and raw
-                # response bodies in repr() -- those must never land in the
-                # append-only audit_log.
+                # ONLY the exception's type name — never str(exc)/repr(exc)
+                # (TECH-5094 Argus rounds 2-3, security): AgentTableOwnershipClient's
+                # LookupError carries only benign agent UUIDs today, but a
+                # future HTTP-backed OwnershipClient's exceptions routinely
+                # embed Authorization headers, full request URLs with token
+                # query params, and raw response bodies in both str() and
+                # repr() — a length-truncated str(exc) does not bound where
+                # a credential falls inside that string, so nothing but the
+                # type name is safe to persist into the append-only
+                # audit_log ahead of that swap.
                 "error_type": type(exc).__name__,
-                "error": str(exc)[:200],
             },
         )
     creator_owners = set(creator_owner_info.get("owners") or [])

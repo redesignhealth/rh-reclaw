@@ -576,7 +576,7 @@ async def add_task(
         async with _map_service_errors():
             # service.add_task returns the same canonical AXI shape
             # comms_get_tasks does for this resource (TECH-5094 Argus round
-            # 1, api contract/S5) -- one session, one service.py function
+            # 1, api contract/S5) — one session, one service.py function
             # call, per this file's module-level invariant.
             return await service.add_task(
                 session,

@@ -954,6 +954,7 @@ class TestTasks:
         )
         assert len(page2["tasks"]) == 1
         assert page2["has_more"] is False
+        assert page2["next_cursor"] is None
 
         seen_ids = {t["task_id"] for t in page1["tasks"] + page2["tasks"]}
         assert len(seen_ids) == 3
@@ -964,7 +965,7 @@ class TestTasks:
         await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
         token = _token("bond-007", owner_sub="owner-dan@example.com")
 
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError, match="invalid_request"):
             await _call(
                 main,
                 test_session_factory,

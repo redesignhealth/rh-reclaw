@@ -6,17 +6,27 @@ Create Date: 2026-08-12 00:09:33.389567
 
 NOTE on in-place amendment (mirrors migrations/versions/18f2d7735523's own
 note): this revision has been authored and iterated on entirely within
-this single unmerged PR (reclaw-comms-mcp PR #9, TECH-5094) -- it does not
+this single unmerged PR (reclaw-comms-mcp PR #9, TECH-5094) — it does not
 exist on `main`, and it has never been applied to any persistent or shared
 database. CI runs `alembic upgrade head` against a fresh, ephemeral
 Postgres service container on every run; local review testing always ran
 full `downgrade base` -> `upgrade head` cycles against the latest file
-content. In-place amendment during code review (e.g. the `idx_audit_log_
-task_id` index added in Argus round 2, rather than splitting it into a new
-revision) is therefore safe -- there is no environment where this
-revision is recorded as already-applied without that index. Once this PR
-merges, treat this file as frozen: any further schema change requires a
-NEW Alembic revision, never an edit to this one.
+content. In-place amendment during code review is therefore safe — there
+is no environment where this revision is recorded as already-applied in a
+state older than the one below. Once this PR merges, treat this file as
+frozen: any further schema change requires a NEW Alembic revision, never
+an edit to this one.
+
+Every operation below is written to be idempotent in EITHER direction
+(if_not_exists on every create, if_exists on every corresponding drop,
+raw `ADD COLUMN IF NOT EXISTS`/`DROP COLUMN IF EXISTS` SQL for the one
+column add op.add_column/op.drop_column have no such flag for) —
+belt-and-suspenders per Argus round 3's request, on top of the in-place-
+amendment rationale above, so re-running either direction against a
+partially-applied state never aborts. The two FK/CHECK constraint adds
+are the sole exception: Postgres has no `ADD CONSTRAINT IF NOT EXISTS`
+syntax at all (not a gap in this file), matching the same non-idempotent
+constraint-add precedent already set by ef8394b37c8d/18f2d7735523.
 
 """
 
@@ -76,14 +86,18 @@ def upgrade() -> None:
         unique=False,
         if_not_exists=True,
     )
+    # Descending on both columns to match get_tasks's ORDER BY created_at
+    # DESC, id DESC (newest-first pagination) — a forward scan of a DESC
+    # index serves that query directly, rather than relying on Postgres's
+    # ability to walk an ascending index backward.
     op.create_index(
         "idx_tasks_created_at_id",
         "tasks",
-        ["created_at", "id"],
+        [sa.text("created_at DESC"), sa.text("id DESC")],
         unique=False,
         if_not_exists=True,
     )
-    op.add_column("audit_log", sa.Column("task_id", sa.UUID(), nullable=True))
+    op.execute("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS task_id UUID")
     op.create_foreign_key("audit_log_task_id_fkey", "audit_log", "tasks", ["task_id"], ["id"])
     op.create_index(
         "idx_audit_log_task_id", "audit_log", ["task_id"], unique=False, if_not_exists=True
@@ -91,10 +105,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("idx_audit_log_task_id", table_name="audit_log")
+    op.drop_index("idx_audit_log_task_id", table_name="audit_log", if_exists=True)
     op.drop_constraint("audit_log_task_id_fkey", "audit_log", type_="foreignkey")
-    op.drop_column("audit_log", "task_id")
-    op.drop_index("idx_tasks_created_at_id", table_name="tasks")
-    op.drop_index("idx_tasks_created_by_status", table_name="tasks")
-    op.drop_index("idx_tasks_assignee_id_status", table_name="tasks")
+    op.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS task_id")
+    op.drop_index("idx_tasks_created_at_id", table_name="tasks", if_exists=True)
+    op.drop_index("idx_tasks_created_by_status", table_name="tasks", if_exists=True)
+    op.drop_index("idx_tasks_assignee_id_status", table_name="tasks", if_exists=True)
     op.drop_table("tasks")

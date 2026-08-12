@@ -70,7 +70,7 @@ def _created_at() -> Mapped[datetime]:
 
 
 def _updated_at() -> Mapped[datetime]:
-    # ORM-managed only (onupdate=...) -- there is no DB-level BEFORE UPDATE
+    # ORM-managed only (onupdate=...) — there is no DB-level BEFORE UPDATE
     # trigger. A raw SQL UPDATE (a bulk data-fix migration, a future
     # comms_update_task admin backfill, etc.) that bypasses the ORM will
     # NOT refresh this column. Go through the ORM for every mutation of a
@@ -205,7 +205,7 @@ class Task(Base):
         CheckConstraint("created_by <> assignee_id", name="ck_tasks_distinct_parties"),
         Index("idx_tasks_assignee_id_status", "assignee_id", "status"),
         Index("idx_tasks_created_by_status", "created_by", "status"),
-        Index("idx_tasks_created_at_id", "created_at", "id"),
+        Index("idx_tasks_created_at_id", text("created_at DESC"), text("id DESC")),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
