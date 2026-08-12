@@ -108,7 +108,13 @@ def _validate_agent_key(agent_key: str | None) -> str | None:
 
 
 def _compose_sub(base_sub: str, agent_key: str | None) -> str:
-    """Compose the full sub by combining base_sub with optional agent_key."""
+    """Compose the full sub by combining base_sub with optional agent_key.
+
+    Guards against identity collisions by rejecting any base_sub or agent_key
+    containing the '::' delimiter.
+    """
+    if "::" in base_sub:
+        raise ToolError("invalid_request: base identity cannot contain '::' delimiter")
     if agent_key is None:
         return base_sub
     return f"{base_sub}::{agent_key}"
@@ -226,18 +232,24 @@ def _iso(dt: datetime | None) -> str | None:
 
 
 @comms_server.tool
-async def whoami() -> dict[str, Any]:
+async def whoami(agent_key: str | None = None) -> dict[str, Any]:
     """Return the authenticated caller's identity, issuer, caller type, and scopes.
 
     Diagnostic tool: use it to verify that auth (Okta OIDC for humans,
     rh-auth Bearer JWT for agents) and scope enforcement are wired
     correctly. ``scopes`` is the rh-auth ``scopes`` claim for service
     callers; empty for interactive Okta callers (who bypass scope checks).
+
+    When ``agent_key`` is provided, returns the composed identity
+    (base_sub::agent_key) that will be used for agent lookups by other tools.
     """
     token = _require_token()
+    base_sub = try_resolve_email(token)
+    agent_key = _validate_agent_key(agent_key)
+    composed_sub = _compose_sub(base_sub, agent_key)
     interactive = is_interactive_token(token)
     return {
-        "identity": try_resolve_email(token),
+        "identity": composed_sub,
         "issuer": token.claims.get("iss"),
         "caller_type": "interactive" if interactive else "service",
         "scopes": scopes_for_token(token),
