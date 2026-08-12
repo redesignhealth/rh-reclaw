@@ -37,9 +37,29 @@ service/tools boundary:
 - ``RateLimitExceededError``: a sender exceeded a per-hour cap. Specific by
   design — DESIGN.md does not treat rate limiting as an enumeration risk.
 
+- ``UnknownConversationTypeError``: ``accepted_types`` (at ``comms_register``)
+  or ``conversation_type`` (at ``comms_start_conversation``) named a value
+  outside ``schemas.CONVERSATION_TYPES``. Specific and lists the valid set
+  by design: unlike ``AccessDeniedError``'s targets, ``CONVERSATION_TYPES``
+  is not per-caller secret state — it's the same fixed, small, public
+  capability list every legitimate caller needs to function at all (and
+  would otherwise have to learn by trial and error, one guess per tool
+  call). Enumerating it is not an enumeration *risk* in DESIGN.md's sense;
+  that rule is about not letting a caller infer facts about *other
+  agents/conversations*, not about hiding this service's own fixed
+  vocabulary. Contrast ``display_name``/other bare-``ValueError`` cases
+  below, which stay generic because their valid range is unbounded or
+  already stated in the tool's own docstring — there's nothing to usefully
+  enumerate.
+
 Payload/schema validation failures are NOT redefined here: they reuse
 ``schemas.PayloadValidationError`` directly, which is already a distinct,
 specific exception type.
+
+Everything else the service layer raises as a bare ``ValueError`` (empty
+``sub``/``display_name``, length/count caps, malformed UUIDs, etc.) is
+deliberately mapped to a single generic, non-leaking message at the
+tools boundary — see ``providers/comms.py``'s ``_map_service_errors``.
 """
 
 from __future__ import annotations
@@ -74,8 +94,16 @@ class RateLimitExceededError(Exception):
         self.reason = reason
 
 
+class UnknownConversationTypeError(Exception):
+    """``accepted_types``/``conversation_type`` named a value outside
+    ``schemas.CONVERSATION_TYPES``. Message is specific by design — see the
+    module docstring for why enumerating this fixed, public vocabulary is
+    not an enumeration risk."""
+
+
 __all__ = [
     "AccessDeniedError",
     "InvalidConversationStateError",
     "RateLimitExceededError",
+    "UnknownConversationTypeError",
 ]

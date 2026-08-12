@@ -45,7 +45,12 @@ from fastmcp.server.dependencies import get_access_token
 
 import service
 from db import get_session_factory
-from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
+from exceptions import (
+    AccessDeniedError,
+    InvalidConversationStateError,
+    RateLimitExceededError,
+    UnknownConversationTypeError,
+)
 from identity import try_resolve_email
 from models import Agent
 from schemas import MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
@@ -109,21 +114,26 @@ async def _map_service_errors() -> AsyncIterator[None]:
     ``AccessDeniedError``'s message is the fixed, uniform, anti-enumeration
     string (exceptions.py) and is passed through verbatim — no prefix, no
     detail, nothing that could distinguish denial causes to the caller.
-    The next three shapes are already client-safe/specific by design
-    (state-machine violations, rate limits, and payload validation are not
-    enumeration risks — see exceptions.py's module docstring), so their
-    messages pass through unwrapped too.
+    The next four shapes are already client-safe/specific by design
+    (state-machine violations, rate limits, payload validation, and
+    unknown-conversation-type are not enumeration risks — see
+    exceptions.py's module docstring), so their messages pass through
+    unwrapped too. ``UnknownConversationTypeError`` in particular lists
+    ``CONVERSATION_TYPES`` in its message on purpose: that's this
+    service's own fixed, public capability list, not per-caller secret
+    state, so naming it is not the kind of enumeration DESIGN.md's
+    anti-enumeration rule is about.
 
     A bare ``ValueError`` is different: the service layer raises it for
-    internal parameter-shape problems (e.g. an unrecognized
-    ``conversation_type``) and its message text can embed internal
-    schema/config detail (allowed-value lists, etc.). Those are not
-    client-safe, so they are mapped to a single generic, non-leaking
-    message instead of being forwarded verbatim. A bare ``RuntimeError``
-    (TECH-5099: ``service._task_with_subs``'s theoretical "task vanished
-    after its own transition committed" guard) gets the same generic
-    treatment — it signals an internal invariant violation, not anything
-    the caller did wrong, and its message can embed internal state detail.
+    internal parameter-shape problems (e.g. an empty ``display_name`` or
+    an over-length field) and its message text can embed internal
+    schema/config detail that IS not client-safe in the general case.
+    Those are mapped to a single generic, non-leaking message instead of
+    being forwarded verbatim. A bare ``RuntimeError`` (TECH-5099:
+    ``service._task_with_subs``'s theoretical "task vanished after its
+    own transition committed" guard) gets the same generic treatment —
+    it signals an internal invariant violation, not anything the caller
+    did wrong, and its message can embed internal state detail.
     """
     try:
         yield
@@ -133,6 +143,7 @@ async def _map_service_errors() -> AsyncIterator[None]:
         InvalidConversationStateError,
         RateLimitExceededError,
         PayloadValidationError,
+        UnknownConversationTypeError,
     ) as exc:
         raise ToolError(str(exc)) from None
     except (ValueError, RuntimeError):

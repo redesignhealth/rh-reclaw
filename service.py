@@ -102,7 +102,12 @@ from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
+from exceptions import (
+    AccessDeniedError,
+    InvalidConversationStateError,
+    RateLimitExceededError,
+    UnknownConversationTypeError,
+)
 from models import Agent, AuditLog, Conversation, Message, Participant, Task
 from schemas import (
     CONVERSATION_TYPES,
@@ -582,7 +587,7 @@ async def register_agent(
         raise ValueError(f"display_name exceeds {MAX_DISPLAY_NAME_LENGTH} characters")
     unknown_types = sorted(set(accepted_types) - CONVERSATION_TYPES)
     if not accepted_types or unknown_types:
-        raise ValueError(
+        raise UnknownConversationTypeError(
             "accepted_types must be a non-empty subset of "
             f"{sorted(CONVERSATION_TYPES)} (got unknown: {unknown_types})"
         )
@@ -766,7 +771,7 @@ async def start_conversation(
         session, actor_sub=actor_sub, agent_id=initiator_agent_id
     )
     if conversation_type not in CONVERSATION_TYPES:
-        raise ValueError(
+        raise UnknownConversationTypeError(
             f"unknown conversation_type {conversation_type!r} — supported: "
             f"{sorted(CONVERSATION_TYPES)}"
         )

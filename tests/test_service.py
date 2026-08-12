@@ -34,7 +34,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from exceptions import AccessDeniedError, InvalidConversationStateError, RateLimitExceededError
+from exceptions import (
+    AccessDeniedError,
+    InvalidConversationStateError,
+    RateLimitExceededError,
+    UnknownConversationTypeError,
+)
 from models import Agent, AuditLog, Participant
 from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
@@ -260,6 +265,32 @@ class TestRegisterAgent:
         )
         assert agent.accepted_types == ["scheduling.availability"]
 
+    async def test_unknown_accepted_type_raises_specific_error(self, session: AsyncSession) -> None:
+        """An ``accepted_types`` entry outside ``schemas.CONVERSATION_TYPES``
+        raises ``UnknownConversationTypeError`` (not a bare ``ValueError``),
+        with a message naming the unknown value and the actual valid set —
+        this is deliberately specific/client-safe, unlike the uniform
+        ``AccessDeniedError`` shape (see exceptions.py's module docstring)."""
+        with pytest.raises(UnknownConversationTypeError, match=r"got unknown: \['bogus'\]"):
+            await _register(
+                session,
+                "agent-unknown-type",
+                accepted_types=["bogus"],
+            )
+
+    async def test_unknown_accepted_type_mixed_with_valid_reports_only_unknown(
+        self, session: AsyncSession
+    ) -> None:
+        """A mix of one valid and one unknown type still rejects the whole
+        call (accepted_types must be entirely valid), and the error names
+        only the unknown entry, not the valid one alongside it."""
+        with pytest.raises(UnknownConversationTypeError, match=r"got unknown: \['bogus'\]"):
+            await _register(
+                session,
+                "agent-mixed-types",
+                accepted_types=["scheduling.availability", "bogus"],
+            )
+
 
 # --- start_conversation --------------------------------------------------------
 
@@ -294,6 +325,29 @@ class TestStartConversation:
             )
         ).all()
         assert [(m.seq, m.type) for m in messages] == [(1, "availability_request")]
+
+    async def test_unknown_conversation_type_raises_specific_error(
+        self, session: AsyncSession
+    ) -> None:
+        """A ``conversation_type`` outside ``schemas.CONVERSATION_TYPES``
+        raises ``UnknownConversationTypeError`` (not the uniform
+        ``AccessDeniedError``) naming the unsupported value and the actual
+        valid set — checked before any target/admission lookup, so this
+        does not depend on or reveal anything about the named targets."""
+        owner = await _register(session, "owner-unknown-type")
+        target = await _register(session, "target-unknown-type")
+
+        with pytest.raises(
+            UnknownConversationTypeError, match=r"unknown conversation_type 'bogus'"
+        ):
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="bogus",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+            )
 
     async def test_unknown_target_denied(self, session: AsyncSession) -> None:
         owner = await _register(session, "owner-2")

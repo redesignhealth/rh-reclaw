@@ -341,6 +341,26 @@ class TestRegister:
         assert result["owner_email"] != "forged@attacker.com"
         assert result["owner_email"] == "agent-forged-email"
 
+    async def test_register_unknown_accepted_type_names_valid_set_in_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Unlike a generic ``invalid_request`` ValueError, an unrecognized
+        ``accepted_types`` entry surfaces a specific ``ToolError`` naming
+        the actual valid set — a caller (e.g. an external agent probing
+        the API) does not have to guess at ``schemas.CONVERSATION_TYPES``
+        one rejected call at a time. See exceptions.py's module docstring
+        for why this is deliberately not folded into the uniform-denial
+        posture used for authorization failures."""
+        token = _token("agent-probes-valid-types")
+        with pytest.raises(ToolError, match=r"accepted_types must be a non-empty subset of"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {"display_name": "Prober", "accepted_types": ["__probe_invalid_type__"]},
+            )
+
 
 # --- AXI empty-state / shape spot checks --------------------------------------------
 
@@ -652,6 +672,31 @@ class TestRateLimitAndSchemaErrors:
         message = str(exc_info.value)
         assert "payload failed schema validation" in message
         assert message != "access_denied: not authorized for this resource"
+
+    async def test_unknown_conversation_type_error_is_specific_not_uniform(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """An unsupported ``conversation_type`` surfaces a specific
+        ``ToolError`` naming the actual valid set, the same
+        discoverability fix as ``comms_register``'s ``accepted_types``
+        (see ``TestRegister.test_register_unknown_accepted_type_names_valid_set_in_error``).
+        Checked before any target lookup, so a bogus type doesn't need a
+        real target to reproduce."""
+        await _register(main, test_session_factory, "uct-owner")
+        token_owner = _token("uct-owner")
+
+        with pytest.raises(ToolError, match=r"unknown conversation_type 'bogus'"):
+            await _call(
+                main,
+                test_session_factory,
+                token_owner,
+                "comms_start_conversation",
+                {
+                    "conversation_type": "bogus",
+                    "target_agent_ids": [str(uuid.uuid4())],
+                    "initial_message": _availability_request(),
+                },
+            )
 
     async def test_negative_since_seq_rejected(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
