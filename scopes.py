@@ -53,6 +53,8 @@ TOOL_SCOPES: dict[str, str] = {
     "comms_decline_invite": "comms:write",
     "comms_invite": "comms:write",
     "comms_leave": "comms:write",
+    "comms_get_tasks": "comms:read",
+    "comms_add_task": "comms:write",
 }
 
 

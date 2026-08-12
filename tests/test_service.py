@@ -121,7 +121,7 @@ async def _clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, messages, participants, conversations, agents "
+                "TRUNCATE TABLE audit_log, tasks, messages, participants, conversations, agents "
                 "RESTART IDENTITY CASCADE"
             )
         )

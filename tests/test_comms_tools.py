@@ -127,7 +127,7 @@ async def _clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, messages, participants, conversations, agents "
+                "TRUNCATE TABLE audit_log, tasks, messages, participants, conversations, agents "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -206,8 +206,9 @@ async def _register(
     *,
     display_name: str | None = None,
     accepted_types: list[str] | None = None,
+    owner_sub: str | None = None,
 ) -> dict[str, Any]:
-    token = _token(sub)
+    token = _token(sub, owner_sub=owner_sub)
     result: dict[str, Any] = await _call(
         main,
         test_session_factory,
@@ -790,6 +791,129 @@ class TestMembershipTools:
             )
 
 
+class TestTasks:
+    """End-to-end coverage for comms_add_task / comms_get_tasks (TECH-5094)."""
+
+    async def test_same_owner_agents_can_task_each_other(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        # Mirrors the real-world case this admission policy exists for: two
+        # of one person's agents (e.g. a Chief-of-Staff agent and an EA
+        # agent) share an owner_sub and should be admitted without any
+        # shared-agent machinery.
+        creator = await _register(
+            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+
+        result = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_add_task",
+            {
+                "assignee_agent_id": assignee["agent_id"],
+                "task": {"action": "report_status"},
+            },
+        )
+
+        assert result["status"] == "open"
+        assert result["created_by"] == creator["agent_id"]
+        assert result["assignee_agent_id"] == assignee["agent_id"]
+
+    async def test_different_owner_agents_uniformly_denied(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        other = await _register(
+            main, test_session_factory, "someone-elses-ea", owner_sub="priya@redesignhealth.com"
+        )
+        token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: conversation requires active membership")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_add_task",
+                {
+                    "assignee_agent_id": other["agent_id"],
+                    "task": {"action": "report_status"},
+                },
+            )
+
+    async def test_get_tasks_visible_only_to_creator_and_assignee(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        outsider = await _register(
+            main, test_session_factory, "outsider", owner_sub="priya@redesignhealth.com"
+        )
+        creator_token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+        assignee_token = _token("pepper-potts", owner_sub="dan.costanza@redesignhealth.com")
+        outsider_token = _token("outsider", owner_sub="priya@redesignhealth.com")
+
+        await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_add_task",
+            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+        )
+
+        creator_view = await _call(main, test_session_factory, creator_token, "comms_get_tasks")
+        assert creator_view["total_count"] == 1
+        assert creator_view["tasks"][0]["role"] == "created"
+
+        assignee_view = await _call(main, test_session_factory, assignee_token, "comms_get_tasks")
+        assert assignee_view["total_count"] == 1
+        assert assignee_view["tasks"][0]["role"] == "assigned"
+
+        outsider_view = await _call(main, test_session_factory, outsider_token, "comms_get_tasks")
+        assert outsider_view == {
+            "tasks": [],
+            "total_count": 0,
+            "has_more": False,
+            "next_cursor": None,
+        }
+        assert outsider["agent_id"]  # registered, just not a party to the task
+
+    async def test_add_task_rejects_free_text_payload(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="dan.costanza@redesignhealth.com"
+        )
+        token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_add_task",
+                {
+                    "assignee_agent_id": assignee["agent_id"],
+                    "task": {"action": "report_status", "notes": "call me back"},
+                },
+            )
+
+
 # --- Registry parity / scope enforcement still intact --------------------------------
 
 
@@ -810,6 +934,8 @@ class TestScopesUnaffected:
             "comms_decline_invite",
             "comms_invite",
             "comms_leave",
+            "comms_add_task",
+            "comms_get_tasks",
         }
         assert expected <= mounted
         assert expected <= set(TOOL_SCOPES)

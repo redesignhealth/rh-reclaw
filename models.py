@@ -46,6 +46,7 @@ AGENT_STATUSES = ("active", "suspended")
 CONVERSATION_STATES = ("active", "completed", "canceled", "expired")
 PARTICIPANT_ROLES = ("owner", "member")
 PARTICIPANT_STATUSES = ("invited", "active", "left", "declined")
+TASK_STATUSES = ("open", "done", "declined")
 
 
 class Base(DeclarativeBase):
@@ -182,6 +183,37 @@ class Message(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
+class Task(Base):
+    """A two-party coordination task between board agents (TECH-5094).
+
+    Unlike ``messages``, ``status`` mutates in place — a task is a
+    stateful entity, not an event in an append-only log (see
+    ``service.add_task``'s module-level rationale). Visibility is simply
+    "caller is ``created_by`` or ``assignee_id``" — no ``participants``-style
+    invite/accept ceremony, since a task is intrinsically two-party.
+    """
+
+    __tablename__ = "tasks"
+    __table_args__ = (
+        CheckConstraint(f"status IN {TASK_STATUSES!r}", name="ck_tasks_status"),
+        CheckConstraint("created_by <> assignee_id", name="ck_tasks_distinct_parties"),
+        Index("idx_tasks_assignee_id_status", "assignee_id", "status"),
+        Index("idx_tasks_created_by_status", "created_by", "status"),
+        Index("idx_tasks_created_at_id", "created_at", "id"),
+    )
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    assignee_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="open", server_default=text("'open'")
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+
 class AuditLog(Base):
     """Append-only audit trail: every mutation and every authorization denial."""
 
@@ -200,6 +232,7 @@ class AuditLog(Base):
         ForeignKey("conversations.id"), nullable=True
     )
     message_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("messages.id"), nullable=True)
+    task_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
 
 
@@ -208,10 +241,12 @@ __all__ = [
     "CONVERSATION_STATES",
     "PARTICIPANT_ROLES",
     "PARTICIPANT_STATUSES",
+    "TASK_STATUSES",
     "Agent",
     "AuditLog",
     "Base",
     "Conversation",
     "Message",
     "Participant",
+    "Task",
 ]
