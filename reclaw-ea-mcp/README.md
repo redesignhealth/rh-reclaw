@@ -97,6 +97,17 @@ can silently pick up the sibling project's settings instead of this project's ow
 ## Running locally
 
 ```bash
+cp .env.example .env    # fill in values; .env is gitignored
+uv run --env-file .env python main.py   # http://127.0.0.1:8081/mcp
+```
+
+`--env-file` is required (Argus round 2 finding): `main.py` has no `load_dotenv()` call and no
+`python-dotenv` dependency, so a bare `uv run python main.py` after `cp .env.example .env` would
+fail with `require_env`'s `RuntimeError` -- `.env` is not loaded automatically. `uv run
+--env-file` reads it directly, no extra dependency needed. Equivalently, without a `.env` file at
+all:
+
+```bash
 MCP_TOKEN_STORAGE_PATH=/tmp/reclaw-ea-mcp-tokens \
 OKTA_ISSUER_URL=... OKTA_CLIENT_ID=... OKTA_CLIENT_SECRET=... \
 MCP_JWT_SECRET=... RH_AUTH_SECRET=... \

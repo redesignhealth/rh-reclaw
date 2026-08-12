@@ -92,7 +92,15 @@ class OktaOIDCProxy(OIDCProxy):
                 log_security_event("okta_id_token_rejected", reason="non_object_header")
                 return None
             if str(header.get("alg", "")).lower() == "none":
-                log_security_event("okta_id_token_rejected", reason="alg_none")
+                # `severity="critical"` (Argus round 2 finding): this is an
+                # explicit signature-bypass attempt, qualitatively more
+                # adversarial than a routine scope mismatch or a malformed
+                # token -- `log_security_event` always logs at `warning`
+                # (structlog has no separate "critical" level), so this
+                # field lets a CloudWatch Metric Filter/alarm distinguish
+                # it from the other `okta_id_token_rejected` reasons below
+                # without needing a dedicated log-level-based alarm.
+                log_security_event("okta_id_token_rejected", reason="alg_none", severity="critical")
                 return None
             payload_b64 = id_token.split(".")[1]
             payload_b64 += "=" * (-len(payload_b64) % 4)
@@ -102,8 +110,13 @@ class OktaOIDCProxy(OIDCProxy):
                 return None
             claims = {k: payload[k] for k in _UPSTREAM_CLAIM_KEYS if k in payload}
             return claims or None
-        except (IndexError, json.JSONDecodeError, ValueError):
-            log_security_event("okta_id_token_rejected", reason="decode_failed")
+        except (IndexError, json.JSONDecodeError, ValueError) as exc:
+            log_security_event(
+                "okta_id_token_rejected",
+                reason="decode_failed",
+                error_type=type(exc).__name__,
+                exc_info=True,
+            )
             return None
 
     async def exchange_authorization_code(

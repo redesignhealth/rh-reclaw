@@ -492,6 +492,12 @@ def test_sweep_expired_booking_approvals_releases_ledger_and_clears_pending():
 
     assert released == [cid]
     assert cid not in alice._pending_booking_approvals
+    # Argus round 2 finding (reclaw-ea-mcp PR #6): this pop-site (expiry)
+    # was the only one of the three not also verified through the public
+    # accessor -- approve/reject are covered in
+    # test_has_pending_booking_approval_public_accessor and
+    # test_has_pending_booking_approval_false_after_rejection.
+    assert alice.has_pending_booking_approval(cid) is False
     assert alice.ledger.get(owner="alice@example.com", slot_start_utc=T0) is None
 
     # A fresh maybe_finalize call is now free to re-request the gate.

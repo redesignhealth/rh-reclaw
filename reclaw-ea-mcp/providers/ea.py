@@ -61,7 +61,6 @@ mounted name (``ea_<tool>``) in the same change.
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, time
 from typing import Annotated, Any
 
@@ -78,10 +77,9 @@ from reclaw_ea.wire import AvailabilityRequest, Modality
 from scheduler_mcp.negotiation.schema import CandidateSlot
 from scheduler_mcp.rules import InMemoryRuleStore, Rule, Situation, apply_defaults
 
-from identity import require_owner_identity
+from identity import require_owner_identity, try_resolve_email
+from observability import log_security_event
 from scopes import is_interactive_token, scopes_for_token
-
-logger = logging.getLogger(__name__)
 
 ea_server: FastMCP[Any] = FastMCP("ea")
 
@@ -93,16 +91,26 @@ ConversationId = Annotated[str, Field(min_length=1, max_length=256)]
 _CONVERSATION_NOT_FOUND = "conversation not found or not accessible"
 
 # Exceptions that reveal, by their distinct shape, whether a conversation
-# exists at all vs. exists-but-not-mine vs. exists-and-mine-but-in-the-wrong-
-# state (Argus round 1 finding: without normalizing these, a caller could
-# distinguish "unknown conversation_id" from "exists, but I'm not a
-# participant" by exception type alone -- an oracle DESIGN.md §4 requires
-# closed off, the same anti-enumeration posture reclaw-comms-mcp's own
-# uniform denials already take).
+# exists at all vs. exists-but-not-mine (Argus round 1 finding: without
+# normalizing these, a caller could distinguish "unknown conversation_id"
+# from "exists, but I'm not a participant" by exception type alone -- an
+# oracle DESIGN.md §4 requires closed off, the same anti-enumeration
+# posture reclaw-comms-mcp's own uniform denials already take).
+#
+# Deliberately NOT `ValueError` (Argus round 2 finding, correctness-
+# critical: a prior version of this tuple included it). `reclaw_ea` raises
+# bare `ValueError` for legitimate domain-state conditions unrelated to
+# conversation existence/membership -- `SlotKey.__init__` for a
+# timezone-naive datetime (ledger.py:60, a real programming bug, not a
+# caller-facing denial) and `respond_to_booking_approval`'s "no pending
+# approval" / "completion lapsed" cases (orchestrator.py:827,848, which
+# `respond_to_approval` below handles with its OWN distinct, still-safe
+# message -- see that tool). Catching `ValueError` here would silently
+# report both as "conversation not found," masking real bugs and breaking
+# `respond_to_approval`'s documented ability to distinguish its two cases.
 _CONVERSATION_ERRORS: tuple[type[Exception], ...] = (
     UnknownConversationError,
     NotAParticipantError,
-    ValueError,
 )
 
 
@@ -110,9 +118,19 @@ def _tool_error(operation: str, exc: Exception) -> ToolError:
     """Collapse a conversation-state exception into a uniform, detail-free
     `ToolError` -- the specific exception type/message is logged server-side
     only (never in the client-facing message) so a caller cannot distinguish
-    "conversation doesn't exist" from "exists but you're not in it" from
-    "exists but in the wrong state" by probing error text."""
-    logger.warning("ea tool %s rejected: %s: %s", operation, type(exc).__name__, exc, exc_info=True)
+    "conversation doesn't exist" from "exists but you're not in it" by
+    probing error text. Uses `log_security_event` (Argus round 2 finding:
+    a prior version used a bare stdlib `logger.warning`, invisible to the
+    JSON/CloudWatch pipeline just like the auth.py/main.py paths this same
+    round of fixes moved off stdlib logging -- and, as a stdlib `%s`-style
+    call, vulnerable to log-line injection via a crafted `conversation_id`
+    containing CRLF; `log_security_event` routes through structlog's
+    `JSONRenderer`, which escapes the value)."""
+    log_security_event(
+        "conversation_access_rejected",
+        operation=operation,
+        error_type=type(exc).__name__,
+    )
     return ToolError(_CONVERSATION_NOT_FOUND)
 
 
@@ -251,17 +269,30 @@ def _slot_to_dict(slot: CandidateSlot) -> dict[str, str]:
 async def whoami() -> dict[str, Any]:
     """Return the authenticated caller's identity, issuer, caller type, and
     scopes -- diagnostic tool for verifying auth/scope wiring, matching
-    reclaw-comms-mcp's `comms_whoami`. `identity` is exactly the
-    `owner_identity` every other tool attributes this caller's ledger,
-    negotiator, and approval-hold state to (Argus round 1 finding: this
-    used to return `None` for interactive callers, even though their state
-    is keyed identically to service callers')."""
+    reclaw-comms-mcp's `comms_whoami`. Never raises: a diagnostic tool that
+    fails closed on the exact failure it exists to diagnose would be
+    useless for debugging that failure.
+
+    `owner_identity` is exactly the value every other tool attributes this
+    caller's ledger, negotiator, and approval-hold state to -- `null` means
+    `require_owner_identity` would reject this token (e.g. an interactive
+    caller whose claims resolve to no usable identity), in which case
+    every OTHER `ea_*` tool will also raise for this caller. `identity` is
+    the older, best-effort field (Argus round 1 finding: it used to be the
+    only one, and returned `None` for interactive callers even when their
+    state IS keyed identically to service callers' -- kept for backwards
+    compatibility, `owner_identity` is the one to trust)."""
     token = get_access_token()
     if token is None:
         raise ToolError("no access token provided")
     interactive = is_interactive_token(token)
+    try:
+        owner_identity: str | None = require_owner_identity(token)
+    except ToolError:
+        owner_identity = None
     return {
-        "identity": require_owner_identity(token),
+        "identity": try_resolve_email(token),
+        "owner_identity": owner_identity,
         "issuer": token.claims.get("iss"),
         "caller_type": "interactive" if interactive else "service",
         "scopes": scopes_for_token(token),
@@ -310,7 +341,8 @@ async def react_to_conversation(
 
     Raises if `conversation_id` doesn't exist, or exists but this caller
     isn't a participant -- the two cases are deliberately indistinguishable
-    to the caller (see `_tool_error`)."""
+    to the caller, to prevent enumeration of which conversation IDs are
+    real vs. which ones this caller merely isn't part of."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     contexts = [c.to_slot_context() for c in my_candidates]
@@ -337,7 +369,7 @@ async def check_completion(conversation_id: ConversationId) -> dict[str, Any]:
     """Return the agreed slot for `conversation_id` if every active
     participant's latest message is a matching `Confirm`, else `None`.
     Raises if `conversation_id` doesn't exist, or exists but this caller
-    isn't a participant (see `_tool_error`)."""
+    isn't a participant -- indistinguishably, to prevent enumeration."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     try:
@@ -366,8 +398,11 @@ async def request_booking(conversation_id: ConversationId) -> dict[str, Any]:
     `booked=False, pending_approval=True` means a hold was opened;
     `ea_respond_to_approval` resolves it later. `booked=False,
     pending_approval=False` means the negotiation isn't complete yet, or
-    is already booked/pending. Raises if `conversation_id` doesn't exist,
-    or exists but this caller isn't a participant (see `_tool_error`)."""
+    is already booked/pending, OR this caller is a legitimate non-owner
+    participant (only the conversation owner can book -- see
+    `Negotiator.maybe_finalize`'s own docstring). Raises if
+    `conversation_id` doesn't exist, or exists but this caller isn't a
+    participant at all -- indistinguishably, to prevent enumeration."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -377,6 +412,23 @@ async def request_booking(conversation_id: ConversationId) -> dict[str, Any]:
         booked_slot = slot
 
     try:
+        # Argus round 2 finding, correctness-critical: `maybe_finalize`
+        # itself never raises for a caller who isn't a participant at all
+        # -- it only ever checks `board.owner_of(...) != self.identity`
+        # and returns `False`, the same as a legitimate non-owner
+        # participant's normal no-op. That made this tool a conversation-
+        # existence oracle: an unknown conversation_id raised (via
+        # `board.owner_of`'s own lookup), but a REAL conversation_id this
+        # caller merely isn't part of returned a plain `booked=False` dict
+        # -- an enumerable difference none of the other tools have. This
+        # explicit participants_of() check restores the same "unknown vs.
+        # not-mine are indistinguishable" property the other three tools
+        # already have, while still letting a genuine non-owner
+        # participant reach `maybe_finalize`'s intentional no-op below.
+        if owner_identity not in _board.participants_of(conversation_id):
+            raise NotAParticipantError(
+                f"{owner_identity!r} is not a participant in {conversation_id!r}"
+            )
         booked = negotiator.maybe_finalize(_board, conversation_id, on_book=on_book)
     except _CONVERSATION_ERRORS as exc:
         raise _tool_error("ea_request_booking", exc) from exc
@@ -399,9 +451,14 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
     back. `approved=False` releases the ledger hold and records the
     rejection for the confidence system.
 
-    Raises if there is no pending approval for `conversation_id` (already
-    resolved, never requested, or swept as expired -- TECH-5076) or if
-    `conversation_id` doesn't exist / isn't this caller's."""
+    Raises `"no pending booking approval for this conversation"` if there
+    is no pending approval (already resolved, never requested, or swept as
+    expired -- TECH-5076) -- this is a distinct, safe message: it reflects
+    only THIS caller's own local pending-approval state
+    (`_pending_booking_approvals`, keyed per owner), never board state, so
+    it cannot be used to probe whether some other conversation_id exists.
+    Also raises (with the uniform conversation-not-found message) if
+    `conversation_id` doesn't exist or isn't this caller's."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -416,6 +473,20 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         )
     except _CONVERSATION_ERRORS as exc:
         raise _tool_error("ea_respond_to_approval", exc) from exc
+    except ValueError as exc:
+        # Argus round 2 finding: `respond_to_booking_approval` raises bare
+        # `ValueError` for two LOCAL-state conditions -- "no pending
+        # approval" (orchestrator.py:827) and "completion lapsed"
+        # (orchestrator.py:848) -- neither of which reveals anything about
+        # conversation existence (both are keyed off this caller's own
+        # `_pending_booking_approvals`, never the board), so this is
+        # deliberately a SEPARATE, more specific message from
+        # `_tool_error`'s uniform one rather than folded into
+        # `_CONVERSATION_ERRORS`.
+        log_security_event(
+            "booking_approval_rejected", conversation_id=conversation_id, error_type="ValueError"
+        )
+        raise ToolError("no pending booking approval for this conversation") from exc
     return {
         "conversation_id": conversation_id,
         "booked": booked_slot is not None,

@@ -59,6 +59,14 @@ def configure_logging() -> None:
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
             structlog.processors.TimeStamper(fmt="iso"),
+            # Argus round 2 finding: without this, `exc_info=True` passed
+            # to `obs_log.warning(...)` (or `log_security_event`) produced
+            # a useless `{"exc_info": true}` field in the JSON output --
+            # the exception class and traceback were silently dropped
+            # rather than rendered. Must run BEFORE JSONRenderer so its
+            # output (a plain-text traceback under the `exception` key) is
+            # itself serialized, not left as a live exception object.
+            structlog.processors.ExceptionRenderer(),
             structlog.processors.JSONRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),

@@ -82,29 +82,51 @@ class TestWhoami:
     async def test_service_caller_reports_identity_from_sub(self, main: Any) -> None:
         result = await _call(main, _token("alice-agent"), "ea_whoami", {})
         assert result["identity"] == "alice-agent"
+        assert result["owner_identity"] == "alice-agent"
         assert result["caller_type"] == "service"
+
+    async def test_never_raises_even_when_owner_identity_unresolvable(self, main: Any) -> None:
+        """Argus round 2 finding: a diagnostic tool that fails closed on
+        the exact failure it exists to diagnose is useless. An interactive
+        token with no email/preferred_username/sub claim at all makes
+        require_owner_identity raise -- whoami must still return a result,
+        with owner_identity=None flagging the problem. (An rh-auth token
+        with a shape-invalid sub can't exercise this path: scopes_for_token
+        fails the SAME shape check, so ScopeEnforcementMiddleware rejects
+        it before the tool body ever runs -- see is_interactive_token's
+        bypass, which this token uses instead.)"""
+        token = MagicMock()
+        token.claims = {"iss": "https://example-server.internal"}
+        token.scopes = []
+        token.client_id = "unknown"
+        result = await _call(main, token, "ea_whoami", {})
+        assert result["owner_identity"] is None
+        assert result["caller_type"] == "interactive"
 
 
 class TestRequireOwnerIdentityRejectionPaths:
     """`require_owner_identity` is the primary impersonation defense for
     this service (Argus round 1 finding: previously untested through any
     mounted tool) -- these exercise it via a real tool call, not the bare
-    function."""
+    function. Uses `ea_check_completion`, not `ea_whoami` (round 2 finding:
+    `ea_whoami` deliberately never raises on an unresolvable identity, so
+    it can't be used to test the fail-closed path anymore -- every OTHER
+    tool still calls `_require_identity()` and does raise)."""
 
     async def test_email_shaped_sub_rejected(self, main: Any) -> None:
         token = _token("alice@example.com")  # rh-auth sub must never be email-shaped
         with pytest.raises(ToolError):
-            await _call(main, token, "ea_whoami", {})
+            await _call(main, token, "ea_check_completion", {"conversation_id": "conv-1"})
 
     async def test_empty_sub_rejected(self, main: Any) -> None:
         token = _token("")
         with pytest.raises(ToolError):
-            await _call(main, token, "ea_whoami", {})
+            await _call(main, token, "ea_check_completion", {"conversation_id": "conv-1"})
 
     async def test_whitespace_sub_rejected(self, main: Any) -> None:
         token = _token("   ")
         with pytest.raises(ToolError):
-            await _call(main, token, "ea_whoami", {})
+            await _call(main, token, "ea_check_completion", {"conversation_id": "conv-1"})
 
 
 class TestScopeToolRegistryParity:
@@ -150,18 +172,14 @@ class TestCrossOwnerIsolation:
         with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
             await _call(main, mallory, "ea_check_completion", {"conversation_id": cid})
 
-        # maybe_finalize short-circuits on the owner check BEFORE touching
-        # the board at all for a non-owner -- it never raises, but also
-        # never reveals anything (booked=False, pending_approval=False is
-        # indistinguishable from "not complete yet"). Different shape from
-        # the raise-based tools, same non-oracle property.
-        booking = await _call(main, mallory, "ea_request_booking", {"conversation_id": cid})
-        assert booking == {
-            "conversation_id": cid,
-            "booked": False,
-            "slot": None,
-            "pending_approval": False,
-        }
+        # ea_request_booking explicitly checks participants_of() before
+        # ever calling maybe_finalize (Argus round 2 finding, fixed): a
+        # non-participant must raise the same uniform error as the other
+        # tools, not fall through to maybe_finalize's silent
+        # non-owner-participant no-op (which is legitimate ONLY for a
+        # caller who IS a participant, just not the owner).
+        with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
+            await _call(main, mallory, "ea_request_booking", {"conversation_id": cid})
 
         with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
             await _call(
@@ -169,6 +187,37 @@ class TestCrossOwnerIsolation:
                 mallory,
                 "ea_react_to_conversation",
                 {"conversation_id": cid, "my_candidates": [_slot_context(window)]},
+            )
+
+    async def test_non_participant_cannot_respond_to_anothers_approval(self, main: Any) -> None:
+        """Argus round 2 finding: `TestCrossOwnerIsolation` omitted
+        `ea_respond_to_approval` -- the highest-privilege tool (the
+        human-in-the-loop booking gate). Mallory has no pending approval
+        for a conversation she was never part of, so this hits the
+        `ValueError` -> "no pending booking approval" path, not the
+        conversation-not-found path -- both are safe (neither reveals
+        board state), just via different messages."""
+        bob = _token("bob5-agent")
+        mallory = _token("mallory5-agent")
+        window = _window()
+
+        opened = await _call(
+            main,
+            bob,
+            "ea_negotiate",
+            {
+                "to_agent_identity": "charlie5-agent",
+                "window": window,
+                "duration_minutes": 30,
+                "modality": "video",
+                "priority": 3,
+            },
+        )
+        cid = opened["conversation_id"]
+
+        with pytest.raises(ToolError, match="no pending booking approval"):
+            await _call(
+                main, mallory, "ea_respond_to_approval", {"conversation_id": cid, "approved": True}
             )
 
     async def test_unknown_conversation_id_and_not_a_participant_raise_identically(
@@ -181,6 +230,79 @@ class TestCrossOwnerIsolation:
 
         with pytest.raises(ToolError, match=_CONVERSATION_ERROR_MESSAGE):
             await _call(main, alice, "ea_check_completion", {"conversation_id": "conv-nonexistent"})
+
+
+class TestInputValidationBoundaries:
+    """Argus round 2 finding: the round-1 constraints added to the tool
+    schemas (energy_peak pairing, conversation_id length, duration_minutes
+    and priority bounds) had no boundary-condition test coverage."""
+
+    async def test_partial_energy_peak_rejected(self, main: Any) -> None:
+        window = _window()
+        candidate = _slot_context(window)
+        candidate["energy_peak_start"] = "09:00:00"  # energy_peak_end omitted
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                _token("boundary1-agent"),
+                "ea_react_to_conversation",
+                {"conversation_id": "conv-1", "my_candidates": [candidate]},
+            )
+
+    async def test_conversation_id_over_max_length_rejected(self, main: Any) -> None:
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                _token("boundary2-agent"),
+                "ea_check_completion",
+                {"conversation_id": "x" * 257},
+            )
+
+    async def test_duration_minutes_zero_rejected(self, main: Any) -> None:
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                _token("boundary3-agent"),
+                "ea_negotiate",
+                {
+                    "to_agent_identity": "someone-agent",
+                    "window": _window(),
+                    "duration_minutes": 0,
+                    "modality": "video",
+                    "priority": 3,
+                },
+            )
+
+    async def test_duration_minutes_over_24h_rejected(self, main: Any) -> None:
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                _token("boundary4-agent"),
+                "ea_negotiate",
+                {
+                    "to_agent_identity": "someone-agent",
+                    "window": _window(),
+                    "duration_minutes": 24 * 60 + 1,
+                    "modality": "video",
+                    "priority": 3,
+                },
+            )
+
+    async def test_priority_out_of_range_rejected(self, main: Any) -> None:
+        for bad_priority in (0, 5):
+            with pytest.raises(ToolError):
+                await _call(
+                    main,
+                    _token("boundary5-agent"),
+                    "ea_negotiate",
+                    {
+                        "to_agent_identity": "someone-agent",
+                        "window": _window(),
+                        "duration_minutes": 30,
+                        "modality": "video",
+                        "priority": bad_priority,
+                    },
+                )
 
 
 class TestFullNegotiationFlow:

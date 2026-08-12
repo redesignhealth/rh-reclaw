@@ -197,8 +197,17 @@ class ObservabilityMiddleware(Middleware):
                     else:
                         upstream: dict[str, Any] = token.claims.get("upstream_claims", {})
                         email = upstream.get("email") or try_resolve_email(token)
-            except Exception:
-                log_security_event("identity_extraction_failed", tool=tool_name)
+            except Exception as exc:
+                # Argus round 2 finding: binding the exception and passing
+                # error_type/exc_info -- the prior version carried no
+                # exception detail at all (not even the type), losing
+                # exactly the information an on-call engineer would need.
+                log_security_event(
+                    "identity_extraction_failed",
+                    tool=tool_name,
+                    error_type=type(exc).__name__,
+                    exc_info=True,
+                )
             log_tool_call(
                 tool=tool_name,
                 duration_ms=duration_ms,
