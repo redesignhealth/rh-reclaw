@@ -22,6 +22,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import pytest_asyncio
@@ -330,15 +331,18 @@ class TestAddTaskAdmission:
         creator = await _register(session, "cos", owner_sub="dan-sub")
         assignee = await _register(session, "ea", owner_sub="dan-sub")
 
-        with pytest.raises(AccessDeniedError) as exc_info:
-            await add_task(
-                session,
-                actor_sub="cos",
-                creator_agent_id=creator.id,
-                assignee_agent_id=assignee.id,
-                task=_task_spec(),
-                ownership_client=FailingOwnershipClient(),
-            )
+        with patch("service.logger") as mock_logger:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await add_task(
+                    session,
+                    actor_sub="cos",
+                    creator_agent_id=creator.id,
+                    assignee_agent_id=assignee.id,
+                    task=_task_spec(),
+                    ownership_client=FailingOwnershipClient(),
+                )
+            mock_logger.error.assert_called_once()
+            assert mock_logger.error.call_args.kwargs.get("exc_info") is True
         assert exc_info.value.reason == "denied.ownership_unverified"
 
         actions = (await session.execute(select(AuditLog.action))).scalars().all()
@@ -349,7 +353,29 @@ class TestAddTaskAdmission:
             )
         ).scalar_one()
         assert detail == {"assignee_agent_id": str(assignee.id), "error_type": "RuntimeError"}
-        assert "error" not in detail
+
+    async def test_ownership_lookup_failure_on_assignee_branch_fails_closed(
+        self, session: AsyncSession
+    ) -> None:
+        """The except block covers both get_agent_owners() calls -- a
+        creator-side failure alone (the other test) doesn't exercise the
+        assignee-side call raising instead."""
+        creator = await _register(session, "cos", owner_sub="dan-sub")
+        assignee = await _register(session, "ea", owner_sub="dan-sub")
+        client = FakeOwnershipClient({creator.id: {"is_shared": False, "owners": ["dan-sub"]}})
+
+        with patch("service.logger") as mock_logger:
+            with pytest.raises(AccessDeniedError) as exc_info:
+                await add_task(
+                    session,
+                    actor_sub="cos",
+                    creator_agent_id=creator.id,
+                    assignee_agent_id=assignee.id,
+                    task=_task_spec(),
+                    ownership_client=client,
+                )
+            mock_logger.error.assert_called_once()
+        assert exc_info.value.reason == "denied.ownership_unverified"
 
     async def test_unknown_assignee_denied(self, session: AsyncSession) -> None:
         creator = await _register(session, "cos", owner_sub="dan-sub")

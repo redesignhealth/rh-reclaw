@@ -315,7 +315,7 @@ class TestSchema:
                 await conn.execute(
                     text(
                         "SELECT indexdef FROM pg_indexes "
-                        "WHERE indexname = 'idx_tasks_created_at_id'"
+                        "WHERE schemaname = 'public' AND indexname = 'idx_tasks_created_at_id'"
                     )
                 )
             ).scalar_one()
