@@ -41,7 +41,9 @@ from service import (
     MAX_TASK_CREATES_PER_HOUR,
     AgentTableOwnershipClient,
     add_task,
+    decline_invite,
     get_tasks,
+    leave,
     may_assign,
     register_agent,
     start_conversation,
@@ -452,6 +454,79 @@ class TestAddTaskPayloadValidation:
             ownership_client=client,
         )
         assert task.payload["related_conversation_id"] == str(conversation.id)
+
+    async def test_related_conversation_id_rejects_left_participant(
+        self, session: AsyncSession
+    ) -> None:
+        """A left/declined former participant must not satisfy the
+        membership check (TECH-5094 Argus round 1, authorization/B2) --
+        only a currently-active participant counts."""
+        creator, assignee, client = await self._pair(session)
+        target = await _register(session, "counterparty", owner_sub="other-sub")
+        conversation = await start_conversation(
+            session,
+            actor_sub="cos",
+            initiator_agent_id=creator.id,
+            conversation_type="scheduling.availability",
+            target_agent_ids=[target.id],
+            initial_message={
+                "window": {
+                    "start": datetime.now(UTC).isoformat(),
+                    "end": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                },
+                "duration_min": 30,
+                "modality": "video",
+                "priority": "normal",
+                "constraints": [],
+            },
+        )
+        await leave(session, actor_sub="cos", agent_id=creator.id, conversation_id=conversation.id)
+
+        with pytest.raises(PayloadValidationError):
+            await add_task(
+                session,
+                actor_sub="cos",
+                creator_agent_id=creator.id,
+                assignee_agent_id=assignee.id,
+                task=_task_spec(related_conversation_id=str(conversation.id)),
+                ownership_client=client,
+            )
+
+    async def test_related_conversation_id_rejects_declined_participant(
+        self, session: AsyncSession
+    ) -> None:
+        creator, assignee, client = await self._pair(session)
+        other = await _register(session, "other-owner-agent", owner_sub="other-sub")
+        conversation = await start_conversation(
+            session,
+            actor_sub="other-owner-agent",
+            initiator_agent_id=other.id,
+            conversation_type="scheduling.availability",
+            target_agent_ids=[creator.id],
+            initial_message={
+                "window": {
+                    "start": datetime.now(UTC).isoformat(),
+                    "end": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
+                },
+                "duration_min": 30,
+                "modality": "video",
+                "priority": "normal",
+                "constraints": [],
+            },
+        )
+        await decline_invite(
+            session, actor_sub="cos", agent_id=creator.id, conversation_id=conversation.id
+        )
+
+        with pytest.raises(PayloadValidationError):
+            await add_task(
+                session,
+                actor_sub="cos",
+                creator_agent_id=creator.id,
+                assignee_agent_id=assignee.id,
+                task=_task_spec(related_conversation_id=str(conversation.id)),
+                ownership_client=client,
+            )
 
 
 # --- add_task: rate limiting -------------------------------------------------

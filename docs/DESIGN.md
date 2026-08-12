@@ -161,6 +161,8 @@ explicit empty states.
 | `comms_accept` | comms:write | flips caller's participant status `invited → active`. Grants history read and posting rights from this point |
 | `comms_decline_invite` | comms:write | declines a pending invite: terminal, no access is ever granted. Requires caller to currently be `invited`. Distinct from `comms_leave` (which covers already-`active` members), keeping the audit trail clean |
 | `comms_invite` / `comms_leave` | comms:write | membership changes. `invite` adds a target as `invited` (not `active`). `leave` covers already-active members |
+| `comms_add_task` | comms:write | two-party `internal.coordination` task, either party of an admitted pair may call it (§9) |
+| `comms_get_tasks` | comms:read | paginated "visible to me" task list: caller is creator or assignee (§9) |
 
 ## 8. Security invariants
 
@@ -217,7 +219,7 @@ fail-closed scoping).
 - **Tools**: `comms_add_task` (`comms:write`, either party of an admitted
   pair may call it — bidirectional, no reporting-lines concept) and
   `comms_get_tasks` (`comms:read`, keyset-paginated over
-  `(created_at DESC, id)`, filterable by `role`(created|assigned|all) and
+  `(created_at DESC, id DESC)`, filterable by `role`(created|assigned|all) and
   `status`).
 - **Deferred as a named follow-up**: `comms_update_task` (the `open` →
   `done`/`declined` transition tool) — `add_task`/`get_tasks` don't need it,

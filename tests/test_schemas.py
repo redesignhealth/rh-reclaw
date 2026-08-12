@@ -409,6 +409,11 @@ class TestTaskSpecV1:
                 self._valid(counterparty_agent_ids=[str(uuid.uuid4()) for _ in range(11)])
             )
 
+    def test_duplicate_counterparty_agent_ids_rejected(self) -> None:
+        dup = str(uuid.uuid4())
+        with pytest.raises(ValidationError, match="duplicates"):
+            TaskSpecV1.model_validate(self._valid(counterparty_agent_ids=[dup, dup]))
+
     def test_registered_under_task_namespace(self) -> None:
         assert get_schema(TASK_NAMESPACE, "task_spec", 1) is TaskSpecV1
 

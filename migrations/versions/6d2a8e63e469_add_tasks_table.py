@@ -49,19 +49,35 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
-        "idx_tasks_assignee_id_status", "tasks", ["assignee_id", "status"], unique=False
+        "idx_tasks_assignee_id_status",
+        "tasks",
+        ["assignee_id", "status"],
+        unique=False,
+        if_not_exists=True,
     )
     op.create_index(
-        "idx_tasks_created_by_status", "tasks", ["created_by", "status"], unique=False
+        "idx_tasks_created_by_status",
+        "tasks",
+        ["created_by", "status"],
+        unique=False,
+        if_not_exists=True,
     )
-    op.create_index("idx_tasks_created_at_id", "tasks", ["created_at", "id"], unique=False)
+    op.create_index(
+        "idx_tasks_created_at_id",
+        "tasks",
+        ["created_at", "id"],
+        unique=False,
+        if_not_exists=True,
+    )
     op.add_column("audit_log", sa.Column("task_id", sa.UUID(), nullable=True))
-    op.create_foreign_key(
-        "audit_log_task_id_fkey", "audit_log", "tasks", ["task_id"], ["id"]
+    op.create_foreign_key("audit_log_task_id_fkey", "audit_log", "tasks", ["task_id"], ["id"])
+    op.create_index(
+        "idx_audit_log_task_id", "audit_log", ["task_id"], unique=False, if_not_exists=True
     )
 
 
 def downgrade() -> None:
+    op.drop_index("idx_audit_log_task_id", table_name="audit_log")
     op.drop_constraint("audit_log_task_id_fkey", "audit_log", type_="foreignkey")
     op.drop_column("audit_log", "task_id")
     op.drop_index("idx_tasks_created_at_id", table_name="tasks")

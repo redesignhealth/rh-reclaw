@@ -561,7 +561,7 @@ class TestFullNegotiationFlow:
 
         # Anti-enumeration: byte-identical denial message for both causes.
         assert str(invitee_exc.value) == str(outsider_exc.value)
-        assert str(invitee_exc.value) == "access_denied: conversation requires active membership"
+        assert str(invitee_exc.value) == "access_denied: not authorized for this resource"
 
         # Same uniform message reading a conversation the outsider was
         # never named on at all.
@@ -624,7 +624,7 @@ class TestRateLimitAndSchemaErrors:
             )
         message = str(exc_info.value)
         assert "rate_limited" in message
-        assert message != "access_denied: conversation requires active membership"
+        assert message != "access_denied: not authorized for this resource"
 
     async def test_schema_validation_error_is_specific_not_uniform(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
@@ -651,7 +651,7 @@ class TestRateLimitAndSchemaErrors:
             )
         message = str(exc_info.value)
         assert "payload failed schema validation" in message
-        assert message != "access_denied: conversation requires active membership"
+        assert message != "access_denied: not authorized for this resource"
 
     async def test_negative_since_seq_rejected(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
@@ -759,7 +759,7 @@ class TestMembershipTools:
         assert decline_result["status"] == "declined"
 
         with pytest.raises(
-            ToolError, match=re.escape("access_denied: conversation requires active membership")
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
         ):
             await _call(
                 main,
@@ -776,7 +776,7 @@ class TestMembershipTools:
         assert leave_result["status"] == "left"
 
         with pytest.raises(
-            ToolError, match=re.escape("access_denied: conversation requires active membership")
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
         ):
             await _call(
                 main,
@@ -802,12 +802,12 @@ class TestTasks:
         # agent) share an owner_sub and should be admitted without any
         # shared-agent machinery.
         creator = await _register(
-            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
         )
         assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
         )
-        token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
 
         result = await _call(
             main,
@@ -828,15 +828,15 @@ class TestTasks:
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         await _register(
-            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
         )
         other = await _register(
-            main, test_session_factory, "someone-elses-ea", owner_sub="priya@redesignhealth.com"
+            main, test_session_factory, "someone-elses-ea", owner_sub="owner-priya@example.com"
         )
-        token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
 
         with pytest.raises(
-            ToolError, match=re.escape("access_denied: conversation requires active membership")
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
         ):
             await _call(
                 main,
@@ -853,17 +853,17 @@ class TestTasks:
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         await _register(
-            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
         )
         assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
         )
         outsider = await _register(
-            main, test_session_factory, "outsider", owner_sub="priya@redesignhealth.com"
+            main, test_session_factory, "outsider", owner_sub="owner-priya@example.com"
         )
-        creator_token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
-        assignee_token = _token("pepper-potts", owner_sub="dan.costanza@redesignhealth.com")
-        outsider_token = _token("outsider", owner_sub="priya@redesignhealth.com")
+        creator_token = _token("bond-007", owner_sub="owner-dan@example.com")
+        assignee_token = _token("pepper-potts", owner_sub="owner-dan@example.com")
+        outsider_token = _token("outsider", owner_sub="owner-priya@example.com")
 
         await _call(
             main,
@@ -894,12 +894,12 @@ class TestTasks:
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         await _register(
-            main, test_session_factory, "bond-007", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
         )
         assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="dan.costanza@redesignhealth.com"
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
         )
-        token = _token("bond-007", owner_sub="dan.costanza@redesignhealth.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
 
         with pytest.raises(ToolError):
             await _call(

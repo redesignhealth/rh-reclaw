@@ -583,16 +583,12 @@ async def add_task(
                 ownership_client=service.AgentTableOwnershipClient(session),
                 schema_version=schema_version,
             )
-
-    return {
-        "task_id": str(new_task.id),
-        "status": new_task.status,
-        "created_by": str(new_task.created_by),
-        "assignee_agent_id": str(new_task.assignee_id),
-        "payload": new_task.payload,
-        "schema_version": new_task.schema_version,
-        "created_at": _iso(new_task.created_at),
-    }
+            # Same canonical shape comms_get_tasks returns for this resource
+            # (TECH-5094 Argus round 1, api contract/S5) -- never a
+            # narrower, hand-built dict.
+            return await service.get_task_public(
+                session, task_id=new_task.id, caller_agent_id=caller.id
+            )
 
 
 @comms_server.tool
@@ -615,11 +611,12 @@ async def get_tasks(
 
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)
-        return await service.get_tasks(
-            session,
-            caller_agent_id=caller.id,
-            role=role,
-            status=status,
-            limit=limit,
-            cursor=cursor,
-        )
+        async with _map_service_errors():
+            return await service.get_tasks(
+                session,
+                caller_agent_id=caller.id,
+                role=role,
+                status=status,
+                limit=limit,
+                cursor=cursor,
+            )

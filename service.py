@@ -528,13 +528,15 @@ async def register_agent(
     call it with owner_sub/owner_email taken from untrusted tool arguments.
 
     Idempotent: calling again with the same ``sub`` updates
-    ``display_name``/``accepted_types``/``owner_email``/``owner_sub`` in
-    place (unique on ``agents.sub``) rather than creating a duplicate row,
-    and re-marks the agent ``active`` + refreshes ``bound_at``. v1 has no
-    ownership-transfer conflict policy for re-registering under a
-    different ``owner_sub`` (single-tenant internal trust domain) — that
-    is the seam to add a conflict check if cross-owner disputes matter
-    later.
+    ``display_name``/``accepted_types``/``owner_email`` in place (unique on
+    ``agents.sub``) rather than creating a duplicate row, and re-marks the
+    agent ``active`` + refreshes ``bound_at``. ``owner_sub`` is the
+    exception: it is frozen at first registration and never overwritten by
+    a later call, even one presenting a different ``owner_sub`` — see the
+    inline comment on the re-registration branch below (TECH-5094): once
+    ``add_task``'s ``may_assign`` started reading ``owner_sub`` as an
+    admission-decision input, allowing a re-register to change it became a
+    forgeable privilege-escalation path, not just an unmodeled edge case.
 
     Raises ``ValueError`` (not ``AccessDeniedError``) for malformed input — this
     is a data-validation failure, not an authorization decision (the
@@ -577,7 +579,16 @@ async def register_agent(
         session.add(agent)
     else:
         agent = existing
-        agent.owner_sub = owner_sub
+        # owner_sub is deliberately NOT overwritten on re-registration
+        # (TECH-5094 Argus round 1, security/B1): it is now read by
+        # AgentTableOwnershipClient as the input to may_assign's admission
+        # decision, and rh-auth extra claims (including owner_sub) are
+        # caller-supplied and unverified (providers/comms.py). Allowing a
+        # re-register to overwrite it would let a caller forge a victim's
+        # owner_sub, re-register their own agent under it, and be admitted
+        # into that victim's tasks. Freezing it at first registration closes
+        # that path; owner_email carries no admission-decision weight today
+        # so it is unaffected.
         agent.owner_email = owner_email
         agent.display_name = display_name
         agent.accepted_types = normalized_types
@@ -1426,8 +1437,19 @@ class OwnershipClient(Protocol):
     "match", since either silently loosens or tightens admission depending
     on what the caller assumes. ``agents.owner_sub``/``owner_email`` must
     NEVER be read directly for this decision (single-valued columns a
-    shared agent's row cannot faithfully represent, and re-writable by
-    re-registration) — this protocol is the only sanctioned path.
+    shared agent's row cannot faithfully represent) — this protocol is
+    the only sanctioned path.
+
+    Implementations must not hold a live DB session open across their own
+    ``get_agent_owners`` call: the eventual real implementation makes an
+    external HTTP call to the reclaw platform, and holding a checked-out
+    ``AsyncSession`` (and its connection-pool slot) for the duration of
+    that round trip risks pool exhaustion under concurrency
+    (``db.py``'s ``pool_size``/``max_overflow`` are small). Construct a
+    future HTTP-backed implementation independently of any request's
+    session, not inside the ``async with get_session_factory()()`` block
+    that owns it — unlike the interim ``AgentTableOwnershipClient`` below,
+    which is a same-transaction DB read and has no such constraint.
     """
 
     async def get_agent_owners(self, agent_id: uuid.UUID) -> dict[str, Any]:
@@ -1451,6 +1473,12 @@ class AgentTableOwnershipClient:
     precisely as they should, and unrelated agents correctly do not. Swap
     this for a real platform-backed client the moment shared agents exist
     — the ``OwnershipClient`` protocol is the seam, not this class.
+
+    Safe to use as an authorization input specifically because
+    ``register_agent`` freezes ``owner_sub`` at first registration and
+    never overwrites it on re-registration (see that function) — reading
+    it here would otherwise let a caller forge a victim's ``owner_sub``
+    via a re-register call.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -1476,9 +1504,12 @@ def may_assign(creator_owners: set[str], assignee_owners: set[str]) -> bool:
     return not creator_owners.isdisjoint(assignee_owners)
 
 
-def _task_public(
+def task_public(
     task: Task, *, caller_agent_id: uuid.UUID, created_by_sub: str, assignee_sub: str
 ) -> dict[str, Any]:
+    """The one canonical AXI shape for a task — used by both ``add_task`` (via
+    ``get_task_public``) and ``get_tasks``, so the same resource never comes
+    back with two different shapes depending on which tool returned it."""
     return {
         "task_id": str(task.id),
         "role": "created" if task.created_by == caller_agent_id else "assigned",
@@ -1556,16 +1587,23 @@ async def add_task(
             detail={"assignee_agent_id": str(assignee_agent_id)},
         )
 
+    # Rate limit before the ownership lookups (not after, per
+    # start_conversation's established ordering; TECH-5094 Argus round 1,
+    # code quality/S15): once OwnershipClient is swapped for a real HTTP
+    # call to the reclaw platform, an unadmitted caller could otherwise
+    # force two external round-trips per request before ever being capped.
+    await _enforce_task_create_rate_limit(session, actor_sub=actor_sub, creator=creator)
+
     try:
         creator_owner_info = await ownership_client.get_agent_owners(creator.id)
         assignee_owner_info = await ownership_client.get_agent_owners(assignee.id)
-    except Exception:
+    except Exception as exc:
         await _deny(
             session,
             actor_sub=actor_sub,
             action="denied.ownership_unverified",
             agent_id=creator.id,
-            detail={"assignee_agent_id": str(assignee.id)},
+            detail={"assignee_agent_id": str(assignee.id), "error": repr(exc)},
         )
     creator_owners = set(creator_owner_info.get("owners") or [])
     assignee_owners = set(assignee_owner_info.get("owners") or [])
@@ -1590,8 +1628,6 @@ async def add_task(
             },
         )
 
-    await _enforce_task_create_rate_limit(session, actor_sub=actor_sub, creator=creator)
-
     try:
         normalized = validate_payload(TASK_NAMESPACE, "task_spec", schema_version, task)
     except PayloadValidationError as exc:
@@ -1607,7 +1643,11 @@ async def add_task(
     related_conversation_id = normalized.get("related_conversation_id")
     if related_conversation_id is not None:
         related = await _find_participant(session, uuid.UUID(related_conversation_id), creator.id)
-        if related is None:
+        # Must currently be active, not merely "has a participant row" —
+        # a left/declined former participant no longer belongs to the
+        # conversation (same policy _load_participant_for_read enforces
+        # for reads; TECH-5094 Argus round 1, authorization/B2).
+        if related is None or related.status != "active":
             await _deny_bad_schema(
                 session,
                 actor_sub=actor_sub,
@@ -1639,6 +1679,38 @@ async def add_task(
     )
     await session.commit()
     return new_task
+
+
+async def get_task_public(
+    session: AsyncSession, *, task_id: uuid.UUID, caller_agent_id: uuid.UUID
+) -> dict[str, Any]:
+    """``task_public``'s AXI shape for a single task, by id.
+
+    Exists so ``comms_add_task`` can return the exact same shape
+    ``comms_get_tasks`` does for the same resource, rather than hand-
+    building a narrower response (TECH-5094 Argus round 1, api contract/S5).
+    Callers only ever invoke this with a ``task_id`` they just created or
+    otherwise already know is visible to ``caller_agent_id`` — no
+    membership/visibility check here (mirroring ``task_public`` itself,
+    which also assumes its caller already authorized the read).
+    """
+    creator_agent = aliased(Agent)
+    assignee_agent = aliased(Agent)
+    row = (
+        await session.execute(
+            select(Task, creator_agent.sub, assignee_agent.sub)
+            .join(creator_agent, creator_agent.id == Task.created_by)
+            .join(assignee_agent, assignee_agent.id == Task.assignee_id)
+            .where(Task.id == task_id)
+        )
+    ).one()
+    task, created_by_sub, assignee_sub = row
+    return task_public(
+        task,
+        caller_agent_id=caller_agent_id,
+        created_by_sub=created_by_sub,
+        assignee_sub=assignee_sub,
+    )
 
 
 def _parse_task_cursor(cursor: str) -> tuple[datetime, uuid.UUID]:
@@ -1675,8 +1747,10 @@ async def get_tasks(
         role_filter = Task.assignee_id == caller_agent_id
     elif role == "created":
         role_filter = Task.created_by == caller_agent_id
-    else:
+    elif role == "all":
         role_filter = or_(Task.assignee_id == caller_agent_id, Task.created_by == caller_agent_id)
+    else:
+        raise ValueError(f"invalid role {role!r} — expected 'assigned', 'created', or 'all'")
 
     creator_agent = aliased(Agent)
     assignee_agent = aliased(Agent)
@@ -1701,7 +1775,7 @@ async def get_tasks(
     total_count = (await session.execute(count_stmt)).scalar_one()
 
     tasks = [
-        _task_public(
+        task_public(
             t,
             caller_agent_id=caller_agent_id,
             created_by_sub=created_by_sub,
@@ -1733,6 +1807,7 @@ __all__ = [
     "decline_invite",
     "get_agent_by_sub",
     "get_conversation",
+    "get_task_public",
     "get_tasks",
     "inbox",
     "invite",
@@ -1744,4 +1819,5 @@ __all__ = [
     "post_message",
     "register_agent",
     "start_conversation",
+    "task_public",
 ]

@@ -70,6 +70,12 @@ def _created_at() -> Mapped[datetime]:
 
 
 def _updated_at() -> Mapped[datetime]:
+    # ORM-managed only (onupdate=...) -- there is no DB-level BEFORE UPDATE
+    # trigger. A raw SQL UPDATE (a bulk data-fix migration, a future
+    # comms_update_task admin backfill, etc.) that bypasses the ORM will
+    # NOT refresh this column. Go through the ORM for every mutation of a
+    # row using this helper (Task, most notably, once its status becomes
+    # mutable) or this timestamp goes stale silently.
     return mapped_column(nullable=False, server_default=text("now()"), onupdate=text("now()"))
 
 

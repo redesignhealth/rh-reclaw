@@ -274,6 +274,12 @@ class TaskSpecV1(_StrictModel):
         return self
 
     @model_validator(mode="after")
+    def _no_duplicate_counterparty_agent_ids(self) -> TaskSpecV1:
+        if len(set(self.counterparty_agent_ids)) != len(self.counterparty_agent_ids):
+            raise ValueError("counterparty_agent_ids must not contain duplicates")
+        return self
+
+    @model_validator(mode="after")
     def _required_fields_for_action(self) -> TaskSpecV1:
         if self.action in _TASK_ACTIONS_REQUIRING_WINDOW_AND_DURATION:
             if self.window is None or self.duration_min is None:
