@@ -97,12 +97,17 @@ def _validate_agent_key(agent_key: str | None) -> str | None:
     # Reject control characters (null, newline, tab, etc.)
     for i, char in enumerate(agent_key):
         if ord(char) < 32 or ord(char) == 127:  # ASCII control chars + DEL
-            raise ToolError(f"invalid_request: agent_key contains invalid control character at position {i}")
+            msg = f"invalid_request: agent_key contains invalid control character at position {i}"
+            raise ToolError(msg)
 
     # Strict allowlist: alphanumeric, dot, underscore, hyphen
     import re
     if not re.match(r'^[A-Za-z0-9._-]+$', agent_key):
-        raise ToolError("invalid_request: agent_key must contain only alphanumeric characters, dots, underscores, or hyphens")
+        msg = (
+            "invalid_request: agent_key must contain only alphanumeric"
+            " characters, dots, underscores, or hyphens"
+        )
+        raise ToolError(msg)
 
     return agent_key
 
