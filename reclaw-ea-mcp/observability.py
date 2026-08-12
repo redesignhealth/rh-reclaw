@@ -7,8 +7,16 @@ CloudWatch. The event schema matches the MCP fleet's shared
 CloudWatch Metric Filters and Logs Insights queries written for rh-mcp /
 rh-google-mcp / reclaw-comms-mcp (``$.event = "tool_call"``,
 ``$.event = "scope_denial"``, ...) work unchanged against this service.
-Identical to reclaw-comms-mcp's own copy one directory up except for
-``SERVICE_NAME`` -- see that module's docstring for the full event schema.
+Started as an identical copy of reclaw-comms-mcp's own observability.py one
+directory up (same ``SERVICE_NAME``-only difference at first), but has
+since diverged (Argus round 3 finding: the docstring claiming otherwise
+went stale) -- this module additionally has ``structlog.processors.
+ExceptionRenderer()`` in the processor chain (so ``exc_info=True`` actually
+renders a traceback instead of a bare ``{"exc_info": true}``) and
+``log_security_event``, a general-purpose helper the sibling doesn't have.
+See reclaw-comms-mcp/observability.py's docstring for the base event
+schema (``tool_call``, ``auth_flow``, ``auth_rejected``, ``scope_denial``,
+``user_active``), which both files still share.
 """
 
 from __future__ import annotations
@@ -203,6 +211,19 @@ def log_security_event(event: str, **fields: Any) -> None:
     every stdlib ``logger.*`` call. This is exactly the class of event
     most likely to matter during an incident, so it must flow through the
     same JSON pipeline as every other observability event in this module.
+
+    ``exc_info=True`` (Argus round 3 finding, documented) only renders a
+    traceback if this is called from inside an active ``except`` block --
+    called elsewhere, structlog has no exception to capture and the field
+    is silently omitted, not an error.
+
+    ``severity`` is an optional, free-form field some callers pass (e.g.
+    ``severity="critical"`` for an explicit signature-bypass attempt in
+    auth.py) to let a downstream CloudWatch Metric Filter distinguish an
+    especially adversarial event from a routine one of the same ``event``
+    name -- structlog itself has no level between ``warning`` and
+    ``error`` for that distinction. Inert until a corresponding
+    filter/alarm is actually configured; not yet wired up anywhere.
     """
     try:
         obs_log.warning(event, **fields)

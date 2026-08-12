@@ -111,11 +111,16 @@ class OktaOIDCProxy(OIDCProxy):
             claims = {k: payload[k] for k in _UPSTREAM_CLAIM_KEYS if k in payload}
             return claims or None
         except (IndexError, json.JSONDecodeError, ValueError) as exc:
+            # Argus round 3 finding: no `exc_info=True` here, unlike other
+            # log_security_event call sites -- `JSONDecodeError.doc` holds
+            # the raw (attacker-controlled) decoded token payload that
+            # failed to parse; today's ExceptionRenderer only formats a
+            # traceback string and doesn't dump exception attributes, but
+            # that safety is implicit in the current renderer, not a
+            # property of this call site. `error_type` alone is enough to
+            # distinguish this failure mode without depending on it.
             log_security_event(
-                "okta_id_token_rejected",
-                reason="decode_failed",
-                error_type=type(exc).__name__,
-                exc_info=True,
+                "okta_id_token_rejected", reason="decode_failed", error_type=type(exc).__name__
             )
             return None
 

@@ -116,8 +116,8 @@ _CONVERSATION_ERRORS: tuple[type[Exception], ...] = (
 
 def _tool_error(operation: str, exc: Exception) -> ToolError:
     """Collapse a conversation-state exception into a uniform, detail-free
-    `ToolError` -- the specific exception type/message is logged server-side
-    only (never in the client-facing message) so a caller cannot distinguish
+    `ToolError` -- the specific exception TYPE is logged server-side only
+    (never in the client-facing message) so a caller cannot distinguish
     "conversation doesn't exist" from "exists but you're not in it" by
     probing error text. Uses `log_security_event` (Argus round 2 finding:
     a prior version used a bare stdlib `logger.warning`, invisible to the
@@ -125,7 +125,18 @@ def _tool_error(operation: str, exc: Exception) -> ToolError:
     round of fixes moved off stdlib logging -- and, as a stdlib `%s`-style
     call, vulnerable to log-line injection via a crafted `conversation_id`
     containing CRLF; `log_security_event` routes through structlog's
-    `JSONRenderer`, which escapes the value)."""
+    `JSONRenderer`, which escapes the value).
+
+    Argus round 3 finding, corrected: this docstring previously claimed
+    the exception's MESSAGE is also logged server-side -- it isn't, only
+    `type(exc).__name__` (`error_type` below). `UnknownConversationError`/
+    `NotAParticipantError`'s messages both embed the raw `conversation_id`
+    (fake_board.py), and logging that would be no worse for anti-
+    enumeration than `operation` already is (both are caller-controlled,
+    already-known-to-the-caller inputs, not secrets), but it isn't
+    currently done -- if a future incident needs the specific
+    conversation_id, add it explicitly rather than assuming it's already
+    captured here."""
     log_security_event(
         "conversation_access_rejected",
         operation=operation,
@@ -455,10 +466,12 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
     is no pending approval (already resolved, never requested, or swept as
     expired -- TECH-5076) -- this is a distinct, safe message: it reflects
     only THIS caller's own local pending-approval state
-    (`_pending_booking_approvals`, keyed per owner), never board state, so
-    it cannot be used to probe whether some other conversation_id exists.
-    Also raises (with the uniform conversation-not-found message) if
-    `conversation_id` doesn't exist or isn't this caller's."""
+    (`has_pending_booking_approval`, keyed per owner), never board state,
+    so it cannot be used to probe whether some other conversation_id
+    exists. Also raises (with the uniform conversation-not-found message)
+    if `conversation_id` doesn't exist or isn't this caller's, and
+    propagates any other error uncaught -- see this function's own
+    implementation comment for why that's the safe default here."""
     owner_identity = _require_identity()
     negotiator = _negotiator_for(owner_identity)
     booked_slot: CandidateSlot | None = None
@@ -467,26 +480,31 @@ async def respond_to_approval(conversation_id: ConversationId, approved: bool) -
         nonlocal booked_slot
         booked_slot = slot
 
+    # Argus round 2 finding, corrected in round 3: a bare `except
+    # ValueError` here both conflated `respond_to_booking_approval`'s two
+    # distinct raise sites (no-pending-approval vs. completion-lapsed,
+    # orchestrator.py:827,848) under the SAME wrong "no pending approval"
+    # message, and could silently mask an unrelated ValueError from
+    # somewhere deeper in the call stack (e.g. a genuine validation bug in
+    # `outcomes.OwnerResponseOutcome`) as if it were routine. Checking
+    # `has_pending_booking_approval` explicitly, BEFORE calling into the
+    # library, handles the no-pending-approval case accurately without
+    # needing to interpret an exception at all. Nothing else is caught
+    # here: if `respond_to_booking_approval` still raises (the
+    # completion-lapsed case, or a genuine bug), it propagates uncaught --
+    # safe to do because this caller's ownership of `conversation_id` is
+    # already established by the `has_pending_booking_approval` check
+    # above (only the owner's own Negotiator can have a pending approval
+    # for it), so nothing about board state or existence leaks either way.
+    if not negotiator.has_pending_booking_approval(conversation_id):
+        raise ToolError("no pending booking approval for this conversation")
+
     try:
         negotiator.respond_to_booking_approval(
             _board, conversation_id, approved=approved, on_book=on_book
         )
     except _CONVERSATION_ERRORS as exc:
         raise _tool_error("ea_respond_to_approval", exc) from exc
-    except ValueError as exc:
-        # Argus round 2 finding: `respond_to_booking_approval` raises bare
-        # `ValueError` for two LOCAL-state conditions -- "no pending
-        # approval" (orchestrator.py:827) and "completion lapsed"
-        # (orchestrator.py:848) -- neither of which reveals anything about
-        # conversation existence (both are keyed off this caller's own
-        # `_pending_booking_approvals`, never the board), so this is
-        # deliberately a SEPARATE, more specific message from
-        # `_tool_error`'s uniform one rather than folded into
-        # `_CONVERSATION_ERRORS`.
-        log_security_event(
-            "booking_approval_rejected", conversation_id=conversation_id, error_type="ValueError"
-        )
-        raise ToolError("no pending booking approval for this conversation") from exc
     return {
         "conversation_id": conversation_id,
         "booked": booked_slot is not None,

@@ -101,11 +101,13 @@ cp .env.example .env    # fill in values; .env is gitignored
 uv run --env-file .env python main.py   # http://127.0.0.1:8081/mcp
 ```
 
-`--env-file` is required (Argus round 2 finding): `main.py` has no `load_dotenv()` call and no
-`python-dotenv` dependency, so a bare `uv run python main.py` after `cp .env.example .env` would
-fail with `require_env`'s `RuntimeError` -- `.env` is not loaded automatically. `uv run
---env-file` reads it directly, no extra dependency needed. Equivalently, without a `.env` file at
-all:
+`--env-file` is required (Argus round 2/3 findings): `main.py` never calls `load_dotenv()`, so a
+bare `uv run python main.py` after `cp .env.example .env` would fail with `require_env`'s
+`RuntimeError` -- `.env` is not loaded automatically just because it exists (`python-dotenv` is
+present as a *transitive* dependency in the lockfile, pulled in by something else -- it is not
+imported or used anywhere in this service, so its presence doesn't help). `uv run --env-file`
+reads the file directly at the process level, no extra dependency needed. Equivalently, without a
+`.env` file at all:
 
 ```bash
 MCP_TOKEN_STORAGE_PATH=/tmp/reclaw-ea-mcp-tokens \
