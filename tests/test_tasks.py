@@ -789,6 +789,11 @@ class TestUpdateTask:
 
     async def test_creator_marks_done(self, session: AsyncSession) -> None:
         creator, _assignee, task_id = await self._open_task(session)
+        # >= against created_at would be a no-op guard here (a stale value
+        # would still satisfy it); compare against a real pre-transition
+        # read instead (TECH-5099 Argus round 2).
+        before = (await get_tasks(session, caller_agent_id=creator.id))["tasks"][0]["updated_at"]
+
         result = await update_task(
             session,
             actor_sub="cos",
@@ -798,10 +803,7 @@ class TestUpdateTask:
         )
         assert result["status"] == "done"
         assert result["role"] == "created"
-        # updated_at must reflect the transition just committed, not a
-        # stale/expired ORM attribute (TECH-5099 Argus round 1: guards the
-        # refresh _task_with_subs performs as a side effect of its SELECT).
-        assert result["updated_at"] >= result["created_at"]
+        assert result["updated_at"] > before
 
     async def test_assignee_marks_done(self, session: AsyncSession) -> None:
         _creator, assignee, task_id = await self._open_task(session)
@@ -869,6 +871,7 @@ class TestUpdateTask:
                 status="declined",
             )
         assert exc_info.value.reason == "denied.not_party"
+        assert "denied.not_party" in await _audit_actions(session, uuid.UUID(task_id))
 
     async def test_non_party_denied_uniformly_even_on_terminal_task(
         self, session: AsyncSession
@@ -895,6 +898,48 @@ class TestUpdateTask:
                 status="done",
             )
         assert exc_info.value.reason == "denied.not_party"
+        assert "denied.not_party" in await _audit_actions(session, uuid.UUID(task_id))
+
+    async def test_party_on_terminal_task_gets_bad_state_not_not_assignee(
+        self, session: AsyncSession
+    ) -> None:
+        """Concrete regression for the round-2 guard-ordering bug: a party
+        (here, the creator) hitting an already-terminal task with
+        status='declined' must get InvalidConversationStateError, never
+        AccessDeniedError('denied.not_assignee') -- the terminal-state
+        check must fire before the assignee-only restriction, for every
+        party, not just the assignee."""
+        creator, assignee, task_id = await self._open_task(session)
+        await update_task(
+            session,
+            actor_sub="ea",
+            caller_agent_id=assignee.id,
+            task_id=uuid.UUID(task_id),
+            status="done",
+        )
+        with pytest.raises(InvalidConversationStateError):
+            await update_task(
+                session,
+                actor_sub="cos",
+                caller_agent_id=creator.id,
+                task_id=uuid.UUID(task_id),
+                status="declined",
+            )
+
+    async def test_suspended_agent_denied(self, session: AsyncSession) -> None:
+        creator, _assignee, task_id = await self._open_task(session)
+        creator.status = "suspended"
+        await session.commit()
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await update_task(
+                session,
+                actor_sub="cos",
+                caller_agent_id=creator.id,
+                task_id=uuid.UUID(task_id),
+                status="done",
+            )
+        assert exc_info.value.reason == "denied.unknown_agent"
 
     async def test_unknown_task_id_denied_uniformly(self, session: AsyncSession) -> None:
         outsider = await _register(session, "outsider", owner_sub="other-sub")

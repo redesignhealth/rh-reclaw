@@ -85,8 +85,9 @@ though the client sees one uniform message), ``denied.unknown_agent``,
 ``denied.bad_state`` (state-machine violation — conversation *or*, since
 TECH-5099, task-status), ``denied.bad_schema`` (payload validation),
 ``denied.rate_limited``, ``denied.not_party`` (caller is neither a task's
-creator nor its assignee — the task-domain analog of ``denied.not_member``),
-and ``denied.not_assignee`` (a non-assignee attempted the assignee-only
+creator nor its assignee, or the task does not exist — uniform anti-
+enumeration, the task-domain analog of ``denied.not_member``), and
+``denied.not_assignee`` (a non-assignee attempted the assignee-only
 ``declined`` transition).
 """
 
@@ -354,8 +355,9 @@ async def _require_active_agent(
     """Resolve ``agent_id`` to its board-ACTIVE ``Agent``, or deny (uniform).
 
     Used on the *initiating* side of writes (starting a conversation,
-    inviting, posting) — see the module docstring's judgment-call note on
-    why this check is deliberately skipped for accept/decline/leave.
+    inviting, posting, ``update_task``) — see the module docstring's
+    judgment-call note on why this check is deliberately skipped for
+    accept/decline/leave.
     """
     agent = await _find_agent_by_id(session, agent_id)
     if agent is None or agent.status != "active":
@@ -1825,9 +1827,11 @@ async def get_tasks(
     }
 
 
-async def _find_task(
-    session: AsyncSession, task_id: uuid.UUID, *, for_update: bool = False
-) -> Task | None:
+async def _find_task(session: AsyncSession, task_id: uuid.UUID, *, for_update: bool) -> Task | None:
+    """No default for ``for_update``: its only call site (``update_task``)
+    always needs the row lock (see that function's comment), so a default
+    would be dead configurability suggesting an unlocked path is exercised
+    somewhere — it isn't."""
     stmt = select(Task).where(Task.id == task_id)
     if for_update:
         stmt = stmt.with_for_update()
@@ -1846,14 +1850,22 @@ async def _task_with_subs(session: AsyncSession, task_id: uuid.UUID) -> tuple[Ta
     """
     creator_agent = aliased(Agent)
     assignee_agent = aliased(Agent)
-    task, created_by_sub, assignee_sub = (
+    row = (
         await session.execute(
             select(Task, creator_agent.sub, assignee_agent.sub)
             .join(creator_agent, creator_agent.id == Task.created_by)
             .join(assignee_agent, assignee_agent.id == Task.assignee_id)
             .where(Task.id == task_id)
         )
-    ).one()
+    ).one_or_none()
+    if row is None:
+        # No deletion endpoint exists as of TECH-5099, so this is
+        # unreachable today -- an explicit RuntimeError beats letting
+        # NoResultFound propagate as an unexplained 500 for whoever hits
+        # it first if that ever changes; the caller's transition already
+        # committed successfully by the time this runs.
+        raise RuntimeError(f"task {task_id} vanished after its own status transition committed")
+    task, created_by_sub, assignee_sub = row
     return task, created_by_sub, assignee_sub
 
 
@@ -1931,15 +1943,11 @@ async def update_task(
             task_id=task.id if task is not None else None,
             detail={"attempted_task_id": str(task_id)},
         )
-    if status == "declined" and not is_assignee:
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.not_assignee",
-            agent_id=caller_agent_id,
-            task_id=task.id,
-            detail={"attempted_status": status},
-        )
+    # Terminal-state check before the assignee-only restriction (TECH-5099
+    # Argus round 2): a party on an already-terminal task must get the
+    # specific InvalidConversationStateError regardless of role, not
+    # denied.not_assignee — role-eligibility for a status value is moot
+    # once no transition is legal at all.
     if task.status != "open":
         await _deny_bad_task_state(
             session,
@@ -1948,6 +1956,15 @@ async def update_task(
             task_id=task.id,
             current_status=task.status,
             attempted_status=status,
+        )
+    if status == "declined" and not is_assignee:
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.not_assignee",
+            agent_id=caller_agent_id,
+            task_id=task.id,
+            detail={"attempted_status": status},
         )
 
     task.status = status

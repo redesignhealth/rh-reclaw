@@ -228,7 +228,9 @@ fail-closed scoping).
   `declined` is assignee-only, the consent/refusal mechanism; no
   transition out of a terminal status). Denials: `denied.not_party`
   (caller is neither creator nor assignee, or the task doesn't exist —
-  uniform) and `denied.not_assignee` (non-assignee attempted `declined`).
+  uniform), `denied.not_assignee` (non-assignee attempted `declined`),
+  `denied.bad_state` (terminal-status re-transition), and
+  `denied.unknown_agent` (caller's board agent is suspended/revoked).
 
 ## 10. Known extensions (explicitly deferred)
 
