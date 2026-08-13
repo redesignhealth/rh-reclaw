@@ -47,6 +47,31 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # Pre-flight guard, run FIRST (before any schema change below): this
+    # drop is unconditional and the table's data is unrecoverable (see
+    # downgrade()'s warning) -- if the table exists at all, refuse to
+    # proceed unless it's already empty, rather than silently destroying
+    # any task rows a real deployment might still hold. Postgres DDL is
+    # transactional, so a RAISE EXCEPTION here rolls back the whole
+    # migration regardless of statement order -- placing it first is belt
+    # and suspenders against a future non-transactional statement being
+    # added ahead of it. Schema-qualified (public.tasks) so a `tasks`
+    # table in a different schema on this connection's search_path can't
+    # be found by the catalog check and then silently miss on the row
+    # check (or vice versa).
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF to_regclass('public.tasks') IS NOT NULL
+                AND EXISTS (SELECT 1 FROM public.tasks LIMIT 1)
+            THEN
+                RAISE EXCEPTION
+                    'tasks table is not empty -- confirm zero rows before running this migration';
+            END IF;
+        END $$;
+        """
+    )
     op.drop_index("idx_tasks_assignee_id_status", table_name="tasks", if_exists=True)
     op.drop_index("idx_tasks_created_at_id", table_name="tasks", if_exists=True)
     op.drop_index("idx_tasks_created_by_status", table_name="tasks", if_exists=True)
@@ -56,23 +81,6 @@ def upgrade() -> None:
     # 6d2a8e63e469 was never applied (e.g. a fresh dev environment).
     op.execute("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_task_id_fkey")
     op.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS task_id")
-    # Pre-flight guard: this drop is unconditional and the table's data is
-    # unrecoverable (see downgrade()'s warning) -- if the table exists at
-    # all, refuse to proceed unless it's already empty, rather than
-    # silently destroying any task rows a real deployment might still hold.
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'tasks')
-                AND EXISTS (SELECT 1 FROM tasks LIMIT 1)
-            THEN
-                RAISE EXCEPTION
-                    'tasks table is not empty -- confirm zero rows before running this migration';
-            END IF;
-        END $$;
-        """
-    )
     op.execute("DROP TABLE IF EXISTS tasks")
 
 

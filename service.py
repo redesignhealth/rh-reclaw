@@ -810,9 +810,20 @@ async def list_conversations(
     has_more = len(rows) > limit
     rows = rows[:limit]
 
+    def _summary(c: Conversation) -> dict[str, Any]:
+        # list_conversations deliberately skips _maybe_expire per-row (see
+        # the state="active"/"expired" filter above) -- reconcile the
+        # projected "state" the same way, so a caller filtering on
+        # state="expired" doesn't get back JSON objects that still say
+        # "active".
+        summary = _conversation_dict(c)
+        if c.state == "active" and c.expires_at <= _now():
+            summary["state"] = "expired"
+        return summary
+
     next_cursor = f"{rows[-1].created_at.isoformat()}|{rows[-1].id}" if has_more and rows else None
     return {
-        "conversations": [_conversation_dict(c) for c in rows],
+        "conversations": [_summary(c) for c in rows],
         "has_more": has_more,
         "next_cursor": next_cursor,
     }
@@ -1124,21 +1135,24 @@ async def start_conversation(
     # A terminal type as the OPENING message must apply the same
     # state-transition post_message applies for every later message --
     # otherwise the conversation is left "active" forever while its only
-    # message is already terminal. "decline"'s cascade needs no handling
-    # here: at creation zero participants have declined yet, so it's
-    # always a no-op transition regardless.
-    if message_type in ("confirm", "task_complete", "task_decline", "task_cancel"):
-        new_state = resulting_conversation_state(message_type)
-        if new_state is not None:
-            conversation.state = new_state
-            _audit(
-                session,
-                actor_sub=actor_sub,
-                action="conversation.close",
-                agent_id=initiator.id,
-                conversation_id=conversation.id,
-                detail={"new_state": new_state, "via": message_type},
-            )
+    # message is already terminal. Calling resulting_conversation_state
+    # directly (rather than a hardcoded terminal-type tuple) keeps this in
+    # sync with post_message's own equivalent branch by construction --
+    # "decline"'s all_non_owners_declined-gated cascade is the one type
+    # this intentionally can't reach here (it needs the kwarg this call
+    # omits), which is fine: at creation zero participants have declined
+    # yet, so it would always resolve to a no-op transition regardless.
+    new_state = resulting_conversation_state(message_type)
+    if new_state is not None:
+        conversation.state = new_state
+        _audit(
+            session,
+            actor_sub=actor_sub,
+            action="conversation.close",
+            agent_id=initiator.id,
+            conversation_id=conversation.id,
+            detail={"new_state": new_state, "via": message_type},
+        )
 
     await session.commit()
     return conversation
@@ -1157,7 +1171,17 @@ async def accept_invite(
     conversation; any other state (not a participant at all, already
     ``active``, ``left``, or ``declined``) raises the uniform
     ``AccessDeniedError`` — see the module docstring's audit contract for how
-    the audit trail still distinguishes each cause.
+    the audit trail still distinguishes each cause. Also denied if the
+    conversation has already reached a terminal state (``completed``/
+    ``canceled`` — e.g. a terminal opening message closed it before this
+    invite was accepted): accepting there would leave the caller
+    permanently unable to post (``is_message_legal`` requires ``active``),
+    a zombie state worse than the uniform denial. ``expired`` is
+    deliberately NOT included here: unlike a terminal message's definitive
+    close, expiry racing an in-flight accept is an ordinary, tolerated
+    outcome (a participant may still accept an invite that expired after
+    it was sent — they simply can't post afterward, same as any other
+    already-``active`` member of an expired conversation).
     """
     conversation, participant = await _load_participant_for_transition(
         session,
@@ -1166,6 +1190,14 @@ async def accept_invite(
         conversation_id=conversation_id,
         required_status="invited",
     )
+    if conversation.state in ("completed", "canceled"):
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action=f"denied.wrong_state.{conversation.state}",
+            agent_id=agent_id,
+            conversation_id=conversation.id,
+        )
     participant.status = "active"
     participant.joined_at = _now()
     _audit(
@@ -1530,10 +1562,20 @@ async def _enforce_boundary_crossing(
                 detail={"message_type": message_type},
             )
     if not is_boundary_crossing_safe(conversation_type, boundary_safe, sender_owners, other_owners):
+        # Distinct label for an unrecognized conversation_type (e.g. a
+        # legacy pre-rename row) hitting is_boundary_crossing_safe's
+        # default-deny path — this is a migration/data-integrity gap, not
+        # an actual ownership-boundary crossing, and debugging it as the
+        # latter would be misleading.
+        action = (
+            "denied.unknown_conversation_type"
+            if conversation_type not in CONVERSATION_TYPES
+            else "denied.boundary_crossing"
+        )
         await _deny(
             session,
             actor_sub=actor_sub,
-            action="denied.boundary_crossing",
+            action=action,
             agent_id=sender_agent_id,
             conversation_id=conversation_id,
             detail={

@@ -116,6 +116,10 @@ def is_boundary_crossing_safe(
       agent crosses (the shared agent has owners outside the sender's); a
       shared agent posting to a single-owner agent does not (that owner is
       already among the sender's).
+    - Any other (unrecognized) ``conversation_type`` — e.g. a pre-rename
+      legacy row this function doesn't know about — is default-deny:
+      returns ``False`` unconditionally, never falling through to
+      ``asymmetric``'s more permissive handling.
     """
     if conversation_type == "open":
         return boundary_safe

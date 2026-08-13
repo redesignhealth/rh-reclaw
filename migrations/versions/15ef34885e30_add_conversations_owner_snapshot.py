@@ -51,7 +51,10 @@ def upgrade() -> None:
         sa.Column("owner_snapshot", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         if_not_exists=True,
     )
-    op.execute("UPDATE conversations SET type = 'open' WHERE type = 'scheduling.availability'")
+    op.execute(
+        "UPDATE conversations SET type = 'open', updated_at = now() "
+        "WHERE type = 'scheduling.availability'"
+    )
 
 
 def downgrade() -> None:

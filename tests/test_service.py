@@ -898,6 +898,32 @@ class TestAcceptDeclineInvite:
             )
         assert str(exc_info.value) == str(nonmember_exc.value)
 
+    async def test_accept_denied_after_terminal_opening_message(
+        self, session: AsyncSession
+    ) -> None:
+        """A target invited by a terminal-opener (task_cancel/task_complete/
+        confirm) must not be able to accept into the now-completed/canceled
+        conversation -- that would leave them a permanent zombie member,
+        unable to post since is_message_legal requires "active"."""
+        owner = await _register(session, "acc-owner-terminal")
+        target = await _register(session, "acc-target-terminal")
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message={"reason": "no_longer_needed"},
+            message_type="task_cancel",
+        )
+        assert conversation.state == "canceled"
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await accept_invite(
+                session, actor_sub=target.sub, agent_id=target.id, conversation_id=conversation.id
+            )
+        assert exc_info.value.reason == "denied.wrong_state.canceled"
+
 
 # --- invite --------------------------------------------------------------------
 
@@ -2363,7 +2389,14 @@ class TestListConversations:
         result_expired = await list_conversations(
             session, caller_agent_id=creator.id, state="expired"
         )
-        assert any(c["conversation_id"] == str(conv.id) for c in result_expired["conversations"])
+        matches = [
+            c for c in result_expired["conversations"] if c["conversation_id"] == str(conv.id)
+        ]
+        assert len(matches) == 1
+        # The projected "state" must be reconciled too, not just the row
+        # selection -- a caller filtering on state="expired" must not get
+        # back a JSON object that still says "active".
+        assert matches[0]["state"] == "expired"
 
     async def test_filter_by_role_owner(self, session: AsyncSession) -> None:
         creator = await _register(session, "listconv-role-owner")
