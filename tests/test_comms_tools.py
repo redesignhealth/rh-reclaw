@@ -600,9 +600,21 @@ class TestAxiShapes:
     ) -> None:
         # Same owner_email, two distinct subs -- an anticipated state (the
         # agent_key mechanism lets one owner run multiple board-active
-        # agents under one email), not an error case.
+        # agents under one email), not an error case. bound_at is forced
+        # apart explicitly rather than relied on via real-time gaps between
+        # the two registrations, which could otherwise tie down to the
+        # microsecond (Argus round 2).
         await _register(main, test_session_factory, "ea-old", owner_email="multi@example.com")
         await _register(main, test_session_factory, "ea-new", owner_email="multi@example.com")
+        async with test_session_factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE agents SET bound_at = "
+                    "(SELECT bound_at FROM agents WHERE sub = 'ea-new') - interval '1 hour' "
+                    "WHERE sub = 'ea-old'"
+                )
+            )
+            await session.commit()
         result = await _call(
             main,
             test_session_factory,

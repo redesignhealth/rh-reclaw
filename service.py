@@ -761,17 +761,17 @@ async def lookup_agent_by_email(
 ) -> dict[str, Any] | None:
     """Directory lookup: is ``owner_email`` bound to a board-active agent?
 
-    This is the "handshake registry" concept (``docs/DESIGN.md`` §10: "does
-    this email belong to a registered EA") realized directly on the
-    existing ``Agent`` table rather than a separate store --
-    ``owner_email``/``sub`` already carry exactly what a caller needs
-    (which email, which board-wide identity), so there is nothing left to
-    duplicate. Formerly its own module (``registry/directory.py``,
-    TECH-4945) inside the negotiation library; folded in here per
-    TECH-5159 once each EA agent started holding its own calendar and that
-    library stopped needing a copy of this lookup for itself -- the comms
-    board is the one place every agent can already reach, so this is where
-    the lookup belongs.
+    This realizes the "handshake registry" concept -- answering "does this
+    email belong to a registered EA" -- directly on the existing ``Agent``
+    table rather than a separate store: ``owner_email``/``sub`` already
+    carry exactly what a caller needs (which email, which board-wide
+    identity), so there is nothing left to duplicate. Formerly its own
+    module (``registry/directory.py``, TECH-4945) inside the negotiation
+    library; folded in here per TECH-5159 once each EA agent started
+    holding its own calendar and that library stopped needing a copy of
+    this lookup for itself -- the comms board is the one place every agent
+    can already reach, so this is where the lookup belongs. See
+    ``docs/DESIGN.md`` §10 for this endpoint's anti-enumeration posture.
 
     Comparison is case-insensitive (``func.lower``) since OAuth-sourced
     email claims are not guaranteed to arrive in one canonical case, but
@@ -796,8 +796,10 @@ async def lookup_agent_by_email(
     board-active agents under the same email). So multiple active rows
     for one ``owner_email`` is an expected, not exceptional, state, and
     this function deterministically returns whichever is most recently
-    (re)bound -- NOT "the" registered EA in any stronger sense. Do not
-    read the ``status == "active"`` filter as "a deregistered agent is
+    (re)bound (``created_at`` DESC breaks a same-``bound_at`` tie, which
+    two rows can otherwise share down to the microsecond) -- NOT "the"
+    registered EA in any stronger sense. Do not read the
+    ``status == "active"`` filter as "a deregistered agent is
     never returned": nothing in this codebase currently transitions an
     agent to ``"suspended"`` (the only other value ``AGENT_STATUSES``
     allows), so today that filter is inert, future-proofing for
@@ -811,7 +813,7 @@ async def lookup_agent_by_email(
     stmt = (
         select(Agent)
         .where(func.lower(Agent.owner_email) == normalized, Agent.status == "active")
-        .order_by(Agent.bound_at.desc().nullslast())
+        .order_by(Agent.bound_at.desc().nullslast(), Agent.created_at.desc())
         .limit(1)
     )
     agent = (await session.execute(stmt)).scalar_one_or_none()
@@ -2311,6 +2313,7 @@ def may_assign(creator_owners: AbstractSet[str], assignee_owners: AbstractSet[st
 __all__ = [
     "CONVERSATION_TTL",
     "MAX_CONVERSATION_STARTS_PER_HOUR",
+    "MAX_LOOKUP_EMAIL_LENGTH",
     "MAX_MESSAGES_PER_CONVERSATION_PER_HOUR",
     "AgentTableOwnershipClient",
     "OwnershipClient",

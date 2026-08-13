@@ -2623,10 +2623,13 @@ class TestLookupAgentByEmail:
         assert await lookup_agent_by_email(session, owner_email=None) is None  # type: ignore[arg-type]
 
     async def test_over_length_fails_closed(self, session: AsyncSession) -> None:
-        # 255 chars, one over MAX_LOOKUP_EMAIL_LENGTH (254) -- never reaches
-        # the query, so no matching row is required for this to prove the
-        # guard fires rather than a legitimate not-found.
-        assert await lookup_agent_by_email(session, owner_email="a" * 255) is None
+        # One over MAX_LOOKUP_EMAIL_LENGTH -- never reaches the query, so no
+        # matching row is required for this to prove the guard fires rather
+        # than a legitimate not-found.
+        from service import MAX_LOOKUP_EMAIL_LENGTH
+
+        over_length = "a" * (MAX_LOOKUP_EMAIL_LENGTH + 1)
+        assert await lookup_agent_by_email(session, owner_email=over_length) is None
 
     async def test_status_filter_excludes_non_active_agent(self, session: AsyncSession) -> None:
         agent = await _register(session, "lae-suspended", owner_email="suspend@example.com")
@@ -2639,8 +2642,15 @@ class TestLookupAgentByEmail:
         # Same owner_email, two distinct subs -- an anticipated state (see
         # lookup_agent_by_email's docstring): the agent_key mechanism lets
         # one owner run multiple board-active agents under one email.
-        await _register(session, "lae-old", owner_email="multi@example.com")
-        await _register(session, "lae-new", owner_email="multi@example.com")
+        # bound_at is set explicitly (not relied on via real-time gaps
+        # between the two _register calls, which could tie down to the
+        # microsecond -- Argus round 2) so the ordering this test asserts
+        # is deterministic regardless of wall-clock timing.
+        old = await _register(session, "lae-old", owner_email="multi@example.com")
+        new = await _register(session, "lae-new", owner_email="multi@example.com")
+        old.bound_at = new.bound_at - timedelta(hours=1)
+        await session.flush()
+        await session.commit()
         result = await lookup_agent_by_email(session, owner_email="multi@example.com")
         assert result is not None
         assert result["sub"] == "lae-new"

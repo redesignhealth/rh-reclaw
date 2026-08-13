@@ -87,7 +87,26 @@ class Agent(Base):
     """
 
     __tablename__ = "agents"
-    __table_args__ = (CheckConstraint(f"status IN {AGENT_STATUSES!r}", name="ck_agents_status"),)
+    __table_args__ = (
+        CheckConstraint(f"status IN {AGENT_STATUSES!r}", name="ck_agents_status"),
+        # Backs service.lookup_agent_by_email's
+        # func.lower(Agent.owner_email) == ... AND status == "active" ...
+        # ORDER BY bound_at DESC query (TECH-5159, migration bb1ea7d2a0cf).
+        # Declared here too, not just in the migration -- every other
+        # migration-created index in this file has a matching declaration;
+        # without one, a future `alembic revision --autogenerate` sees this
+        # index in the DB but not in metadata and silently emits a DROP
+        # INDEX for it. text() rather than func.lower(Agent.owner_email):
+        # __table_args__ is evaluated before this class's own attributes
+        # exist as a fully-formed class, so "Agent" isn't a valid name yet
+        # at this point in the class body.
+        Index(
+            "idx_agents_lower_owner_email_active",
+            text("lower(owner_email)"),
+            text("bound_at DESC NULLS LAST"),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     sub: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
