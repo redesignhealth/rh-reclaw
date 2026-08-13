@@ -2,7 +2,8 @@
 
 The per-person EA agent library -- scheduling negotiation, preference scoring,
 holds/booking discipline, and the autonomy gate. See [`docs/DESIGN.md`](docs/DESIGN.md) for the
-full design.
+full design, and [`agent-config/`](agent-config/) for the agent config (identity + starter
+user-memory template) reclaw auto-loads into the deployed EA agent's prompt.
 
 This is one of several sibling projects in the `rh-reclaw` monorepo (see `reclaw-comms-mcp/` one
 directory up, the agent-to-agent comms hub this library's `reclaw-ea-mcp` deployment will speak

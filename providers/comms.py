@@ -106,7 +106,8 @@ def _validate_agent_key(agent_key: str | None) -> str | None:
 
     if not re.match(r"^[A-Za-z0-9._-]+$", agent_key):
         raise ToolError(
-            "invalid_request: agent_key must contain only alphanumeric characters, dots, underscores, or hyphens"
+            "invalid_request: agent_key must contain only alphanumeric"
+            " characters, dots, underscores, or hyphens"
         )
 
     return agent_key
