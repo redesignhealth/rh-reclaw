@@ -64,6 +64,42 @@ from scopes import is_interactive_token, scopes_for_token
 comms_server: FastMCP[Any] = FastMCP("comms")
 
 
+# Fully-qualified tool names (post-mount prefix in FastMCP 3.x:
+# ``<namespace>_<tool>`` with a single underscore separator).
+#
+# Scope format: ``<service>:<verb>`` (or ``<service>:<sub>:<verb>`` for
+# finer-grained gates). Verbs:
+#   :read   — pure reads / lookups / searches
+#   :write  — mutates state (create, update, delete)
+#   :run    — triggers a unit of work that may write derived data
+#
+# The mapping is the source of truth — every new tool MUST be added here in
+# the same PR that introduces it, or it will be unreachable by rh-auth
+# Bearer callers (fail-closed default in ``ScopeEnforcementMiddleware``).
+TOOL_SCOPES: dict[str, str] = {
+    "comms_whoami": "comms:read",
+    # Reads
+    "comms_list_agents": "comms:read",
+    "comms_list_conversations": "comms:read",
+    "comms_get_conversation": "comms:read",
+    "comms_inbox": "comms:read",
+    # Writes (mutate board/agent/conversation state)
+    "comms_register": "comms:write",
+    "comms_start_conversation": "comms:write",
+    "comms_post_message": "comms:write",
+    "comms_accept": "comms:write",
+    "comms_decline_invite": "comms:write",
+    "comms_invite": "comms:write",
+    "comms_leave": "comms:write",
+}
+
+# Resources gated for rh-auth callers (interactive Okta users bypass, like
+# tools). Maps resource URI to required scope. Fail-closed: an rh-auth
+# caller reading an unmapped resource is denied, mirroring the unmapped-tool
+# behavior. Empty today — this provider registers no resources yet.
+RESOURCE_SCOPES: dict[str, str] = {}
+
+
 # --- Identity / session plumbing -------------------------------------------------
 
 

@@ -5,8 +5,8 @@ from __future__ import annotations
 import re
 from unittest.mock import MagicMock, patch
 
+from providers.comms import RESOURCE_SCOPES, TOOL_SCOPES
 from scopes import (
-    TOOL_SCOPES,
     is_interactive_token,
     required_scope_for,
     required_scope_for_resource,
@@ -53,15 +53,15 @@ class TestToolScopesRegistry:
 
 class TestRequiredScopeFor:
     def test_known_tool(self) -> None:
-        assert required_scope_for("comms_whoami") == "comms:read"
+        assert required_scope_for("comms_whoami", TOOL_SCOPES) == "comms:read"
 
     def test_unmapped_tool_returns_none(self) -> None:
-        assert required_scope_for("definitely_not_a_real_tool") is None
+        assert required_scope_for("definitely_not_a_real_tool", TOOL_SCOPES) is None
 
     def test_unmapped_resource_returns_none(self) -> None:
         # RESOURCE_SCOPES is empty today — every resource URI is unmapped
         # and therefore fail-closed for rh-auth callers.
-        assert required_scope_for_resource("schema://anything") is None
+        assert required_scope_for_resource("schema://anything", RESOURCE_SCOPES) is None
 
 
 class TestIsInteractiveToken:

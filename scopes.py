@@ -1,14 +1,17 @@
-"""Scope registry and enforcement helpers for reclaw-comms-mcp tools.
+"""Scope enforcement helpers for reclaw-comms-mcp tools.
 
 Adapted from rh-data-platform ``services/rh-mcp/scopes.py`` (TECH-2752), the
 canonical pattern named in the RH tech guide (topics/04-auth-and-identity.md
 §Scope Enforcement).
 
-Maps each fully-qualified, mount-prefixed tool name to the single rh-auth
-scope required to invoke it. The mapping is the source of truth — every new
-tool MUST be added here in the same PR that introduces it, or it will be
-unreachable by rh-auth Bearer callers (fail-closed default in
-``ScopeEnforcementMiddleware``).
+Generic, provider-agnostic helpers only. Each provider module (e.g.
+``providers/comms.py``) owns its own ``TOOL_SCOPES``/``RESOURCE_SCOPES``
+dict, keyed under its post-mount-prefix tool/resource names — the mapping is
+the source of truth for that provider; every new tool MUST be added there in
+the same PR that introduces it, or it will be unreachable by rh-auth Bearer
+callers (fail-closed default in ``ScopeEnforcementMiddleware``). ``main.py``
+merges the dicts for whatever providers are enabled at startup and passes
+the merged dicts into the lookup helpers below.
 
 Caller classification
 ---------------------
@@ -29,39 +32,6 @@ from fastmcp.server.auth import AccessToken
 
 from identity import RH_AUTH_ISSUER, validate_sub_shape
 from observability import log_auth_rejected
-
-# Fully-qualified tool names (post-mount prefix in FastMCP 3.x:
-# ``<namespace>_<tool>`` with a single underscore separator).
-#
-# Scope format: ``<service>:<verb>`` (or ``<service>:<sub>:<verb>`` for
-# finer-grained gates). Verbs:
-#   :read   — pure reads / lookups / searches
-#   :write  — mutates state (create, update, delete)
-#   :run    — triggers a unit of work that may write derived data
-TOOL_SCOPES: dict[str, str] = {
-    # --- comms (provider: providers/comms.py, namespace="comms") ---
-    "comms_whoami": "comms:read",
-    # Reads
-    "comms_list_agents": "comms:read",
-    "comms_list_conversations": "comms:read",
-    "comms_get_conversation": "comms:read",
-    "comms_inbox": "comms:read",
-    # Writes (mutate board/agent/conversation state)
-    "comms_register": "comms:write",
-    "comms_start_conversation": "comms:write",
-    "comms_post_message": "comms:write",
-    "comms_accept": "comms:write",
-    "comms_decline_invite": "comms:write",
-    "comms_invite": "comms:write",
-    "comms_leave": "comms:write",
-}
-
-
-# Resources gated for rh-auth callers (interactive Okta users bypass, like
-# tools). Maps resource URI to required scope. Fail-closed: an rh-auth
-# caller reading an unmapped resource is denied, mirroring the unmapped-tool
-# behavior. Empty today — this service registers no resources yet.
-RESOURCE_SCOPES: dict[str, str] = {}
 
 
 def is_interactive_token(token: AccessToken | None) -> bool:
@@ -88,19 +58,22 @@ def is_interactive_token(token: AccessToken | None) -> bool:
     return bool(issuer != RH_AUTH_ISSUER)
 
 
-def required_scope_for(tool_name: str) -> str | None:
-    """Return the scope required for ``tool_name``, or None if unmapped.
+def required_scope_for(tool_name: str, tool_scopes: dict[str, str]) -> str | None:
+    """Return the scope required for ``tool_name`` in ``tool_scopes``, or
+    None if unmapped.
 
     Unmapped tools are rejected for rh-auth callers by the enforcement
     middleware (fail-closed). Interactive callers bypass the lookup entirely
-    via ``is_interactive_token``.
+    via ``is_interactive_token``. ``tool_scopes`` is the merged dict of every
+    currently-enabled provider's ``TOOL_SCOPES`` — see ``main.py``.
     """
-    return TOOL_SCOPES.get(tool_name)
+    return tool_scopes.get(tool_name)
 
 
-def required_scope_for_resource(uri: str) -> str | None:
-    """Return the scope required to read resource ``uri``, or None if unmapped."""
-    return RESOURCE_SCOPES.get(uri)
+def required_scope_for_resource(uri: str, resource_scopes: dict[str, str]) -> str | None:
+    """Return the scope required to read resource ``uri`` in
+    ``resource_scopes``, or None if unmapped."""
+    return resource_scopes.get(uri)
 
 
 _REDACTED_CLIENT_ID = "invalid_sub"
@@ -165,8 +138,6 @@ def scopes_for_token(token: AccessToken) -> list[str]:
 
 
 __all__ = [
-    "RESOURCE_SCOPES",
-    "TOOL_SCOPES",
     "is_interactive_token",
     "required_scope_for",
     "required_scope_for_resource",

@@ -75,7 +75,7 @@ class TestScopeRegistryParity:
     """
 
     def test_all_mounted_tools_are_enrolled(self) -> None:
-        from scopes import TOOL_SCOPES
+        from providers.comms import TOOL_SCOPES
 
         main = _import_main()
         with _OIDC_PATCH, _ENV_PATCH:
@@ -126,7 +126,7 @@ class TestScopeEnforcementMiddleware:
 
     def _middleware(self) -> object:
         main = _import_main()
-        return main.ScopeEnforcementMiddleware()  # type: ignore[attr-defined]
+        return main.ScopeEnforcementMiddleware(main.TOOL_SCOPES, main.RESOURCE_SCOPES)  # type: ignore[attr-defined]
 
     def test_interactive_okta_token_bypasses_scope_check(self) -> None:
         middleware = self._middleware()
@@ -285,7 +285,7 @@ class TestReadResourceMiddleware:
 
     def _middleware(self) -> object:
         main = _import_main()
-        return main.ScopeEnforcementMiddleware()  # type: ignore[attr-defined]
+        return main.ScopeEnforcementMiddleware(main.TOOL_SCOPES, main.RESOURCE_SCOPES)  # type: ignore[attr-defined]
 
     def test_interactive_okta_token_bypasses_scope_check(self) -> None:
         middleware = self._middleware()

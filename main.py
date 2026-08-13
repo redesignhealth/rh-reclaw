@@ -32,7 +32,7 @@ from observability import (
     log_tool_call,
     log_user_active,
 )
-from providers.comms import comms_server
+from providers.comms import RESOURCE_SCOPES, TOOL_SCOPES, comms_server
 from scopes import (
     is_interactive_token,
     required_scope_for,
@@ -77,7 +77,16 @@ class ScopeEnforcementMiddleware(Middleware):
 
     Every denial branch emits a structured ``scope_denial`` event (see
     observability.py) and raises the uniform client-facing denial message.
+
+    ``tool_scopes``/``resource_scopes`` are the merged dicts of every
+    currently-enabled provider's own ``TOOL_SCOPES``/``RESOURCE_SCOPES`` —
+    built once at startup from whatever ``ENABLED_PROVIDERS`` resolves to.
     """
+
+    def __init__(self, tool_scopes: dict[str, str], resource_scopes: dict[str, str]) -> None:
+        super().__init__()
+        self._tool_scopes = tool_scopes
+        self._resource_scopes = resource_scopes
 
     async def on_call_tool(
         self,
@@ -94,7 +103,7 @@ class ScopeEnforcementMiddleware(Middleware):
         if token is None:
             self._deny(tool_name, reason="missing_token", client_id=None)
 
-        required = required_scope_for(tool_name)
+        required = required_scope_for(tool_name, self._tool_scopes)
         if required is None:
             # Fail-closed: rh-auth caller invoking a tool with no scope mapping.
             self._deny(tool_name, reason="tool_not_enrolled", client_id=safe_client_id(token))
@@ -131,7 +140,7 @@ class ScopeEnforcementMiddleware(Middleware):
         if token is None:
             self._deny_resource(uri, reason="missing_token", client_id=None)
 
-        required = required_scope_for_resource(uri)
+        required = required_scope_for_resource(uri, self._resource_scopes)
         if required is None:
             self._deny_resource(
                 uri, reason="resource_not_enrolled", client_id=safe_client_id(token)
@@ -269,7 +278,7 @@ mcp.add_middleware(ObservabilityMiddleware())
 # as ToolError and are recorded as failed tool_call events. Denials are
 # distinguished from provider failures via the dedicated `scope_denial`
 # event emitted by ScopeEnforcementMiddleware._deny.
-mcp.add_middleware(ScopeEnforcementMiddleware())
+mcp.add_middleware(ScopeEnforcementMiddleware(TOOL_SCOPES, RESOURCE_SCOPES))
 
 mcp.mount(comms_server, namespace="comms")
 

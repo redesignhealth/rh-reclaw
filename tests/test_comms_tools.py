@@ -1233,7 +1233,7 @@ class TestMessageTypeAcceptedToolLayer:
 
 class TestScopesUnaffected:
     async def test_all_new_tools_are_registry_enrolled(self, main: Any) -> None:
-        from scopes import TOOL_SCOPES
+        from providers.comms import TOOL_SCOPES
 
         tools = await main.mcp.list_tools()
         mounted = {t.name for t in tools}
