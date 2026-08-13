@@ -127,7 +127,7 @@ async def _clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, messages, participants, conversations, agents "
+                "TRUNCATE TABLE audit_log, tasks, messages, participants, conversations, agents "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -206,8 +206,9 @@ async def _register(
     *,
     display_name: str | None = None,
     accepted_types: list[str] | None = None,
+    owner_sub: str | None = None,
 ) -> dict[str, Any]:
-    token = _token(sub)
+    token = _token(sub, owner_sub=owner_sub)
     result: dict[str, Any] = await _call(
         main,
         test_session_factory,
@@ -303,6 +304,92 @@ class TestRegister:
         assert first["agent_id"] == second["agent_id"]
         assert second["display_name"] == "B v2"
 
+    async def test_register_with_agent_key_creates_distinct_row(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """TECH-5113: two agents sharing one token's base identity (today's
+        reality for multiple EA-managed agents acting for the same human)
+        must not collapse into one board row — a distinct ``agent_key``
+        each is what keeps them apart."""
+        token = _token("shared-human-sub", owner_sub="shared-human-sub")
+        first = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {
+                "display_name": "Bond 007",
+                "accepted_types": ["scheduling.availability"],
+                "agent_key": "bond-007",
+            },
+        )
+        second = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {
+                "display_name": "Pepper Pots",
+                "accepted_types": ["scheduling.availability"],
+                "agent_key": "pepper-pots",
+            },
+        )
+        assert first["agent_id"] != second["agent_id"]
+        assert first["sub"] == "shared-human-sub::bond-007"
+        assert second["sub"] == "shared-human-sub::pepper-pots"
+        assert first["display_name"] == "Bond 007"
+        assert second["display_name"] == "Pepper Pots"
+        # owner_sub is unaffected by agent_key — both rows are still owned
+        # by the same verified human, which is what admission decisions key on.
+        assert first["owner_email"] == second["owner_email"]
+
+    async def test_register_without_agent_key_matches_prior_behavior(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        token = _token("agent-no-key")
+        result = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_register",
+            {"display_name": "No Key", "accepted_types": ["scheduling.availability"]},
+        )
+        assert result["sub"] == "agent-no-key"
+
+    async def test_register_empty_agent_key_rejected(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        token = _token("agent-empty-key")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {
+                    "display_name": "Empty Key",
+                    "accepted_types": ["scheduling.availability"],
+                    "agent_key": "   ",
+                },
+            )
+
+    async def test_register_oversized_agent_key_rejected(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        token = _token("agent-oversized-key")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {
+                    "display_name": "Oversized Key",
+                    "accepted_types": ["scheduling.availability"],
+                    "agent_key": "x" * 101,
+                },
+            )
+
     async def test_register_without_owner_claims_falls_back_to_self(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
@@ -339,6 +426,83 @@ class TestRegister:
         )
         assert result["owner_email"] != "forged@attacker.com"
         assert result["owner_email"] == "agent-forged-email"
+
+    async def test_register_unknown_accepted_type_names_valid_set_in_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Unlike a generic ``invalid_request`` ValueError, an unrecognized
+        ``accepted_types`` entry surfaces a specific ``ToolError`` naming
+        the actual valid set — a caller (e.g. an external agent probing
+        the API) does not have to guess at ``schemas.CONVERSATION_TYPES``
+        one rejected call at a time. See exceptions.py's module docstring
+        for why this is deliberately not folded into the uniform-denial
+        posture used for authorization failures."""
+        token = _token("agent-probes-valid-types")
+        with pytest.raises(ToolError, match=r"accepted_types must be a non-empty subset of"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {"display_name": "Prober", "accepted_types": ["__probe_invalid_type__"]},
+            )
+
+    async def test_register_empty_accepted_types_generic_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Boundary-level counterpart to
+        ``test_service.test_empty_accepted_types_raises_plain_value_error``:
+        an empty ``accepted_types`` list is a bare ``ValueError`` at the
+        service layer, which ``_map_service_errors`` maps to the generic
+        ``invalid_request`` ``ToolError`` shape (not the specific
+        ``UnknownConversationTypeError`` message) at the MCP boundary."""
+        token = _token("agent-empty-types-boundary")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {"display_name": "Empty Types", "accepted_types": []},
+            )
+
+    async def test_register_over_count_accepted_types_generic_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Boundary-level counterpart to
+        ``test_service.test_oversized_accepted_types_of_unknown_values_still_hits_count_cap``:
+        21 entries hits the count cap (a bare ``ValueError``) before any
+        entry is checked against ``CONVERSATION_TYPES``, so the MCP layer
+        sees the generic ``invalid_request`` shape, not the specific
+        unknown-type error."""
+        token = _token("agent-oversized-types-boundary")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {
+                    "display_name": "Oversized Types",
+                    "accepted_types": [f"bogus-{i}" for i in range(21)],
+                },
+            )
+
+    async def test_register_oversized_single_accepted_type_entry_generic_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Boundary test for the per-entry length cap (Argus round 3):
+        a single oversized entry (101 chars) must be rejected at the MCP
+        boundary as generic invalid_request, not echoed verbatim."""
+        token = _token("agent-oversized-entry-boundary")
+        with pytest.raises(ToolError, match="invalid_request"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_register",
+                {"display_name": "Entry Length Test", "accepted_types": ["x" * 101]},
+            )
 
 
 # --- AXI empty-state / shape spot checks --------------------------------------------
@@ -560,7 +724,7 @@ class TestFullNegotiationFlow:
 
         # Anti-enumeration: byte-identical denial message for both causes.
         assert str(invitee_exc.value) == str(outsider_exc.value)
-        assert str(invitee_exc.value) == "access_denied: conversation requires active membership"
+        assert str(invitee_exc.value) == "access_denied: not authorized for this resource"
 
         # Same uniform message reading a conversation the outsider was
         # never named on at all.
@@ -623,7 +787,7 @@ class TestRateLimitAndSchemaErrors:
             )
         message = str(exc_info.value)
         assert "rate_limited" in message
-        assert message != "access_denied: conversation requires active membership"
+        assert message != "access_denied: not authorized for this resource"
 
     async def test_schema_validation_error_is_specific_not_uniform(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
@@ -650,7 +814,32 @@ class TestRateLimitAndSchemaErrors:
             )
         message = str(exc_info.value)
         assert "payload failed schema validation" in message
-        assert message != "access_denied: conversation requires active membership"
+        assert message != "access_denied: not authorized for this resource"
+
+    async def test_unknown_conversation_type_error_is_specific_not_uniform(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """An unsupported ``conversation_type`` surfaces a specific
+        ``ToolError`` naming the actual valid set, the same
+        discoverability fix as ``comms_register``'s ``accepted_types``
+        (see ``TestRegister.test_register_unknown_accepted_type_names_valid_set_in_error``).
+        Checked before any target lookup, so a bogus type doesn't need a
+        real target to reproduce."""
+        await _register(main, test_session_factory, "uct-owner")
+        token_owner = _token("uct-owner")
+
+        with pytest.raises(ToolError, match=r"unknown conversation_type 'bogus'"):
+            await _call(
+                main,
+                test_session_factory,
+                token_owner,
+                "comms_start_conversation",
+                {
+                    "conversation_type": "bogus",
+                    "target_agent_ids": [str(uuid.uuid4())],
+                    "initial_message": _availability_request(),
+                },
+            )
 
     async def test_negative_since_seq_rejected(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
@@ -758,7 +947,7 @@ class TestMembershipTools:
         assert decline_result["status"] == "declined"
 
         with pytest.raises(
-            ToolError, match=re.escape("access_denied: conversation requires active membership")
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
         ):
             await _call(
                 main,
@@ -775,7 +964,7 @@ class TestMembershipTools:
         assert leave_result["status"] == "left"
 
         with pytest.raises(
-            ToolError, match=re.escape("access_denied: conversation requires active membership")
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
         ):
             await _call(
                 main,
@@ -787,6 +976,293 @@ class TestMembershipTools:
                     "message_type": "availability_response",
                     "payload": _availability_response(),
                 },
+            )
+
+
+class TestTasks:
+    """End-to-end coverage for comms_add_task / comms_get_tasks (TECH-5094)."""
+
+    async def test_same_owner_agents_can_task_each_other(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        # Mirrors the real-world case this admission policy exists for: two
+        # of one person's agents (e.g. a Chief-of-Staff agent and an EA
+        # agent) share an owner_sub and should be admitted without any
+        # shared-agent machinery.
+        creator = await _register(
+            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
+        )
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        result = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_add_task",
+            {
+                "assignee_agent_id": assignee["agent_id"],
+                "task": {"action": "report_status"},
+            },
+        )
+
+        assert result["status"] == "open"
+        assert result["created_by"] == creator["agent_id"]
+        assert result["assignee_agent_id"] == assignee["agent_id"]
+        assert result["role"] == "created"
+        assert result["created_by_sub"] == "bond-007"
+        assert result["assignee_sub"] == "pepper-potts"
+        assert result["updated_at"] is not None
+
+        assignee_view = await _call(
+            main,
+            test_session_factory,
+            _token("pepper-potts", owner_sub="owner-dan@example.com"),
+            "comms_get_tasks",
+        )
+        assert assignee_view["tasks"][0]["role"] == "assigned"
+
+    async def test_different_owner_agents_uniformly_denied(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        other = await _register(
+            main, test_session_factory, "someone-elses-ea", owner_sub="owner-priya@example.com"
+        )
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_add_task",
+                {
+                    "assignee_agent_id": other["agent_id"],
+                    "task": {"action": "report_status"},
+                },
+            )
+
+    async def test_get_tasks_visible_only_to_creator_and_assignee(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        outsider = await _register(
+            main, test_session_factory, "outsider", owner_sub="owner-priya@example.com"
+        )
+        creator_token = _token("bond-007", owner_sub="owner-dan@example.com")
+        assignee_token = _token("pepper-potts", owner_sub="owner-dan@example.com")
+        outsider_token = _token("outsider", owner_sub="owner-priya@example.com")
+
+        await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_add_task",
+            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+        )
+
+        creator_view = await _call(main, test_session_factory, creator_token, "comms_get_tasks")
+        assert creator_view["total_count"] == 1
+        assert creator_view["tasks"][0]["role"] == "created"
+
+        assignee_view = await _call(main, test_session_factory, assignee_token, "comms_get_tasks")
+        assert assignee_view["total_count"] == 1
+        assert assignee_view["tasks"][0]["role"] == "assigned"
+
+        outsider_view = await _call(main, test_session_factory, outsider_token, "comms_get_tasks")
+        assert outsider_view == {
+            "tasks": [],
+            "total_count": 0,
+            "has_more": False,
+            "next_cursor": None,
+        }
+        assert outsider["agent_id"]  # registered, just not a party to the task
+
+    async def test_add_task_rejects_free_text_payload(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_add_task",
+                {
+                    "assignee_agent_id": assignee["agent_id"],
+                    "task": {"action": "report_status", "notes": "call me back"},
+                },
+            )
+
+    async def test_get_tasks_cursor_pages_through_tool_layer(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        for _ in range(3):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_add_task",
+                {
+                    "assignee_agent_id": assignee["agent_id"],
+                    "task": {"action": "report_status"},
+                },
+            )
+
+        page1 = await _call(main, test_session_factory, token, "comms_get_tasks", {"limit": 2})
+        assert len(page1["tasks"]) == 2
+        assert page1["has_more"] is True
+        assert page1["next_cursor"] is not None
+
+        page2 = await _call(
+            main,
+            test_session_factory,
+            token,
+            "comms_get_tasks",
+            {"limit": 2, "cursor": page1["next_cursor"]},
+        )
+        assert len(page2["tasks"]) == 1
+        assert page2["has_more"] is False
+        assert page2["next_cursor"] is None
+
+        seen_ids = {t["task_id"] for t in page1["tasks"] + page2["tasks"]}
+        assert len(seen_ids) == 3
+
+    async def test_get_tasks_malformed_cursor_maps_to_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(ToolError, match="invalid_request: the request could not be processed"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_get_tasks",
+                {"cursor": "not-a-valid-cursor"},
+            )
+
+    async def test_update_task_end_to_end(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        assignee = await _register(
+            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+        )
+        creator_token = _token("bond-007", owner_sub="owner-dan@example.com")
+        assignee_token = _token("pepper-potts", owner_sub="owner-dan@example.com")
+
+        added = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_add_task",
+            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+        )
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                creator_token,
+                "comms_update_task",
+                {"task_id": added["task_id"], "status": "declined"},
+            )
+
+        updated = await _call(
+            main,
+            test_session_factory,
+            assignee_token,
+            "comms_update_task",
+            {"task_id": added["task_id"], "status": "declined"},
+        )
+        assert updated["status"] == "declined"
+
+        with pytest.raises(
+            ToolError,
+            match=re.escape("task cannot transition to 'done' while its status is 'declined'"),
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                assignee_token,
+                "comms_update_task",
+                {"task_id": added["task_id"], "status": "done"},
+            )
+
+        # status='done' through the full tool stack too -- the above only
+        # exercised 'declined'.
+        added_2 = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_add_task",
+            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+        )
+        done_result = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_update_task",
+            {"task_id": added_2["task_id"], "status": "done"},
+        )
+        assert done_result["status"] == "done"
+
+    async def test_update_task_malformed_task_id_maps_to_tool_error(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(ToolError):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_update_task",
+                {"task_id": "not-a-uuid", "status": "done"},
+            )
+
+    async def test_update_task_unknown_task_id_matches_non_party_denial_message(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Anti-enumeration at the MCP boundary: an unknown task_id must
+        produce the exact same ToolError text as a genuine non-party
+        denial (TECH-5099 Argus round 1)."""
+        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
+        token = _token("bond-007", owner_sub="owner-dan@example.com")
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_update_task",
+                {"task_id": str(uuid.uuid4()), "status": "done"},
             )
 
 
@@ -810,6 +1286,9 @@ class TestScopesUnaffected:
             "comms_decline_invite",
             "comms_invite",
             "comms_leave",
+            "comms_add_task",
+            "comms_get_tasks",
+            "comms_update_task",
         }
         assert expected <= mounted
         assert expected <= set(TOOL_SCOPES)

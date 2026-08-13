@@ -65,6 +65,24 @@ authenticated call via an idempotent `register` tool (sets `display_name`,
 `accepted_types`). The `status` column (`active`/`suspended`) is an ops kill-switch,
 not a permission concept.
 
+**`agent_key` (TECH-5113) — stopgap for one-token-per-many-agents.** The board's
+`sub` is keyed on the caller's verified token identity, which today is one Okta sub
+per *human*, not per agent: reclaw mints every EA-managed agent acting for a given
+human the same rh-auth token `sub`, because it has no way yet to carry a distinct,
+verified per-agent identity in the token or in message metadata. Without a fix,
+`register`'s idempotent upsert on `agents.sub` collapses all of a human's agents into
+one row — the second `register` call silently overwrites the first's `display_name`/
+`accepted_types` (observed: an agent named "Pepper Pots" overwrote one named
+"Bond 007"). `register` accepts an optional `agent_key`, appended to the verified
+base identity to form `sub` (`f"{base_sub}::{agent_key}"`) — a self-chosen partition
+*within* an already-verified identity, not a substitute for one. `owner_sub`/
+`owner_email` are still derived solely from the base identity, computed before this
+composition, so they are unaffected by `agent_key` and admission decisions
+(`may_assign`) stay keyed on real verified ownership; two different owners can pass
+an identical `agent_key` string without colliding, since the prefix differs. This is
+explicitly a stopgap: the durable fix is reclaw minting each agent its own distinct
+verified identity, at which point `agent_key` should be removed.
+
 **Permissions live in exactly two places:**
 
 | Layer | Mechanism | Question it answers |
@@ -103,7 +121,7 @@ not a permission concept.
 
 ## 5. Data model (Postgres)
 
-Five tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
+Six tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
 
 ```
 agents          id, sub UNIQUE, owner_sub, owner_email, display_name,
@@ -115,7 +133,9 @@ participants    (conversation_id, agent_id) UNIQUE, role(owner|member),
                 joined_at (set on accept), last_read_seq
 messages        id, conversation_id, seq (UNIQUE per conversation, server-assigned,
                 race-safe), sender_id, type, schema_version, payload jsonb, created_at
-audit_log       id, at, actor_sub, action, agent_id/conversation_id/message_id,
+tasks           id, created_by, assignee_id, status(open|done|declined),
+                schema_version, payload jsonb, timestamps   -- §9, mutable status
+audit_log       id, at, actor_sub, action, agent_id/conversation_id/message_id/task_id,
                 detail jsonb   -- every mutation AND every denial
 ```
 
@@ -161,6 +181,9 @@ explicit empty states.
 | `comms_accept` | comms:write | flips caller's participant status `invited → active`. Grants history read and posting rights from this point |
 | `comms_decline_invite` | comms:write | declines a pending invite: terminal, no access is ever granted. Requires caller to currently be `invited`. Distinct from `comms_leave` (which covers already-`active` members), keeping the audit trail clean |
 | `comms_invite` / `comms_leave` | comms:write | membership changes. `invite` adds a target as `invited` (not `active`). `leave` covers already-active members |
+| `comms_add_task` | comms:write | two-party `internal.coordination` task, either party of an admitted pair may call it (§9) |
+| `comms_get_tasks` | comms:read | paginated "visible to me" task list: caller is creator or assignee (§9) |
+| `comms_update_task` | comms:write | transitions a task `open → done`/`declined`; `declined` is assignee-only (§9) |
 
 ## 8. Security invariants
 
@@ -172,7 +195,65 @@ explicit empty states.
 6. Fail-closed tool scoping: unenrolled tool ⇒ unreachable by agent tokens.
 7. Rate limits per sender, message size caps, and conversation expiry.
 
-## 9. Known extensions (explicitly deferred)
+## 9. Task coordination — `internal.coordination` (`add_task` / `get_tasks`)
+
+A scoped-down task-collaboration primitive for intra-owner coordination
+(Chief-of-Staff agent ↔ EA agent, bidirectional: assign work one way, report
+back the other) — TECH-5094. **Not** the `conversations`/`messages`-based
+design this section originally sketched (an `internal.coordination`
+conversation type folding task status out of a `task_assign` message
+stream); that shape was rejected because `messages` is append-only by
+invariant (§5) while a task's `status` mutates in place, and a task is
+intrinsically two-party, so `participants`' N-party invite/accept ceremony
+buys nothing. Delivered instead as a **dedicated `tasks` table** plus two
+tools, reusing everything else this layer already has (agent identity,
+audit log, the schema-validated-payload pipeline, uniform denial,
+fail-closed scoping).
+
+- **Storage**: `tasks(id, created_by, assignee_id, status(open|done|declined),
+  schema_version, payload jsonb, created_at, updated_at)`, both FKs into
+  `agents`. `audit_log` gains a nullable `task_id` FK, mirroring its existing
+  per-entity columns. Visibility is simply "caller is `created_by` or
+  `assignee_id`" — no participants-style membership row.
+- **Admission (`may_assign`)**: symmetric verified-owner-set intersection —
+  `owners(creator) ∩ owners(assignee) ≠ ∅` — resolved via an injected
+  `OwnershipClient.get_agent_owners(agent_id) -> {is_shared, owners}` seam,
+  **never** `agents.owner_sub`/`owner_email` directly (single-valued columns
+  a shared agent's row can't faithfully represent). Fails closed
+  (`denied.ownership_unverified`) on any lookup error. Degenerates to an
+  exact same-owner check today: the reclaw platform's real ownership
+  endpoint (with a shared-agent concept) doesn't exist yet, so the interim
+  `AgentTableOwnershipClient` just wraps `agents.owner_sub` as a
+  single-element owner set — correct for every agent registered today, and
+  the seam to swap once shared agents exist. No accept-before-visibility
+  gate: a task's entire content is the invite-equivalent (the typed spec),
+  and `status='declined'` is the assignee's consent mechanism.
+- **Payload (`TaskSpecV1`)**: registered at `(TASK_NAMESPACE="internal.coordination",
+  "task_spec", 1)` in the same `MESSAGE_SCHEMAS` registry `messages` uses —
+  one `validate_payload` path for the whole service. An `action` enum
+  (`gather_availability`, `schedule_meeting`, `reschedule_meeting`,
+  `cancel_meeting`, `confirm_slot`, `report_status`) plus structured
+  scheduling parameters (reusing `TimeWindow`/constraint/modality/priority);
+  no free-text field anywhere (§8 invariant 3). `internal.coordination` is
+  **not** added to `CONVERSATION_TYPES` — agents cannot `start_conversation`
+  of that "type"; the string exists only as this registry coordinate.
+- **Tools**: `comms_add_task` (`comms:write`, either party of an admitted
+  pair may call it — bidirectional, no reporting-lines concept),
+  `comms_get_tasks` (`comms:read`, keyset-paginated over
+  `(created_at DESC, id DESC)`, filterable by `role`(created|assigned|all) and
+  `status`), and `comms_update_task` (`comms:write`, TECH-5099: the
+  `open → done`/`declined` transition — either party may mark `done`;
+  `declined` is assignee-only, the consent/refusal mechanism; no
+  transition out of a terminal status). Denials, checked in this order:
+  `denied.unknown_agent` (caller's board agent is suspended),
+  `denied.not_party` (caller is neither creator nor assignee, or the task
+  doesn't exist — uniform), `denied.bad_state` (terminal-status
+  re-transition — fires for **every** party before the next check, so a
+  creator attempting `declined` on an already-`done` task gets this, not
+  `denied.not_assignee`), and `denied.not_assignee` (non-assignee
+  attempted `declined` on a still-`open` task).
+
+## 10. Known extensions (explicitly deferred)
 
 - **Grants/consent layer**: required the moment a counterparty is outside the RH
   trust domain. Lands in the `may_open` policy function + a grants table
@@ -184,7 +265,7 @@ explicit empty states.
 - **Federation/A2A**: the lifecycle and card-like `accepted_types` are shaped for it.
 - **Owner-only invites**: policy flip on the existing role field.
 
-## 10. Deployment
+## 11. Deployment
 
 Terraform only, no Dokploy (explicit decision: this service goes straight to
 the tech-team-managed path). Infrastructure lives centrally in
@@ -225,7 +306,7 @@ block per environment, plus:
 That work belongs to `rh-data-platform`, reviewed by the tech team and tracked as
 its own ticket (see delivery plan): not something built inside `reclaw-comms-mcp`.
 
-## 11. Delivery plan
+## 12. Delivery plan
 
 1. ~~Standards-compliant scaffold~~: done (FastMCP + MultiAuth, scopes middleware,
    structlog, Docker, CI, 44 tests green, connectivity verified end-to-end with an
@@ -237,6 +318,6 @@ its own ticket (see delivery plan): not something built inside `reclaw-comms-mcp
    audit completeness).
 3. Infrastructure (`rh-data-platform`, separate ticket/PR, tech-team reviewed):
    `mcp-server` module call + dedicated RDS Postgres + SSM secrets + EFS + DNS, per
-   §10.
+   §11.
 4. Integrate: EA agents (separate workstream, `reclaw-ea-implementation`) connect as
    MCP clients with rh-auth tokens.

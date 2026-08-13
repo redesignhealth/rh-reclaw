@@ -4,15 +4,18 @@ Stage 3 (the not-yet-built MCP tools layer) catches these and maps them to
 ``fastmcp.exceptions.ToolError`` messages. Only three shapes ever cross the
 service/tools boundary:
 
-- ``AccessDeniedError``: the uniform "not authorized to see/act on this
-  conversation" denial (DESIGN.md §4/§8's anti-enumeration rule). ``str()``
-  of every ``AccessDeniedError`` instance is the *same constant string*,
-  regardless of cause — not a participant, invited-but-not-accepted,
-  left/declined, an unknown/inactive target agent, or a target that
-  doesn't accept the conversation type. The specific cause is available to
-  server-side code only via the ``reason`` attribute (mirrored 1:1 into the
-  audit log's ``action`` column by ``service._deny``); it must never be
-  interpolated into a client-visible message.
+- ``AccessDeniedError``: the uniform "not authorized for this resource"
+  denial (DESIGN.md §4/§8's anti-enumeration rule), covering both
+  conversation-membership denials and task-admission denials
+  (``denied.not_same_owner``/``denied.ownership_unverified``, TECH-5094).
+  ``str()`` of every ``AccessDeniedError`` instance is the *same constant
+  string*, regardless of cause — not a participant, invited-but-not-
+  accepted, left/declined, an unknown/inactive target agent, a target
+  that doesn't accept the conversation type, or an unadmitted task
+  assignment. The specific cause is available to server-side code only
+  via the ``reason`` attribute (mirrored 1:1 into the audit log's
+  ``action`` column by ``service._deny``); it must never be interpolated
+  into a client-visible message.
 
   Unknown-agent and type-not-accepted during ``start_conversation``/
   ``invite`` are deliberately folded into this SAME uniform shape rather
@@ -25,22 +28,43 @@ service/tools boundary:
 
 - ``InvalidConversationStateError``: a message type is not legal given the
   conversation's current state (state-machine violation — posting after
-  completion/cancellation/expiry). Kept distinct and specific: the caller
-  is already an authorized member and has legitimate access to
-  ``conversation.state`` via ``get_conversation``, so there is nothing to
-  enumerate here.
+  completion/cancellation/expiry), or (TECH-5099) a task-status transition
+  attempted from a terminal status (``done``/``declined``). Kept distinct
+  and specific in both cases: the caller is already an authorized member/
+  party and has legitimate access to the current state via
+  ``get_conversation``/``get_tasks``, so there is nothing to enumerate here.
 
 - ``RateLimitExceededError``: a sender exceeded a per-hour cap. Specific by
   design — DESIGN.md does not treat rate limiting as an enumeration risk.
 
+- ``UnknownConversationTypeError``: ``accepted_types`` (at ``comms_register``)
+  or ``conversation_type`` (at ``comms_start_conversation``) named a value
+  outside ``schemas.CONVERSATION_TYPES``. Specific and lists the valid set
+  by design: unlike ``AccessDeniedError``'s targets, ``CONVERSATION_TYPES``
+  is not per-caller secret state — it's the same fixed, small, public
+  capability list every legitimate caller needs to function at all (and
+  would otherwise have to learn by trial and error, one guess per tool
+  call). Enumerating it is not an enumeration *risk* in DESIGN.md's sense;
+  that rule is about not letting a caller infer facts about *other
+  agents/conversations*, not about hiding this service's own fixed
+  vocabulary. Contrast ``display_name``/other bare-``ValueError`` cases
+  below, which stay generic because their valid range is unbounded or
+  already stated in the tool's own docstring — there's nothing to usefully
+  enumerate.
+
 Payload/schema validation failures are NOT redefined here: they reuse
 ``schemas.PayloadValidationError`` directly, which is already a distinct,
 specific exception type.
+
+Everything else the service layer raises as a bare ``ValueError`` (empty
+``sub``/``display_name``, length/count caps, malformed UUIDs, etc.) is
+deliberately mapped to a single generic, non-leaking message at the
+tools boundary — see ``providers/comms.py``'s ``_map_service_errors``.
 """
 
 from __future__ import annotations
 
-_ACCESS_DENIED_MESSAGE = "access_denied: conversation requires active membership"
+_ACCESS_DENIED_MESSAGE = "access_denied: not authorized for this resource"
 
 
 class AccessDeniedError(Exception):
@@ -57,7 +81,9 @@ class AccessDeniedError(Exception):
 
 
 class InvalidConversationStateError(Exception):
-    """A message type is not legal in the conversation's current state."""
+    """A state-machine transition is not legal in the current state — either
+    a message type disallowed by the conversation's state, or (TECH-5099) a
+    task-status transition attempted from a terminal status."""
 
 
 class RateLimitExceededError(Exception):
@@ -68,8 +94,16 @@ class RateLimitExceededError(Exception):
         self.reason = reason
 
 
+class UnknownConversationTypeError(Exception):
+    """``accepted_types``/``conversation_type`` named a value outside
+    ``schemas.CONVERSATION_TYPES``. Message is specific by design — see the
+    module docstring for why enumerating this fixed, public vocabulary is
+    not an enumeration risk."""
+
+
 __all__ = [
     "AccessDeniedError",
     "InvalidConversationStateError",
     "RateLimitExceededError",
+    "UnknownConversationTypeError",
 ]

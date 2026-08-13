@@ -242,9 +242,12 @@ mcp: FastMCP[Any] = FastMCP(
         "Register with comms_register, then use comms_start_conversation / "
         "comms_post_message to negotiate, comms_inbox / comms_get_conversation "
         "to read, and comms_accept / comms_decline_invite / comms_invite / "
-        "comms_leave to manage membership. comms_whoami returns the "
-        "authenticated caller's identity and scopes; comms_list_agents lists "
-        "the board directory."
+        "comms_leave to manage membership. comms_add_task / comms_get_tasks / "
+        "comms_update_task support two-party intra-owner task coordination "
+        "(e.g. a Chief-of-Staff agent assigning work to, or receiving status "
+        "back from, an EA agent); comms_update_task marks a task done or "
+        "declined. comms_whoami returns the authenticated caller's identity "
+        "and scopes; comms_list_agents lists the board directory."
     ),
     auth=build_auth_provider(),
 )
