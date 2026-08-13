@@ -41,19 +41,21 @@ This machinery is now duplicated across at least this service and rh-mcp
 (and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet
 despite running the identical FastMCP OIDCProxy + Okta app combination --
 same forced-re-auth exposure would apply there too, once that service is
-actually deployed; tracked by TECH-5153, see its own docstring's KNOWN
-DIVERGENCE note). Extraction into a shared ``rh_lib``-style base class is
-a reasonable follow-up once a third copy exists; not done here to avoid a
-cross-repo refactor as a side effect of a one-service bug fix.
+actually deployed; TECH-5153 tracks porting it there, see that service's
+own docstring's KNOWN DIVERGENCE note). Extraction into a shared
+``rh_lib``-style base class is a reasonable idea once a third copy exists
+-- TECH-5153 itself would create that third copy, so completing it is the
+practical trigger for revisiting extraction, but that connection lives
+only in this sentence: TECH-5153's own scope doesn't mention extraction,
+so don't assume it'll happen automatically when that ticket closes. Not
+done here to avoid a cross-repo refactor as a side effect of a
+one-service bug fix.
 
 Emitting ``refresh_token_miss`` / ``refresh_token_hop_cap_exceeded`` on
 paths that previously logged nothing means an undiscriminating
 ``$.event = "auth_flow"`` CloudWatch filter now also counts failed refresh
-lookups as auth activity -- each ``auth_type`` value needs its own metric
-filter before either is alerted on, not folded into one undifferentiated
-auth_flow count. (Metric filters live in rh-data-platform's Terraform, not
-this repo. No tracking ticket yet for that specific audit -- not blocking
-this fix on it, but the gap needs a real ticket of its own before long.)
+lookups as auth activity -- see observability.py's own docstring for the
+CloudWatch metric-filter follow-up this implies (no tracking ticket yet).
 """
 
 from __future__ import annotations

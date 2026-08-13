@@ -22,23 +22,27 @@ auth_flow:
     {"event": "auth_flow", "service": "...",
      "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|
                    refresh_token_miss|refresh_token_hop_cap_exceeded"}
-    The middle two values are ported from rh-mcp's rotation-grace
-    mechanism (auth.py); ``refresh_token_hop_cap_exceeded`` is this
-    service's own addition on top of that port (see auth.py) and does
-    NOT yet exist in rh-mcp or the shared ``mcp_observability`` contract
-    -- update both if/when this hardening is ported back. All three are
-    emitted on paths that previously logged nothing at all. A
-    ``$.event = "auth_flow"`` filter that doesn't discriminate on
+    ``refresh_token_grace_redirect`` and ``refresh_token_miss`` are ported
+    from rh-mcp's rotation-grace mechanism (auth.py);
+    ``refresh_token_hop_cap_exceeded`` is this service's own addition on
+    top of that port (see auth.py) and does NOT yet exist in rh-mcp or the
+    shared ``mcp_observability`` contract -- update both if/when this
+    hardening is ported back (no tracking ticket yet for that contract
+    update). All three are emitted on paths that previously logged nothing
+    at all. A ``$.event = "auth_flow"`` filter that doesn't discriminate on
     ``auth_type`` now also counts failed refresh-token lookups as auth
     activity. ``refresh_token_miss`` and ``refresh_token_hop_cap_exceeded``
     are deliberately SEPARATE values, not one conflated "failed" bucket:
     a genuine miss (token never issued or long expired) and a rotation
     chain exceeding ``_ROTATION_MAX_HOPS`` (token IS being actively rotated,
     just faster than the chain can be followed) are different operational
-    conditions and EACH REQUIRES its own CloudWatch metric filter before
-    either is alerted on -- not optional, since a burst of hop-cap events
-    specifically indicates rotation outpacing the grace chain, a signal
-    otherwise invisible outside a manual Logs Insights query.
+    conditions and ideally get independent CloudWatch metric filters
+    before either is alerted on -- a burst of hop-cap events specifically
+    indicates rotation outpacing the grace chain, a signal otherwise
+    invisible outside a manual Logs Insights query. No metric filter
+    exists for either value yet (Terraform, rh-data-platform, not this
+    repo) and no ticket tracks adding one -- this docstring is advisory
+    until that audit happens, not a standing guarantee.
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",

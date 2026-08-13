@@ -212,6 +212,39 @@ def _refresh_token(token: str) -> RefreshToken:
     return RefreshToken(token=token, client_id="test-client", scopes=["openid"])
 
 
+class TestAuthFlowEventEmission:
+    """The rotation-grace tests below assert log_auth_flow at each of their
+    own call sites explicitly -- these two do the same for the two
+    pre-existing call sites, so deleting either wouldn't go unnoticed."""
+
+    async def test_exchange_authorization_code_emits_new_auth(self) -> None:
+        proxy = _build_proxy()
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.exchange_authorization_code",
+                AsyncMock(return_value=OAuthToken(access_token="tok", token_type="bearer")),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            await proxy.exchange_authorization_code(MagicMock(), MagicMock())
+
+        mock_log_auth_flow.assert_called_once_with("new_auth")
+
+    async def test_exchange_refresh_token_emits_token_refresh(self) -> None:
+        proxy = _build_proxy()
+        old = _refresh_token("some-old-token")
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.exchange_refresh_token",
+                AsyncMock(return_value=OAuthToken(access_token="tok", token_type="bearer")),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            await proxy.exchange_refresh_token(MagicMock(), old, ["openid"])
+
+        mock_log_auth_flow.assert_called_once_with("token_refresh")
+
+
 class TestRefreshTokenRotationGrace:
     """Ported from rh-mcp: a concurrent connection presenting a just-rotated
     (one-time-use) refresh token must transparently follow it to its
@@ -276,11 +309,14 @@ class TestRefreshTokenRotationGrace:
         assert result is None
         mock_log_auth_flow.assert_called_once_with("refresh_token_miss")
 
-    async def test_load_refresh_token_resolves_chain_one_hop_under_the_cap(self) -> None:
+    async def test_load_refresh_token_resolves_chain_exactly_at_the_cap(self) -> None:
         """Boundary from the other side of test_load_refresh_token_caps_hop_chain:
-        a chain of exactly _ROTATION_MAX_HOPS - 1 hops must still resolve
-        successfully, not get caught by an off-by-one in the < vs <=
-        comparison against _ROTATION_MAX_HOPS."""
+        a chain of exactly _ROTATION_MAX_HOPS hops (hops 0..MAX_HOPS-1, all
+        strictly less than the cap) must still resolve successfully. A
+        chain shorter than this would pass under EITHER a `<` or `<=`
+        comparison against _ROTATION_MAX_HOPS, so it wouldn't actually pin
+        which operator the guard uses -- this length only succeeds if the
+        guard is strict `<`, which is the real invariant being tested."""
         proxy = _build_proxy()
         final_token = _refresh_token("token-final")
 
@@ -295,8 +331,8 @@ class TestRefreshTokenRotationGrace:
             patch("auth.log_auth_flow") as mock_log_auth_flow,
         ):
             # token-0 -> token-1 -> ... -> token-final, exactly
-            # _ROTATION_MAX_HOPS - 1 hops (one under the cap).
-            chain = [f"token-{i}" for i in range(_ROTATION_MAX_HOPS - 1)] + ["token-final"]
+            # _ROTATION_MAX_HOPS hops (0 through _ROTATION_MAX_HOPS - 1).
+            chain = [f"token-{i}" for i in range(_ROTATION_MAX_HOPS)] + ["token-final"]
             for old, new in itertools.pairwise(chain):
                 await proxy._rotation_store.put(
                     collection="mcp-refresh-token-rotations",
@@ -307,7 +343,7 @@ class TestRefreshTokenRotationGrace:
             result = await proxy.load_refresh_token(MagicMock(), "token-0")
 
         assert result is final_token
-        expected_calls = [call("refresh_token_grace_redirect")] * (_ROTATION_MAX_HOPS - 1)
+        expected_calls = [call("refresh_token_grace_redirect")] * _ROTATION_MAX_HOPS
         assert mock_log_auth_flow.call_args_list == expected_calls
 
     async def test_load_refresh_token_caps_hop_chain(self) -> None:

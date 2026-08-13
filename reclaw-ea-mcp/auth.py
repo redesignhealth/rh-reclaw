@@ -19,6 +19,11 @@ a latent gap, not an active production issue today. That proposal doc's
 this rotation-grace gap specifically -- TECH-5153 tracks porting
 ``_ROTATION_*`` here before/if this service is ever deployed standalone,
 independent of whether the plugin-registry merge happens first.
+TECH-5153's scope explicitly includes widening this repo's
+observability.py's own ``log_auth_flow`` ``Literal`` (currently only
+``"new_auth" | "token_refresh"``) to match -- a partial port that only
+touches auth.py would be a mypy error at the new ``log_auth_flow`` call
+sites, and since that helper swallows exceptions, silent at runtime too.
 
 Auth paths
 ----------
