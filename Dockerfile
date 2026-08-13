@@ -1,6 +1,12 @@
+# syntax=docker/dockerfile:1.7
 # Multi-stage build per the RH container-security checklist
 # (topics/09-security.md): pinned slim base, non-root runtime user,
 # no secrets in the image.
+#
+# Requires the `docker/dockerfile:1.7` syntax directive above (not the
+# older default frontend) for RUN --network=host and RUN --mount=type=secret
+# below, which the ea-deps install step needs to reach the Tailscale-only
+# Gitea package index at build time -- see that step's own comment.
 
 # Pinned by digest (not the mutable `3.12-slim` tag) so the base image is
 # reproducible and can't drift underfoot between builds. Resolved via
@@ -18,6 +24,32 @@ RUN pip install --no-cache-dir uv==0.11.28
 # itself is never installed as a wheel (--no-install-project).
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
+
+# The ea provider's extra dependency chain (reclaw_ea, scheduler_mcp,
+# rh-auth) is baked into the image regardless of ENABLED_PROVIDERS at
+# runtime -- enabling `ea` is a config change (main.py:ENABLED_PROVIDERS),
+# not a rebuild. This is a SEPARATE, additive install step: rh-auth (a
+# private Gitea package with no reported upload dates and no Windows
+# build) makes resolving reclaw-ea as a direct root dependency/workspace
+# member unsatisfiable, so ea-deps/ is its own minimal uv project with its
+# own lockfile, installed on top of root's venv via `uv pip install`
+# (never `uv sync`, which would reconcile the venv to ONLY ea-deps' own
+# lockfile and uninstall root's own packages) -- see
+# docs/proposals/reclaw-ea-plugin-registry.md and
+# scripts/install-ea-deps.sh's own header comment for the full writeup.
+# Requires build-time network access to the private Gitea index
+# (gitea.drum-mackarel.ts.net) in addition to PyPI -- `--network=host` lets
+# this RUN step reach it (CI's build job joins Tailscale before starting
+# buildx with `--allow-insecure-entitlement network.host`; locally, `docker
+# build --network=host` works the same). The mounted `netrc` BuildKit
+# secret authenticates to the Gitea package registry; build with:
+#   docker build --secret id=netrc,src=$HOME/.netrc --network=host -t reclaw-comms-mcp .
+COPY ea-deps/pyproject.toml ea-deps/uv.lock ea-deps/
+COPY reclaw-ea/ reclaw-ea/
+COPY scripts/install-ea-deps.sh scripts/install-ea-deps.sh
+RUN --network=host \
+    --mount=type=secret,id=netrc,target=/root/.netrc \
+    bash scripts/install-ea-deps.sh /app/.venv/bin/python
 
 # Copy service code
 COPY . .

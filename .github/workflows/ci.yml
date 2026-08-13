@@ -128,8 +128,63 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # The ea provider's extra dependency chain (reclaw_ea, scheduler_mcp,
+      # rh-auth) is baked into the image regardless of ENABLED_PROVIDERS at
+      # runtime -- ea-deps/'s `uv pip install` needs to reach the private
+      # Gitea PyPI index (gitea.drum-mackarel.ts.net), which has no public
+      # IP and is only reachable over the Redesign Health Tailscale
+      # tailnet. Mirrors redesign-ai's deploy-api.yml / rh-scheduler-mcp's
+      # image-build.yml: join the runner to the tailnet, then give the
+      # BuildKit container itself a route to it via a host-networked
+      # buildx builder.
+      - name: Configure AWS credentials (CI secret reader)
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_CI_READER }}
+          aws-region: us-east-1
+
+      - name: Fetch shared CI secrets from SSM
+        id: ci_secrets
+        uses: ./.github/actions/fetch-shared-ci-secrets
+
+      - name: Join Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ steps.ci_secrets.outputs.ts_client_id }}
+          oauth-secret: ${{ steps.ci_secrets.outputs.ts_client_secret }}
+          tags: tag:ci
+
+      - name: Set up Docker Buildx (host-networked builder)
+        uses: docker/setup-buildx-action@v3
+        with:
+          # Configures the BuildKit docker-container driver itself to use
+          # the host network -- without this the daemon runs in an
+          # isolated namespace and can't see the runner's Tailscale
+          # interface, no matter what the build asks for.
+          driver-opts: network=host
+          buildkitd-flags: --allow-insecure-entitlement network.host
+
+      - name: Write Gitea netrc secret file
+        env:
+          GITEA_READER_TOKEN: ${{ steps.ci_secrets.outputs.gitea_token }}
+        run: |
+          umask 077
+          printf "machine gitea.drum-mackarel.ts.net\n  login rh-reader\n  password %s\n" "$GITEA_READER_TOKEN" > /tmp/netrc
+
       - name: Build image
-        run: docker build -t reclaw-comms-mcp:${{ github.sha }} .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: reclaw-comms-mcp:${{ github.sha }}
+          secret-files: |
+            netrc=/tmp/netrc
+          # Permits --network=host in the Dockerfile's RUN steps so
+          # scripts/install-ea-deps.sh can reach the Tailscale-only Gitea
+          # registry during the build.
+          allow: network.host
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Configure AWS credentials (dev ECR push)
         if: github.ref == 'refs/heads/main'

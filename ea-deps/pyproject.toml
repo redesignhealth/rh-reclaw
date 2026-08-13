@@ -1,0 +1,25 @@
+[project]
+name = "ea-deps"
+version = "0.1.0"
+description = "Standalone uv-locked dependency subtree for the ea provider's reclaw_ea / scheduler_mcp / rh-auth dependency chain."
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "reclaw-ea",
+]
+
+[tool.uv.sources]
+reclaw-ea = { path = "../reclaw-ea", editable = true }
+
+[tool.uv.workspace]
+# Explicit empty workspace declaration -- without this, uv walks up to the
+# nearest ancestor pyproject.toml (reclaw-comms-mcp's, one directory up)
+# and inherits its [tool.uv] settings key-by-key, including
+# `exclude-newer = "7 days"` and (once added) `environments`, either of
+# which makes resolving rh-auth (private Gitea index, no reported upload
+# dates, no win32 build) unsatisfiable. Kept as its own workspace root for
+# exactly the same reason reclaw-ea-mcp/pyproject.toml historically was.
+members = ["."]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"

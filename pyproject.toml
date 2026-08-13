@@ -64,6 +64,17 @@ exclude = ["tests/", "reclaw-ea/", "reclaw-ea-mcp/"]
 module = ["key_value.*"]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+# reclaw_ea/scheduler_mcp are installed into the shared venv separately
+# from this project's own uv.lock (see ea-deps/ and
+# scripts/install-ea-deps.sh) -- root's own `uv sync` never installs them,
+# so a plain lint/type-check run here never has them on disk. Even when
+# they ARE installed (e.g. the Docker build, or a dev machine that's run
+# install-ea-deps.sh), neither package ships a py.typed marker or stubs, so
+# full type-checking against them was never going to work regardless.
+module = ["reclaw_ea.*", "scheduler_mcp.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

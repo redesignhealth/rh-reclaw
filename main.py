@@ -32,7 +32,7 @@ from observability import (
     log_tool_call,
     log_user_active,
 )
-from providers.comms import RESOURCE_SCOPES, TOOL_SCOPES, comms_server
+from providers.registry import resolve_enabled_providers
 from scopes import (
     is_interactive_token,
     required_scope_for,
@@ -242,6 +242,35 @@ class ObservabilityMiddleware(Middleware):
                 log_user_active(email)
 
 
+# Resolved and loaded before anything else is built: an unknown provider
+# name or an empty ENABLED_PROVIDERS must crash the process at startup, not
+# silently drop a provider partway through building the FastMCP app or auth
+# provider. Unset defaults to "comms" so today's (pre-registry) behavior is
+# reproduced exactly. `.load()` is the ONLY point at which a provider
+# module actually gets imported -- see providers/registry.py's docstring
+# for why that matters (prod never imports providers.ea's dependency chain
+# unless "ea" is actually in this list).
+ENABLED_PROVIDERS = os.environ.get("ENABLED_PROVIDERS", "comms")
+_specs = resolve_enabled_providers(ENABLED_PROVIDERS)
+_loaded = [(spec, *spec.load()) for spec in _specs]
+
+TOOL_SCOPES: dict[str, str] = {}
+RESOURCE_SCOPES: dict[str, str] = {}
+for _spec, _server, _tool_scopes, _resource_scopes in _loaded:
+    _tool_collisions = set(TOOL_SCOPES) & set(_tool_scopes)
+    if _tool_collisions:
+        raise RuntimeError(
+            f"Provider '{_spec.name}' redefines already-enabled tool scope(s): {_tool_collisions}"
+        )
+    _resource_collisions = set(RESOURCE_SCOPES) & set(_resource_scopes)
+    if _resource_collisions:
+        raise RuntimeError(
+            f"Provider '{_spec.name}' redefines already-enabled resource scope(s): "
+            f"{_resource_collisions}"
+        )
+    TOOL_SCOPES.update(_tool_scopes)
+    RESOURCE_SCOPES.update(_resource_scopes)
+
 mcp: FastMCP[Any] = FastMCP(
     "reclaw-comms-mcp",
     instructions=(
@@ -280,7 +309,8 @@ mcp.add_middleware(ObservabilityMiddleware())
 # event emitted by ScopeEnforcementMiddleware._deny.
 mcp.add_middleware(ScopeEnforcementMiddleware(TOOL_SCOPES, RESOURCE_SCOPES))
 
-mcp.mount(comms_server, namespace="comms")
+for _spec, _server, _tool_scopes, _resource_scopes in _loaded:
+    mcp.mount(_server, namespace=_spec.name)
 
 
 @mcp.custom_route("/health", methods=["GET"])
@@ -300,7 +330,11 @@ if __name__ == "__main__":
     # builds the engine lazily so DB-less unit tests can import this module
     # freely). This does not open a connection — it only validates the URL
     # is present and well-formed via db.database_url()'s require_env check.
-    database_url()
+    # Gated on whether any enabled provider actually needs a DB (only
+    # `comms` does today) so a comms-less ENABLED_PROVIDERS value never
+    # requires a DATABASE_URL that provider set doesn't use.
+    if any(spec.requires_db for spec in _specs):
+        database_url()
 
     # Default host matches rh-mcp: on ECS the Tailscale sidecar shares the
     # task's network namespace, so the server binds loopback only. Local

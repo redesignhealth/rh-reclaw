@@ -1,0 +1,104 @@
+name: Fetch shared CI secrets (Tailscale + Gitea)
+description: >
+  Fetches the Tailscale OAuth client credentials and the Gitea reader token
+  from SSM (/general/tailscale/*, /general/gitea/rh-reader-token) — shared
+  creds every workflow that joins the tailnet to reach the Tailscale-only
+  Gitea PyPI index needs. TECH-4177: batches what used to be 3 separate
+  `aws ssm get-parameter` calls (duplicated across 4 workflows, 6 call
+  sites) into a single `get-parameters` call with adaptive retry, so
+  concurrent CI runs don't collide on Parameter Store's default throughput
+  and fail with `ThrottlingException` after only 2 attempts (the AWS CLI's
+  legacy retry mode default).
+
+  Requires AWS credentials already configured in the calling job (assume
+  AWS_ROLE_ARN_CI_READER via aws-actions/configure-aws-credentials before
+  this step) and actions/checkout to have already run (composite actions
+  resolve from the checked-out repo).
+
+outputs:
+  ts_client_id:
+    description: Tailscale OAuth client ID
+    value: ${{ steps.fetch.outputs.ts_client_id }}
+  ts_client_secret:
+    description: Tailscale OAuth client secret
+    value: ${{ steps.fetch.outputs.ts_client_secret }}
+  gitea_token:
+    description: Gitea reader token
+    value: ${{ steps.fetch.outputs.gitea_token }}
+
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      shell: bash
+      env:
+        # Adaptive retry directly targets the "reached max retries: 2" error
+        # this ticket exists for — the CLI's default (legacy) retry mode
+        # gives up after 2 attempts on ThrottlingException.
+        AWS_RETRY_MODE: adaptive
+        AWS_MAX_ATTEMPTS: "10"
+      run: |
+        set -euo pipefail
+
+        JSON=$(aws ssm get-parameters \
+          --names /general/tailscale/oauth-client-id /general/tailscale/oauth-client-secret /general/gitea/rh-reader-token \
+          --with-decryption --output json)
+
+        # get-parameters (plural) does NOT fail the call for a name it can't
+        # resolve — it silently drops it into InvalidParameters instead.
+        # Without this check, a typo'd/renamed/deleted SSM path would surface
+        # as a blank credential passed to tailscale/github-action three steps
+        # later (an unhelpful auth failure) rather than a clear error here.
+        INVALID=$(echo "$JSON" | jq -r '.InvalidParameters | length')
+        if [ "$INVALID" != "0" ]; then
+          echo "::error::get-parameters could not resolve: $(echo "$JSON" | jq -c '.InvalidParameters')"
+          exit 1
+        fi
+
+        TS_ID=$(echo "$JSON" | jq -r '.Parameters[] | select(.Name=="/general/tailscale/oauth-client-id") | .Value')
+        TS_SECRET=$(echo "$JSON" | jq -r '.Parameters[] | select(.Name=="/general/tailscale/oauth-client-secret") | .Value')
+        GITEA_TOKEN=$(echo "$JSON" | jq -r '.Parameters[] | select(.Name=="/general/gitea/rh-reader-token") | .Value')
+
+        # Mask immediately after extraction, before any validation logic —
+        # not after it. Nothing in the guard below currently echoes a value,
+        # but masking first means a future debug line added inside it can't
+        # accidentally leak one unmasked.
+        echo "::add-mask::${TS_ID}"
+        echo "::add-mask::${TS_SECRET}"
+        echo "::add-mask::${GITEA_TOKEN}"
+
+        # InvalidParameters only catches a name SSM can't resolve at all — a
+        # parameter that exists but was accidentally cleared to an empty
+        # value would sail through that check and only surface three steps
+        # later as an opaque tailscale/github-action auth failure. Catch it
+        # here with a clear error pointing at the actual missing value.
+        # Also reject the literal string "null": SSM parameter values are
+        # always non-null per the API's own Parameter schema, so this can
+        # only mean `jq` resolved an absent/missing field rather than the
+        # empty case above — same failure mode, same fix, still worth its
+        # own explicit check since it wouldn't trip the empty-string test.
+        for pair in "ts_client_id:${TS_ID}" "ts_client_secret:${TS_SECRET}" "gitea_token:${GITEA_TOKEN}"; do
+          name="${pair%%:*}"
+          value="${pair#*:}"
+          if [ -z "$value" ] || [ "$value" = "null" ]; then
+            echo "::error::SSM resolved ${name} to an empty or null value"
+            exit 1
+          fi
+        done
+
+        # Heredoc form (random delimiter) rather than `key=value`, which
+        # breaks silently if a value ever contained a newline (unlikely for
+        # these three opaque tokens, but the heredoc form is the standard
+        # GitHub-recommended mitigation and costs nothing extra here).
+        DELIM="ghadelim_$(openssl rand -hex 16)"
+        {
+          echo "ts_client_id<<${DELIM}"
+          echo "${TS_ID}"
+          echo "${DELIM}"
+          echo "ts_client_secret<<${DELIM}"
+          echo "${TS_SECRET}"
+          echo "${DELIM}"
+          echo "gitea_token<<${DELIM}"
+          echo "${GITEA_TOKEN}"
+          echo "${DELIM}"
+        } >> "$GITHUB_OUTPUT"
