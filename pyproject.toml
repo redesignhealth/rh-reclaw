@@ -1,11 +1,9 @@
 [project]
-name = "reclaw-comms-mcp"
+name = "agent-comms-mcp"
 version = "0.1.0"
-description = "MCP service for permissioned, structured agent-to-agent communications at Redesign Health"
+description = "MCP service for permissioned, structured agent-to-agent communications"
 requires-python = ">=3.12"
-# Exact pins per the RH dependency-pinning policy (topics/09-security.md).
-# fastmcp is pinned to the same version as rh-mcp / rh-google-mcp so
-# MultiAuth / OIDCProxy / JWTVerifier behavior matches the fleet.
+# Exact version pins for reproducible builds.
 dependencies = [
     "alembic==1.18.5",
     "asyncpg==0.31.0",
@@ -46,7 +44,7 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 strict = true
 python_version = "3.12"
-# "tests/" excludes this project's OWN test suite from strict mode.
+# "tests/" excludes this project's test suite from strict mode.
 exclude = ["tests/"]
 
 [[tool.mypy.overrides]]
@@ -59,13 +57,11 @@ testpaths = ["tests"]
 
 [tool.setuptools]
 # Flat-layout app (main.py, providers/, etc.) — no installable package.
-# The Dockerfile uses `uv sync --no-install-project` so the wheel is never
-# built in prod (same idiom as rh-mcp).
+# The Dockerfile uses `uv sync --no-install-project` so the wheel is never built.
 py-modules = []
 
 [tool.uv]
-# Supply-chain defense: refuse packages published in the last 7 days
-# (same idiom as rh-mcp / rh-google-mcp).
+# Supply-chain defense: refuse packages published in the last 7 days.
 exclude-newer = "7 days"
 
 [build-system]

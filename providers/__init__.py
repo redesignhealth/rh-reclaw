@@ -1,4 +1,4 @@
-"""Provider sub-servers mounted on the root FastMCP server (rh-mcp layout).
+"""Provider sub-servers mounted on the root FastMCP server.
 
 One module per provider; each exposes a ``FastMCP`` sub-server that main.py
 mounts under a namespace. Tool names become ``<namespace>_<tool>`` and must

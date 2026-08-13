@@ -98,7 +98,7 @@ async def post_message(
 
 
 SERVICE_ROOT = Path(__file__).parent.parent
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/agent_comms"
 
 
 def _test_database_url() -> str:

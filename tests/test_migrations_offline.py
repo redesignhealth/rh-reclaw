@@ -25,7 +25,7 @@ SERVICE_ROOT = Path(__file__).parent.parent
 # Same default as docker-compose.yml's `postgres` service — irrelevant to
 # this test's actual behavior (offline mode never connects), but Alembic's
 # config still expects DATABASE_URL to be set and well-formed at import time.
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/agent_comms"
 
 
 def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:

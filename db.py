@@ -1,4 +1,4 @@
-"""Async SQLAlchemy engine/session wiring for reclaw-comms-mcp.
+"""Async SQLAlchemy engine/session wiring for agent-comms-mcp.
 
 Pure-Postgres persistence per the RH data standard
 (topics/03-data-persistence.md): SQLAlchemy 2.x (async) + asyncpg, with

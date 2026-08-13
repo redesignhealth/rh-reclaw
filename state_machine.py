@@ -69,7 +69,7 @@ def resulting_conversation_state(
       participant-status update (to ``'declined'``) is a separate,
       participant-level effect the service layer applies itself — this
       function only reports the *conversation*-level transition.
-    - ``task_complete`` -> always transitions to ``'completed'`` (TECH-5118
+    - ``task_complete`` -> always transitions to ``'completed'`` (
       "tasks-as-conversations": unlike scheduling's ``decline``, a task
       conversation's ``task_decline``/``task_cancel`` transition
       unconditionally, not via the all-non-owners-declined cascade — see

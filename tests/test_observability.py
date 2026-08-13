@@ -27,13 +27,13 @@ from observability import (
 
 class TestHashUser:
     def test_email_shaped_input_returns_local_part(self) -> None:
-        assert hash_user("dan.costanza@redesignhealth.com") == "dan.costanza"
+        assert hash_user("user@example.com") == "user"
 
     def test_non_email_slug_shaped_input_passes_through_unchanged(self) -> None:
         assert hash_user("ea-agent-svc") == "ea-agent-svc"
 
     def test_strips_surrounding_whitespace(self) -> None:
-        assert hash_user("  person@redesignhealth.com  ") == "person"
+        assert hash_user("  person@example.com  ") == "person"
 
 
 class TestConfigureLoggingIdempotent:
@@ -139,7 +139,7 @@ class TestFallbackLoggerPaths:
     def test_log_user_active_fallback_does_not_raise(self) -> None:
         with patch.object(observability.obs_log, "info", side_effect=RuntimeError("boom")):
             with patch.object(observability._fallback_logger, "warning") as mock_warning:
-                log_user_active("person@redesignhealth.com")
+                log_user_active("person@example.com")
         mock_warning.assert_called_once()
         assert mock_warning.call_args.kwargs.get("exc_info") is True
 

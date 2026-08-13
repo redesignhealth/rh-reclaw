@@ -4,8 +4,8 @@ Revision ID: da3e1646c44d
 Revises: 15ef34885e30
 Create Date: 2026-08-12 14:42:56.308473
 
-TECH-5118 phase 3 ("tasks-as-conversations"): drops the dedicated `tasks`
-table and `audit_log.task_id` FK/index added by 6d2a8e63e469 (TECH-5094),
+ ("tasks-as-conversations"): drops the dedicated `tasks`
+table and `audit_log.task_id` FK/index added by 6d2a8e63e469,
 now that task lifecycle is represented as a conversation carrying
 `task_assign`/`task_report`/`task_complete`/`task_decline`/`task_cancel`
 messages instead. 6d2a8e63e469 is already applied on `main`/dev (confirmed:
@@ -14,7 +14,7 @@ revision's own frozen-file note, this is a NEW revision, not an edit to
 6d2a8e63e469 in place.
 
 NOTE on in-place amendment: authored and iterated on entirely within this
-single unmerged PR (TECH-5118) -- it does not exist on `main`, and has
+single unmerged PR -- it does not exist on `main`, and has
 never been applied to any persistent or shared database. In-place
 amendment during code review is therefore safe. Once this PR merges, treat
 this file as frozen: any further schema change requires a NEW Alembic

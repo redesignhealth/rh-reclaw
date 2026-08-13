@@ -1,4 +1,4 @@
-"""Alembic environment for reclaw-comms-mcp.
+"""Alembic environment for agent-comms-mcp.
 
 Async-Alembic idiom (SQLAlchemy 2.x): the sync Alembic runtime drives an
 async engine via ``AsyncEngine.run_sync``, so autogenerate and

@@ -18,23 +18,23 @@ class TestWhoami:
         token = MagicMock()
         token.claims = {
             "iss": "https://example.okta.com/oauth2/default",
-            "email": "alice@redesignhealth.com",
+            "email": "alice@example.com",
         }
 
         with patch("providers.comms.get_access_token", return_value=token):
             result = asyncio.run(_whoami())
 
         assert result == {
-            "identity": "alice@redesignhealth.com",
+            "identity": "alice@example.com",
             "issuer": "https://example.okta.com/oauth2/default",
             "caller_type": "interactive",
             "scopes": [],
         }
 
-    def test_rh_auth_caller_reports_service_identity_and_scopes(self) -> None:
+    def test_agent_jwt_caller_reports_service_identity_and_scopes(self) -> None:
         token = MagicMock()
         token.claims = {
-            "iss": "rh-auth",
+            "iss": "agent-jwt",
             "sub": "ea-agent-svc",
             "scopes": ["comms:read"],
         }
@@ -44,19 +44,19 @@ class TestWhoami:
 
         assert result == {
             "identity": "ea-agent-svc",
-            "issuer": "rh-auth",
+            "issuer": "agent-jwt",
             "caller_type": "service",
             "scopes": ["comms:read"],
         }
 
-    def test_rh_auth_caller_with_forged_email_claim_is_not_impersonated(self) -> None:
-        """rh-auth identity comes from ``sub`` only — a forged ``email``
+    def test_agent_jwt_caller_with_forged_email_claim_is_not_impersonated(self) -> None:
+        """agent-jwt identity comes from ``sub`` only — a forged ``email``
         claim must not surface as the caller identity."""
         token = MagicMock()
         token.claims = {
-            "iss": "rh-auth",
+            "iss": "agent-jwt",
             "sub": "ea-agent-svc",
-            "email": "victim@redesignhealth.com",
+            "email": "victim@example.com",
             "scopes": ["comms:read"],
         }
 

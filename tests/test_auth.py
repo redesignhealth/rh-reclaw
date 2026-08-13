@@ -74,8 +74,8 @@ class TestExtractUpstreamClaims:
         id_token = _fake_id_token(
             {
                 "sub": "okta-sub-123",
-                "email": "person@redesignhealth.com",
-                "preferred_username": "person@redesignhealth.com",
+                "email": "person@example.com",
+                "preferred_username": "person@example.com",
                 "name": "Person Name",
                 "iat": 1700000000,
                 "exp": 1700003600,
@@ -86,8 +86,8 @@ class TestExtractUpstreamClaims:
 
         assert claims == {
             "sub": "okta-sub-123",
-            "email": "person@redesignhealth.com",
-            "preferred_username": "person@redesignhealth.com",
+            "email": "person@example.com",
+            "preferred_username": "person@example.com",
             "name": "Person Name",
         }
 

@@ -1,19 +1,18 @@
-# reclaw-comms-mcp
+# agent-comms-mcp
 
-MCP service for **permissioned, structured agent-to-agent communications** at
-Redesign Health. First use case: a user's main agent delegates to a dedicated
-EA agent, which communicates with other people's EA agents to negotiate
-availability (including judgment, not just calendar overlap). Communications
-are scoped and structured — no free text initially. See
-[`docs/DESIGN.md`](docs/DESIGN.md) for the full spec (data model, permission
-model, message schemas). EA agent logic lives elsewhere — this repo is only
-the comms layer.
+MCP service for **permissioned, structured agent-to-agent communications**.
+First use case: a user's main agent delegates to a dedicated EA agent, which
+communicates with other people's EA agents to negotiate availability (including
+judgment, not just calendar overlap). Communications are scoped and structured
+— no free text initially. See [`docs/DESIGN.md`](docs/DESIGN.md) for the full
+spec (data model, permission model, message schemas). EA agent logic lives
+elsewhere — this repo is only the comms layer.
 
 ## Layout
 
 ```
 main.py              # FastMCP server, observability + scope-enforcement middleware
-auth.py              # Okta OIDCProxy (humans) + rh-auth JWTVerifier (agents) via MultiAuth
+auth.py              # Okta OIDCProxy (humans) + agent-jwt JWTVerifier (agents) via MultiAuth
 scopes.py            # TOOL_SCOPES catalog + fail-closed scope helpers
 identity.py          # Issuer-gated JWT identity resolution (anti-impersonation guards)
 observability.py     # structlog JSON events (tool_call, scope_denial, auth_flow, ...)
@@ -67,9 +66,6 @@ fail-closed `scopes.TOOL_SCOPES` registry. Source of truth:
 | `comms_invite` | `comms:write` | Invite another board agent into an active conversation (as `invited`) |
 | `comms_leave` | `comms:write` | Leave a conversation the caller is currently `active` in |
 
-The layout mirrors [rh-mcp](https://github.com/redesignhealth/rh-data-platform/tree/main/services/rh-mcp),
-the reference MCP implementation in the [RH tech guide](https://github.com/redesignhealth/rh-tech-guide).
-
 ## Auth model
 
 Both humans and machines POST to the same `/mcp` endpoint; FastMCP
@@ -79,13 +75,12 @@ Both humans and machines POST to the same `/mcp` endpoint; FastMCP
   `OIDCProxy`. Identity claims (email) are available to tools via
   `get_access_token().claims`. Interactive callers bypass per-tool scope
   checks.
-- **Agents / services**: rh-auth HS256 Bearer JWT (issued by the Tech Team
-  via `rh-auth issue --sub <agent> --scopes comms:read,...`), verified by a
-  `JWTVerifier` keyed to `RH_AUTH_SECRET`. Every tool call is then gated by
-  the `TOOL_SCOPES` catalog in `scopes.py` — **fail-closed**: a tool without
-  a registry entry rejects every rh-auth call, denial messages are uniform
-  (anti-enumeration), and each denial emits a structured `scope_denial` log
-  event.
+- **Agents / services**: HS256 Bearer JWT with `iss="agent-jwt"`, `sub`, and
+  `scopes` claims, verified by a `JWTVerifier` keyed to `AGENT_JWT_SECRET`.
+  Every tool call is then gated by the `TOOL_SCOPES` catalog in `scopes.py`
+  — **fail-closed**: a tool without a registry entry rejects every agent
+  call, denial messages are uniform (anti-enumeration), and each denial emits
+  a structured `scope_denial` log event.
 
 When adding a tool, enroll its mounted name (`comms_<tool>`) in
 `TOOL_SCOPES` in the same PR — `tests/test_main.py` fails otherwise.
@@ -100,7 +95,7 @@ uv sync                      # install deps from uv.lock
 # Start Postgres, apply migrations, then run the tests (see "Database /
 # migrations" below for why the port is 55432, not 5432)
 docker compose up -d postgres
-export DATABASE_URL=postgresql://postgres:postgres@localhost:55432/reclaw_comms
+export DATABASE_URL=postgresql://postgres:postgres@localhost:55432/agent_comms
 uv run alembic upgrade head
 uv run pytest                # tests
 uv run ruff check . && uv run ruff format --check .
@@ -129,7 +124,7 @@ native Postgres bound to the default host port 5432, which silently
 collides with `docker-compose.yml`'s old `5432:5432` mapping (you'd connect
 to the wrong database with no error). Moving the compose Postgres's
 *host-side* port to 55432 sidesteps this permanently; nothing about the
-container's internal networking changes, so the `reclaw-comms-mcp`
+container's internal networking changes, so the `agent-comms-mcp`
 service's own `DATABASE_URL` (which reaches `postgres` by service name on
 the internal port 5432) is unaffected.
 
@@ -138,7 +133,7 @@ the real-database tests:
 
 ```bash
 docker compose up -d postgres      # start Postgres only (host port 55432)
-export DATABASE_URL=postgresql://postgres:postgres@localhost:55432/reclaw_comms
+export DATABASE_URL=postgresql://postgres:postgres@localhost:55432/agent_comms
 uv run alembic upgrade head        # create/upgrade the 5-table schema
 ```
 
@@ -160,59 +155,40 @@ and skip gracefully with a clear reason if they can't connect.
 
 Configuration is env-driven and **fail-fast**: the service refuses to start
 if any required variable (`OKTA_ISSUER_URL`, `OKTA_CLIENT_ID`,
-`OKTA_CLIENT_SECRET`, `MCP_JWT_SECRET`, `RH_AUTH_SECRET`) is missing or
+`OKTA_CLIENT_SECRET`, `MCP_JWT_SECRET`, `AGENT_JWT_SECRET`) is missing or
 empty. See `.env.example` for the full list. No secrets are committed
 anywhere in this repo.
 
 ## Observability
 
-Structured JSON logs via `structlog` to stdout → CloudWatch. Event schema
-matches the MCP fleet (`tool_call`, `user_active`, `auth_flow`,
-`auth_rejected`, `scope_denial`) so existing Metric Filters / Logs Insights
-queries apply. Never log message content or attacker-controlled claim
-values.
+Structured JSON logs via `structlog` to stdout. Events follow the schema in
+`observability.py` (`tool_call`, `user_active`, `auth_flow`, `auth_rejected`,
+`scope_denial`). Message content and attacker-controlled claim values are
+never logged.
 
 ## Deployment
 
-Runs as an **ECS Fargate task with a Tailscale sidecar** (tailnet-only, no
-public endpoint) in both `dev` and `prod`, provisioned by Terraform in
-[`rh-data-platform`](https://github.com/redesignhealth/rh-data-platform)
-(`infrastructure/environments/{dev,prod}/reclaw_comms.tf`). No Terraform
-lives in this repo — that repo keeps all infrastructure in its own
-`infrastructure/` tree.
+The service is a standard Python HTTP process backed by PostgreSQL. The
+included `Dockerfile` and `docker-compose.yml` cover local and self-hosted
+deployments.
 
-**The two repos are split, so a merge to this repo's `main` does NOT by
-itself redeploy anything.** This repo's own CI (`.github/workflows/ci.yml`,
-`build` job) only builds the image and pushes it, tagged `sha-<commit-sha>`,
-to both ECR repos (`rh-platform-dev/apps/reclaw-comms-mcp` and
-`rh-platform/apps/reclaw-comms-mcp`) — it stops there. Getting that image
-running requires a second, manual step in `rh-data-platform`:
+**Quick start (Docker Compose):**
 
-1. Confirm the merge commit's image landed in both ECR repos — check this
-   repo's `main`-branch CI run for the `Docker build` job, or:
-   ```bash
-   aws ecr describe-images --repository-name rh-platform-dev/apps/reclaw-comms-mcp \
-     --image-ids imageTag=sha-<commit-sha> --region us-east-1
-   aws ecr describe-images --repository-name rh-platform/apps/reclaw-comms-mcp \
-     --image-ids imageTag=sha-<commit-sha> --region us-east-1
-   ```
-2. Trigger the deploy workflow in `rh-data-platform` (requires `actions:write`
-   there):
-   ```bash
-   gh workflow run deploy-reclaw-comms.yml -R redesignhealth/rh-data-platform \
-     -f image_tag=sha-<commit-sha>
-   ```
-3. **This one dispatch deploys dev, then prod, automatically — there is no
-   approval gate between them** (a known, deliberately-deferred gap in that
-   workflow, tracked there as TECH-5089; don't assume dev is a safety net
-   before prod rolls out). Watch the run via the URL the command above
-   prints, or `gh run list -R redesignhealth/rh-data-platform --workflow
-   deploy-reclaw-comms.yml`.
+```bash
+cp .env.example .env   # fill in real values
+docker compose up --build
+```
 
-See `rh-data-platform/.github/workflows/deploy-reclaw-comms.yml`'s own
-header comment for the full mechanics (image-tag validation against both
-ECR repos, then a `deploy-terraform.yml` call per environment that commits
-the new tag into `terraform.tfvars` and applies it), and
-`redesign-health-data/docs/deployment/SSM_DEPLOYMENT.md`'s "reclaw-comms-mcp"
-section for the underlying SSM parameter / Okta app bootstrap that only
-needs to happen once per environment, not on every deploy.
+**Required environment variables** (see `.env.example`):
+
+| Variable | Purpose |
+|---|---|
+| `OKTA_ISSUER_URL` | Okta OIDC issuer URL for interactive callers |
+| `OKTA_CLIENT_ID` | Okta app client ID |
+| `OKTA_CLIENT_SECRET` | Okta app client secret |
+| `MCP_JWT_SECRET` | Signing secret for FastMCP's internal OAuth JWTs |
+| `AGENT_JWT_SECRET` | Shared HS256 secret for agent JWT verification |
+| `DATABASE_URL` | PostgreSQL connection string |
+
+`entrypoint.sh` runs `alembic upgrade head` automatically on every container
+start, so migrations apply before the server accepts traffic.

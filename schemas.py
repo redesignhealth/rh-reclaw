@@ -63,7 +63,7 @@ from pydantic import (
     model_validator,
 )
 
-# Conversation types known to the board (TECH-5118, DESIGN.md §9 "two axes"):
+# Conversation types known to the board:
 # admission policy only, decoupled from which message types a conversation
 # carries (see MESSAGE_SCHEMAS below). Used to validate ``conversations.type``
 # at start time.
@@ -95,7 +95,7 @@ MAX_PAYLOAD_BYTES = 65536
 
 # Caller-supplied suffix a caller may append to its own verified identity to
 # register multiple distinct agent rows under one token (providers/comms.py
-# `register`'s `agent_key` param, TECH-5113) -- see the comment there for
+# `register`'s `agent_key` param) -- see the comment there for
 # why this exists and why it's a stopgap. Same generous-margin sizing
 # rationale as MAX_ACCEPTED_TYPE_LENGTH above.
 MAX_AGENT_KEY_LENGTH = 100
@@ -291,8 +291,8 @@ def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
 
 
 class TaskAssignV1(_StrictModel):
-    """task_assign / v1 — opens a task-coordination conversation (TECH-5118,
-    DESIGN.md §9; supersedes TECH-5094's ``task_spec``/dedicated ``tasks``
+    """task_assign / v1 — opens a task-coordination conversation (,
+    DESIGN.md §9; supersedes's ``task_spec``/dedicated ``tasks``
     table). Posted as the seq-1 message of an ``internal``/``asymmetric``
     conversation between the assigning agent (participant ``role='owner'``)
     and the assignee (participant ``role='member'``).
@@ -395,7 +395,7 @@ class MessageSchema(NamedTuple):
 
 
 # Registry: (message_type, schema_version) -> MessageSchema. Deliberately
-# independent of conversation type (TECH-5118, DESIGN.md §9) — legality of
+# independent of conversation type — legality of
 # a given message type under a given conversation type is decided by
 # state_machine.py from ``boundary_safe`` + conversation type, not baked
 # into this key. Every ``model`` is a concrete BaseModel subclass (never a
@@ -418,7 +418,7 @@ MESSAGE_SCHEMAS: dict[tuple[str, int], MessageSchema] = {
 
 
 # All message types that have at least one registered schema version.
-# Used to validate ``Agent.accepted_types`` entries (TECH-5118 phase 4):
+# Used to validate ``Agent.accepted_types`` entries:
 # an agent declares which message types it will accept, not which
 # conversation admission type, so the vocabulary is message-type-scoped.
 MESSAGE_TYPES: frozenset[str] = frozenset(mt for mt, _ in MESSAGE_SCHEMAS)
