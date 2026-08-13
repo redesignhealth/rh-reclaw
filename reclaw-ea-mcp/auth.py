@@ -1,11 +1,18 @@
 """Okta OIDC + rh-auth JWT authentication for reclaw-ea-mcp.
 
-Identical shape to reclaw-comms-mcp/auth.py one directory up (same fleet
-pattern, adapted from rh-data-platform ``services/rh-mcp/auth.py``, the
-reference implementation named in the RH tech guide,
-topics/04-auth-and-identity.md §MCP Server Auth). See that module's
-docstring for the full auth-path writeup; only the differences are called
-out here.
+Same fleet pattern as reclaw-comms-mcp/auth.py one directory up (both
+adapted from rh-data-platform ``services/rh-mcp/auth.py``, the reference
+implementation named in the RH tech guide, topics/04-auth-and-identity.md
+§MCP Server Auth). See that module's docstring for the full auth-path
+writeup; only the differences are called out here.
+
+KNOWN DIVERGENCE (not yet reconciled): reclaw-comms-mcp/auth.py has since
+gained the refresh-token rotation-grace mechanism (``_ROTATION_*``) to fix
+forced Okta re-auths under concurrent connections sharing one cached
+refresh token. This service runs the identical FastMCP OIDCProxy + Okta
+app combination and is subject to the same one-time-use rotation behavior,
+but has not been ported yet. See docs/proposals/reclaw-ea-plugin-registry.md
+§1 for the broader plan to reconcile these two auth.py files.
 
 Auth paths
 ----------

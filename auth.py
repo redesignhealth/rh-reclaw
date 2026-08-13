@@ -29,6 +29,20 @@ and force a full Okta re-auth. We record a short-lived
 old-token-hash -> new-token mapping in the same EFS-backed store on every
 rotation; a subsequent "miss" checks this mapping first and transparently
 follows it before declaring a real miss.
+
+This is now duplicated verbatim across at least this service and rh-mcp
+(and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet despite
+running the identical FastMCP OIDCProxy + Okta app combination -- same
+forced-re-auth exposure there, not yet ported). Extraction into a shared
+``rh_lib``-style base class is a reasonable follow-up once a third copy
+exists; not done here to avoid a cross-repo refactor as a side effect of
+a one-service bug fix.
+
+Emitting ``refresh_token_miss`` on a path that previously logged nothing
+means an undiscriminating ``$.event = "auth_flow"`` CloudWatch filter now
+also counts failed refresh lookups as auth activity -- worth an explicit
+metric filter on ``auth_type = "refresh_token_miss"`` if this gets alerted
+on, not just folded into an undifferentiated auth_flow count.
 """
 
 from __future__ import annotations
@@ -97,9 +111,9 @@ class OktaOIDCProxy(OIDCProxy):
     structured ``auth_flow`` events for CloudWatch Metric Filters.
     """
 
-    def __init__(self, **kwargs: Any) -> None:
-        self._rotation_store: AsyncKeyValue = kwargs["client_storage"]
-        super().__init__(**kwargs)
+    def __init__(self, *, client_storage: AsyncKeyValue, **kwargs: Any) -> None:
+        self._rotation_store = client_storage
+        super().__init__(client_storage=client_storage, **kwargs)
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
         """Decode the Okta ID token and extract identity claims.
@@ -159,7 +173,6 @@ class OktaOIDCProxy(OIDCProxy):
         self,
         client: OAuthClientInformationFull,
         refresh_token: str,
-        _hops: int = 0,
     ) -> RefreshToken | None:
         """Look up a refresh token, following a rotation-grace redirect on miss.
 
@@ -169,18 +182,50 @@ class OktaOIDCProxy(OIDCProxy):
         declaring a real miss, check whether this token was rotated recently
         and, if so, transparently follow it to its successor (capped at
         ``_ROTATION_MAX_HOPS`` to bound a pathological chain).
+
+        No hop counter in this signature on purpose: it's the base class's
+        override point (FastMCP calls it positionally), so a public
+        ``_hops`` parameter would let any caller reset the cap. Hop-tracking
+        lives in the private ``_follow_rotation_grace`` instead.
         """
         result = await super().load_refresh_token(client, refresh_token)
         if result is not None:
             return result
+        return await self._follow_rotation_grace(client, refresh_token, hops=0)
+
+    async def _follow_rotation_grace(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+        *,
+        hops: int,
+    ) -> RefreshToken | None:
+        """Recursive hop-following helper for ``load_refresh_token``.
+
+        Not reachable from outside this class -- the hop counter that
+        enforces ``_ROTATION_MAX_HOPS`` is a keyword-only parameter of a
+        private method, not an overridable default on the public override
+        point FastMCP calls.
+        """
         entry = await self._rotation_store.get(
             collection=_ROTATION_COLLECTION, key=_hash_token(refresh_token)
         )
         successor = entry.get("new_token") if entry is not None else None
-        if successor and _hops < _ROTATION_MAX_HOPS:
+        if successor and hops < _ROTATION_MAX_HOPS:
             logger.info("Refresh token reuse detected: redirecting to rotated successor")
             log_auth_flow("refresh_token_grace_redirect")
-            return await self.load_refresh_token(client, successor, _hops + 1)
+            result = await super().load_refresh_token(client, successor)
+            if result is not None:
+                return result
+            return await self._follow_rotation_grace(client, successor, hops=hops + 1)
+        if successor:
+            # Distinguishable from a genuine miss below: the chain kept
+            # going past the cap, not "no rotation entry at all" -- worth
+            # a separate signal for on-call triage.
+            logger.warning(
+                "Refresh token rotation-grace hop cap exceeded",
+                extra={"hops": hops, "token_hash": _hash_token(refresh_token)},
+            )
         log_auth_flow("refresh_token_miss")
         return None
 
@@ -196,6 +241,15 @@ class OktaOIDCProxy(OIDCProxy):
         result = await super().exchange_refresh_token(client, refresh_token, scopes)
         log_auth_flow("token_refresh")
         if result.refresh_token:
+            # SECURITY: the stored value is the live successor refresh
+            # token in plaintext, not a hash -- the hashed KEY only
+            # prevents reverse-lookup of the just-consumed OLD token, it
+            # does not protect the new one. Accepted posture, at parity
+            # with rh-mcp (the source of this port): this collection lives
+            # in the same EFS-backed, task-role-scoped store as the primary
+            # token store, which already holds live refresh tokens
+            # unencrypted (see build_okta_provider's client_storage). Anyone
+            # who can read one collection can read the other.
             await self._rotation_store.put(
                 collection=_ROTATION_COLLECTION,
                 key=_hash_token(old_token),

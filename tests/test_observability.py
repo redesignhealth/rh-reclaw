@@ -166,3 +166,20 @@ class TestFallbackLoggerPaths:
                 log_scope_denial(tool="comms_whoami", reason="missing_token", client_id="unknown")
         mock_warning.assert_called_once()
         assert mock_warning.call_args.kwargs.get("exc_info") is True
+
+
+class TestLogAuthFlowRotationGraceEventTypes:
+    """``Literal`` isn't enforced at runtime, and mypy alone doesn't confirm
+    the actual emitted JSON field -- these pin the two new auth_type values
+    added for the refresh-token rotation-grace port (auth.py) actually reach
+    ``obs_log.info`` with the exact literal, not a typo'd string."""
+
+    def test_refresh_token_grace_redirect_reaches_obs_log(self) -> None:
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("refresh_token_grace_redirect")
+        mock_info.assert_called_once_with("auth_flow", auth_type="refresh_token_grace_redirect")
+
+    def test_refresh_token_miss_reaches_obs_log(self) -> None:
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("refresh_token_miss")
+        mock_info.assert_called_once_with("auth_flow", auth_type="refresh_token_miss")

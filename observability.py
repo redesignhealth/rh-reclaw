@@ -19,6 +19,12 @@ tool_call:
 auth_flow:
     {"event": "auth_flow", "service": "...",
      "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|refresh_token_miss"}
+    The latter two values are emitted on a path that previously logged
+    nothing at all (rh-mcp's rotation-grace port, auth.py). A
+    ``$.event = "auth_flow"`` filter that doesn't discriminate on
+    ``auth_type`` now also counts failed refresh-token lookups as auth
+    activity; an alarm on ``auth_type = "refresh_token_miss"`` specifically
+    needs its own metric filter, not reuse of an undifferentiated count.
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",
