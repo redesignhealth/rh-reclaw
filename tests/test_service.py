@@ -42,7 +42,13 @@ from exceptions import (
     UnknownConversationTypeError,
 )
 from models import Agent, AuditLog, Conversation, Participant
-from schemas import MAX_ACCEPTED_TYPE_LENGTH, MAX_PAYLOAD_BYTES, PayloadValidationError
+from schemas import (
+    MAX_ACCEPTED_TYPE_LENGTH,
+    MAX_ACCEPTED_TYPES,
+    MAX_PAYLOAD_BYTES,
+    MESSAGE_TYPES,
+    PayloadValidationError,
+)
 from service import (
     CONVERSATION_TTL,
     MAX_CONVERSATION_STARTS_PER_HOUR,
@@ -185,7 +191,10 @@ async def _register(session: AsyncSession, sub: str, **overrides: Any) -> Agent:
         "owner_sub": f"owner-{sub}",
         "owner_email": f"{sub}@example.com",
         "display_name": sub,
-        "accepted_types": ["availability_request"],
+        # Permissive default so tests unrelated to the accepted_types
+        # capability gate (TestMessageTypeAccepted) don't need to opt in
+        # per-type; those tests narrow this explicitly via overrides.
+        "accepted_types": sorted(MESSAGE_TYPES),
     }
     kwargs.update(overrides)
     return await register_agent(session, **kwargs)
@@ -1768,6 +1777,159 @@ class TestPostMessageBoundaryCrossing:
         actions = await _audit_actions(session, conversation.id)
         assert "denied.ownership_unverified" in actions
         assert "denied.boundary_crossing" not in actions
+
+
+class TestMessageTypeAcceptedCapability:
+    """accepted_types is a capability gate, not a trust boundary (DESIGN.md
+    §9's Capability gate section): applies universally, including to
+    ``internal`` same-owner traffic that the boundary-crossing check itself
+    always allows."""
+
+    async def test_start_conversation_denied_when_target_has_not_declared_type(
+        self, session: AsyncSession
+    ) -> None:
+        initiator = await _register(session, "cap-start-initiator")
+        target = await _register(session, "cap-start-target", accepted_types=["confirm"])
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await start_conversation(
+                session,
+                actor_sub=initiator.sub,
+                initiator_agent_id=initiator.id,
+                conversation_type="open",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+                message_type="availability_request",
+            )
+        assert exc_info.value.reason == "denied.message_type_not_accepted"
+
+    async def test_start_conversation_allowed_when_target_declared_type(
+        self, session: AsyncSession
+    ) -> None:
+        initiator = await _register(session, "cap-start-ok-initiator")
+        target = await _register(
+            session, "cap-start-ok-target", accepted_types=["availability_request"]
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            message_type="availability_request",
+        )
+        assert conversation.type == "open"
+
+    async def test_post_message_denied_when_recipient_has_not_declared_type(
+        self, session: AsyncSession
+    ) -> None:
+        # initiator's accepted_types is deliberately narrow -- it's the
+        # RECIPIENT of the counter_proposal posted below, not the sender of
+        # it, so its declared set is what's actually under test here.
+        initiator = await _register(
+            session, "cap-post-initiator", accepted_types=["availability_request"]
+        )
+        other = await _register(session, "cap-post-other")
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[other.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=other.sub, agent_id=other.id, conversation_id=conversation.id
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=other.sub,
+                sender_agent_id=other.id,
+                conversation_id=conversation.id,
+                message_type="counter_proposal",
+                payload=_counter_proposal_payload(),
+            )
+        assert exc_info.value.reason == "denied.message_type_not_accepted"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.message_type_not_accepted" in actions
+
+    async def test_post_message_applies_even_within_internal_conversation(
+        self, session: AsyncSession
+    ) -> None:
+        """The one case that distinguishes this from boundary_safe's own
+        crossing check: internal (identical owner sets) is unconditionally
+        legal for boundary-crossing purposes, but must still be denied here
+        -- a missing handler is a missing handler regardless of ownership."""
+        owner_sub = "cap-internal-shared-owner"
+        # initiator's narrow accepted_types is what's under test -- it's
+        # the RECIPIENT of the note posted below.
+        initiator = await _register(
+            session,
+            "cap-internal-initiator",
+            owner_sub=owner_sub,
+            accepted_types=["availability_request"],
+        )
+        other = await _register(session, "cap-internal-other", owner_sub=owner_sub)
+        client = _FakeOwnershipClient(
+            {
+                initiator.id: {"is_shared": False, "owners": [owner_sub]},
+                other.id: {"is_shared": False, "owners": [owner_sub]},
+            }
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="internal",
+            target_agent_ids=[other.id],
+            initial_message=_request_payload(),
+            ownership_client=client,
+        )
+        await accept_invite(
+            session, actor_sub=other.sub, agent_id=other.id, conversation_id=conversation.id
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=other.sub,
+                sender_agent_id=other.id,
+                conversation_id=conversation.id,
+                message_type="note",
+                payload={"text": "hello"},
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.message_type_not_accepted"
+
+    async def test_post_message_allowed_when_recipient_declared_type(
+        self, session: AsyncSession
+    ) -> None:
+        initiator = await _register(
+            session,
+            "cap-post-ok-initiator",
+            accepted_types=["availability_request", "counter_proposal"],
+        )
+        other = await _register(session, "cap-post-ok-other")
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[other.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=other.sub, agent_id=other.id, conversation_id=conversation.id
+        )
+        message = await post_message(
+            session,
+            actor_sub=other.sub,
+            sender_agent_id=other.id,
+            conversation_id=conversation.id,
+            message_type="counter_proposal",
+            payload=_counter_proposal_payload(),
+        )
+        assert message.type == "counter_proposal"
 
 
 class TestTaskLifecycleMessages:

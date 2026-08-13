@@ -93,8 +93,12 @@ lookup failed — fail closed, TECH-5094/TECH-5118), ``denied.not_same_owner``/
 expand a frozen owner set), ``denied.unknown_conversation_type`` (a
 conversation row's ``type`` isn't in ``schemas.CONVERSATION_TYPES`` — a
 migration/data-integrity gap, e.g. a legacy pre-rename row — distinct from
-an actual ownership-boundary crossing), and ``denied.boundary_crossing``/
-``denied.wrong_sender_role`` (DESIGN.md §9 Axis 2's per-message checks).
+an actual ownership-boundary crossing), ``denied.boundary_crossing``/
+``denied.wrong_sender_role`` (DESIGN.md §9 Axis 2's per-message checks), and
+``denied.message_type_not_accepted`` (a recipient hasn't declared
+``message_type`` in their own ``accepted_types`` — a capability gate, not a
+trust boundary, so it applies universally, even to ``internal`` traffic
+that boundary-crossing itself always allows).
 """
 
 from __future__ import annotations
@@ -1058,6 +1062,14 @@ async def start_conversation(
         message_type=message_type,
         sender_role="owner",
     )
+    await _enforce_message_type_accepted(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=initiator.id,
+        conversation_id=None,
+        other_agent_ids=[t.id for t in targets],
+        message_type=message_type,
+    )
     await _enforce_boundary_crossing(
         session,
         actor_sub=actor_sub,
@@ -1600,6 +1612,49 @@ async def _enforce_boundary_crossing(
             )
 
 
+async def _enforce_message_type_accepted(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    sender_agent_id: uuid.UUID,
+    conversation_id: uuid.UUID | None,
+    other_agent_ids: list[uuid.UUID],
+    message_type: str,
+) -> None:
+    """Enforce that every other participant/target has declared
+    ``message_type`` in their own ``accepted_types``.
+
+    This is a capability gate, not a trust boundary: whether a given
+    agent's own implementation actually handles a message type is a fact
+    about that specific running agent, unrelated to who sent it — so
+    unlike ``_enforce_boundary_crossing``, this check is universal and
+    applies even to ``internal`` same-owner traffic. Checked per-recipient
+    (each of ``other_agent_ids`` individually), not aggregated, since
+    ``accepted_types`` is a per-agent fact, not a per-owner one.
+
+    Detail intentionally omits which recipient rejected it or their
+    ``accepted_types``, mirroring ``denied.boundary_crossing``'s posture of
+    not leaking a target's declared state to the sender.
+    """
+    if not other_agent_ids:
+        return
+    rows = (
+        (await session.execute(select(Agent.accepted_types).where(Agent.id.in_(other_agent_ids))))
+        .scalars()
+        .all()
+    )
+    for accepted in rows:
+        if message_type not in accepted:
+            await _deny(
+                session,
+                actor_sub=actor_sub,
+                action="denied.message_type_not_accepted",
+                agent_id=sender_agent_id,
+                conversation_id=conversation_id,
+                detail={"message_type": message_type},
+            )
+
+
 async def _check_boundary_crossing(
     session: AsyncSession,
     *,
@@ -1610,24 +1665,37 @@ async def _check_boundary_crossing(
     schema_version: int,
     ownership_client: OwnershipClient,
 ) -> None:
-    """``_enforce_boundary_crossing`` for an existing conversation row —
-    queries current (``active``/``invited``) participants for the other
-    side rather than requiring the caller to already know them."""
-    other_ids: list[uuid.UUID] = []
-    if conversation.type == "asymmetric" and not is_boundary_safe(message_type, schema_version):
-        other_ids = list(
-            (
-                await session.execute(
-                    select(Participant.agent_id).where(
-                        Participant.conversation_id == conversation.id,
-                        Participant.agent_id != sender_agent_id,
-                        Participant.status.in_(("active", "invited")),
-                    )
+    """``_enforce_boundary_crossing`` (+ the universal ``accepted_types``
+    capability gate) for an existing conversation row — queries current
+    (``active``/``invited``) participants for the other side rather than
+    requiring the caller to already know them.
+
+    Queried unconditionally (unlike the old asymmetric-and-unsafe-only
+    gating this replaced): ``_enforce_message_type_accepted`` needs the
+    other side's IDs on every send, not just the narrower cases
+    ``_enforce_boundary_crossing`` itself needs an ownership lookup for.
+    """
+    other_ids = list(
+        (
+            await session.execute(
+                select(Participant.agent_id).where(
+                    Participant.conversation_id == conversation.id,
+                    Participant.agent_id != sender_agent_id,
+                    Participant.status.in_(("active", "invited")),
                 )
             )
-            .scalars()
-            .all()
         )
+        .scalars()
+        .all()
+    )
+    await _enforce_message_type_accepted(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=sender_agent_id,
+        conversation_id=conversation.id,
+        other_agent_ids=other_ids,
+        message_type=message_type,
+    )
     await _enforce_boundary_crossing(
         session,
         actor_sub=actor_sub,

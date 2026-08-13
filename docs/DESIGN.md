@@ -98,9 +98,10 @@ agent-token access gate, not a human-user gate.
 **Membership rules (v1):**
 
 - Any registered agent may start a conversation with N other agents. All named
-  targets must exist and be active. (`accepted_types` is informational in v1 — it
-  declares which message types an agent intends to handle but is not enforced
-  at admission time; enforcement is deferred to a future release.)
+  targets must exist and be active. (`accepted_types` is not consulted at
+  admission time — conversation-type admission is Axis 1's ownership rule
+  below, unrelated to which message types a target has declared. It is
+  enforced per-message, at send time — see the capability gate below.)
   The creator becomes an `active` participant with `role=owner`. **Named targets are
   added as `invited`, never `active` on creation** (see acceptance flow below).
 - **Any active member may invite others** (creator is `owner` so this can tighten to
@@ -292,6 +293,31 @@ Currently registered message types (all `boundary_safe=True` unless noted):
 **Sender-role restrictions**: `task_cancel` is owner-only; `task_decline` is
 member-only (non-owner). These map directly to `participants.role` and are checked
 before the state-machine transition.
+
+### Capability gate: `accepted_types`
+
+Independent of, and checked alongside, the `boundary_safe` crossing rule above:
+every other active-or-invited participant/target must have `message_type` in
+their own `agents.accepted_types`, or the send is denied
+(`denied.message_type_not_accepted`, uniform `AccessDeniedError`, detail omits
+which recipient rejected it or their declared set — same anti-enumeration
+posture as `denied.boundary_crossing`).
+
+This is deliberately **universal**, unlike `boundary_safe`: `boundary_safe`
+answers a trust question (is this payload shaped safely enough to cross an
+ownership boundary), which `internal` conversations are exempt from by
+construction (no boundary exists between same-owner participants).
+`accepted_types` answers a capability question (does this specific running
+agent's own implementation know what to do with this message type at all),
+which has nothing to do with trust — a missing handler is a missing handler
+whether the sender is a stranger or your own other agent. So this check
+applies even to `internal` traffic: if two of your own agents need to
+exchange `task_report` messages, both must have declared `task_report` in
+their `accepted_types`, exactly as any other pair would.
+
+Checked per-recipient, not aggregated across the other side the way
+`boundary_safe`'s owner-set check is — `accepted_types` is a fact about one
+specific agent's deployment, not about an owner as a whole.
 
 ### Per-type TTL policy
 

@@ -39,6 +39,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from schemas import MESSAGE_TYPES
+
 SERVICE_ROOT = Path(__file__).parent.parent
 _DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
 
@@ -216,7 +218,10 @@ async def _register(
         "comms_register",
         {
             "display_name": display_name or sub,
-            "accepted_types": accepted_types or ["availability_request"],
+            # Permissive default so tests unrelated to the accepted_types
+            # capability gate don't need to opt in per-type; those tests
+            # narrow this explicitly via the accepted_types param.
+            "accepted_types": accepted_types or sorted(MESSAGE_TYPES),
         },
     )
     return result
