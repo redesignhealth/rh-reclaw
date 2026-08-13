@@ -171,7 +171,7 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         yield sess
 
 
-@pytest_asyncio.fixture
+@pytest.fixture
 def session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return async_sessionmaker(engine, expire_on_commit=False)
 
@@ -341,22 +341,33 @@ class TestRegisterAgent:
         oversized string must be rejected before it can be echoed back
         verbatim in an ``UnknownConversationTypeError`` message -- the count
         cap alone does not bound how long any one entry is."""
-        with pytest.raises(ValueError, match="accepted_types entries must not exceed"):
+        with pytest.raises(
+            ValueError,
+            match=f"accepted_types entries must not exceed {MAX_ACCEPTED_TYPE_LENGTH} characters",
+        ):
             await _register(
                 session,
                 "agent-oversized-single-type",
-                accepted_types=["x" * 101],
+                accepted_types=["x" * (MAX_ACCEPTED_TYPE_LENGTH + 1)],
             )
 
-    async def test_accepted_type_entry_at_max_length_succeeds(self, session: AsyncSession) -> None:
-        """Boundary-value test (Argus round 3): the length-cap check passes
-        for valid types under the MAX_ACCEPTED_TYPE_LENGTH limit."""
+    async def test_accepted_type_entry_at_max_length_succeeds(
+        self, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Boundary-value test (Argus round 3): an entry exactly at
+        MAX_ACCEPTED_TYPE_LENGTH must be accepted. No real MESSAGE_TYPES
+        value is anywhere near 100 characters, so this monkeypatches the
+        known-types set with a synthetic entry at exactly the cap -- the
+        point is isolating the length check from the separate
+        known-type-membership check, not exercising a real type name."""
+        boundary_type = "x" * MAX_ACCEPTED_TYPE_LENGTH
+        monkeypatch.setattr(_service, "MESSAGE_TYPES", _service.MESSAGE_TYPES | {boundary_type})
         agent = await _register(
             session,
             "agent-at-cap",
-            accepted_types=["availability_request"],
+            accepted_types=[boundary_type],
         )
-        assert agent.accepted_types == ["availability_request"]
+        assert agent.accepted_types == [boundary_type]
 
     async def test_empty_or_whitespace_sub_raises_plain_value_error(
         self, session: AsyncSession
@@ -390,33 +401,6 @@ class TestRegisterAgent:
                 "agent-mixed-types",
                 accepted_types=["availability_request", "bogus"],
             )
-
-    async def test_oversized_single_accepted_type_entry_rejected(
-        self, session: AsyncSession
-    ) -> None:
-        """Boundary test for the per-entry length cap (Argus round 3):
-        A single oversized entry (101 chars) must be rejected outright."""
-        with pytest.raises(
-            ValueError,
-            match=f"accepted_types entry exceeds {MAX_ACCEPTED_TYPE_LENGTH} characters",
-        ):
-            await _register(
-                session,
-                "agent-oversized-entry",
-                accepted_types=["x" * (MAX_ACCEPTED_TYPE_LENGTH + 1)],
-            )
-
-    async def test_accepted_type_entry_at_max_length_succeeds(
-        self, session: AsyncSession
-    ) -> None:
-        """Boundary-value test (Argus round 3): an entry exactly at
-        MAX_ACCEPTED_TYPE_LENGTH must be accepted."""
-        agent = await _register(
-            session,
-            "agent-at-cap",
-            accepted_types=["x" * MAX_ACCEPTED_TYPE_LENGTH],
-        )
-        assert agent.accepted_types == ["x" * MAX_ACCEPTED_TYPE_LENGTH]
 
 
 # --- start_conversation --------------------------------------------------------
@@ -1997,7 +1981,7 @@ class TestSeqRaceSafety:
                     message_type="counter_proposal",
                     payload=_counter_proposal_payload(),
                 )
-                return message.seq
+                return int(message.seq)
 
         seqs = await asyncio.gather(*[_post(member) for member in members])
         assert sorted(seqs) == [2, 3, 4, 5]

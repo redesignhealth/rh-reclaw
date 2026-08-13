@@ -514,6 +514,11 @@ def _check_payload_size(payload: dict[str, Any]) -> None:
 
 __all__ = [
     "CONVERSATION_TYPES",
+    "MAX_ACCEPTED_TYPES",
+    "MAX_ACCEPTED_TYPE_LENGTH",
+    "MAX_DISPLAY_NAME_LENGTH",
+    "MAX_PARTICIPANTS_PER_CONVERSATION",
+    "MAX_PAYLOAD_BYTES",
     "MESSAGE_SCHEMAS",
     "MESSAGE_TYPES",
     "AvailabilityRequestV1",
@@ -521,11 +526,6 @@ __all__ = [
     "ConfirmV1",
     "CounterProposalV1",
     "DeclineV1",
-    "MAX_ACCEPTED_TYPE_LENGTH",
-    "MAX_ACCEPTED_TYPES",
-    "MAX_DISPLAY_NAME_LENGTH",
-    "MAX_PARTICIPANTS_PER_CONVERSATION",
-    "MAX_PAYLOAD_BYTES",
     "MessageSchema",
     "MessageType",
     "NeedsClarificationV1",
