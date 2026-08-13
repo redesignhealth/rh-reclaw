@@ -115,7 +115,7 @@ jobs:
         run: |
           docker run --rm --entrypoint sh agent-comms-mcp:${{ github.sha }} -c \
             "command -v agent-comms-mcp && command -v agent-comms-mcp-migrate && \
-             python -c 'import agent_comms_mcp'"
+             python -c 'import main'"
 
       - name: Verify pyproject.toml version matches requirements.lock pin
         run: |
