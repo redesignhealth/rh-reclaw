@@ -285,6 +285,15 @@ All three are overridable via the `expires_at` parameter at conversation creatio
 A completed or canceled conversation's `expires_at` is not retroactively cleared —
 it simply becomes irrelevant once the conversation is terminal.
 
+### Rate limits
+
+Task-type conversations (`task_assign` openers) consume from the same
+`MAX_CONVERSATION_STARTS_PER_HOUR = 10` bucket as scheduling negotiations. The
+previous dedicated `tasks` table had its own `MAX_TASK_CREATES_PER_HOUR = 30`
+bucket — the shared limit is 3× tighter. Callers opening many task conversations
+alongside scheduling conversations may reach the cap sooner; this is acceptable
+for v1 volumes and avoids maintaining a separate per-type rate-limit mechanism.
+
 ### Known gap: `platform_get_agent_owners`
 
 The `internal`/`asymmetric` admission logic (and `note`'s boundary-crossing check)
