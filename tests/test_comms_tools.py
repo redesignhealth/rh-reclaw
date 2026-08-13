@@ -1451,3 +1451,20 @@ class TestListConversationsTool:
             {"type": "internal"},
         )
         assert result_internal["conversations"] == []
+
+    async def test_malformed_cursor_maps_to_tool_error(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-bad-cursor")
+        token = _token("listconv-tool-bad-cursor")
+
+        with pytest.raises(ToolError, match="invalid_request: the request could not be processed"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_list_conversations",
+                {"cursor": "not-a-valid-cursor"},
+            )

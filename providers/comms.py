@@ -52,8 +52,13 @@ from exceptions import (
     UnknownConversationTypeError,
 )
 from identity import try_resolve_email
-from models import Agent
-from schemas import MAX_AGENT_KEY_LENGTH, MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
+from models import CONVERSATION_STATES, PARTICIPANT_ROLES, Agent
+from schemas import (
+    CONVERSATION_TYPES,
+    MAX_AGENT_KEY_LENGTH,
+    MAX_PARTICIPANTS_PER_CONVERSATION,
+    PayloadValidationError,
+)
 from scopes import is_interactive_token, scopes_for_token
 
 comms_server: FastMCP[Any] = FastMCP("comms")
@@ -560,6 +565,13 @@ async def list_conversations(
     response to get the next page. Both ``invited`` and ``active``
     participant statuses are included — declined and left are not.
     """
+    if role is not None and role not in PARTICIPANT_ROLES:
+        raise ToolError(f"invalid_request: role must be one of {sorted(PARTICIPANT_ROLES)}")
+    if type is not None and type not in CONVERSATION_TYPES:
+        raise ToolError(f"invalid_request: type must be one of {sorted(CONVERSATION_TYPES)}")
+    if state is not None and state not in CONVERSATION_STATES:
+        raise ToolError(f"invalid_request: state must be one of {sorted(CONVERSATION_STATES)}")
+
     token = _require_token()
     base_sub = _require_identity(token)
     agent_key = _validate_agent_key(agent_key)

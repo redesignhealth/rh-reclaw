@@ -32,7 +32,8 @@ Access model (v1, internal trust domain)
 -----------------------------------------
 - Board admission is the permission: an ``Agent`` row (created by
   ``register_agent``) is what lets a ``sub`` participate. No pairwise
-  grants (DESIGN.md §4, §10 — the seam for one is ``may_open``).
+  grants (DESIGN.md §4, §10 — the seam for one is
+  ``_authorize_conversation_open``).
 - Membership = visibility. An ``invited`` participant sees only minimal
   conversation metadata (no messages) until they call ``accept_invite``;
   an ``active`` participant sees full history; a ``left``/``declined``
@@ -43,9 +44,10 @@ Access model (v1, internal trust domain)
   is still ``invited`` and trying to read content or post, or
   left/declined. The audit trail distinguishes causes via the ``action``
   column even though the client-visible message never does.
-- Conversation-open authorization routes through ``may_open`` (per-target
-  predicate) and invites through ``may_invite`` — the seams DESIGN.md §10
-  names for a future grants/consent layer.
+- Conversation-open authorization routes through
+  ``_authorize_conversation_open`` (whole-participant-set predicate) and
+  invites through ``may_invite`` — the seams DESIGN.md §10 names for a
+  future grants/consent layer.
 
 Judgment calls made in this module (documented once, here, rather than
 scattered as inline comments):
@@ -92,7 +94,6 @@ expand a frozen owner set), and ``denied.boundary_crossing``/
 
 from __future__ import annotations
 
-import asyncio
 import itertools
 import logging
 import uuid
@@ -477,16 +478,21 @@ async def _load_participant_for_read(
 async def _owner_sets_for(
     agents: list[Agent], ownership_client: OwnershipClient
 ) -> dict[uuid.UUID, frozenset[str]]:
-    """Resolve each agent's verified owner set, all lookups in parallel.
+    """Resolve each agent's verified owner set, one lookup at a time.
+
+    Sequential, not concurrent (e.g. via ``asyncio.gather``):
+    ``AgentTableOwnershipClient.get_agent_owners`` shares this call's
+    ``AsyncSession``, which SQLAlchemy's ``AsyncSession`` does not support
+    across concurrent coroutines.
 
     Callers MUST fail closed on any exception raised here (see
     ``OwnershipClient``'s docstring) — this helper does not catch.
     """
-    infos = await asyncio.gather(*(ownership_client.get_agent_owners(a.id) for a in agents))
-    return {
-        agent.id: frozenset(info.get("owners") or [])
-        for agent, info in zip(agents, infos, strict=True)
-    }
+    owner_sets: dict[uuid.UUID, frozenset[str]] = {}
+    for agent in agents:
+        info = await ownership_client.get_agent_owners(agent.id)
+        owner_sets[agent.id] = frozenset(info.get("owners") or [])
+    return owner_sets
 
 
 def _pairwise_admitted(
@@ -506,36 +512,6 @@ def _pairwise_admitted(
     # predicate, not two independently-drifting implementations of
     # "do these owner sets intersect").
     return all(may_assign(owner_sets[a.id], owner_sets[b.id]) for a, b in pairs)
-
-
-async def may_open(
-    participants: list[Agent],
-    conversation_type: str,
-    ownership_client: OwnershipClient,
-) -> bool:
-    """v1 conversation-open policy (TECH-5118, DESIGN.md §9 "two axes"),
-    evaluated over the FULL candidate participant set (initiator + every
-    named target), not one target at a time.
-
-    - ``open``: unrestricted — every participant merely board-``active``
-      (today's pre-TECH-5118 rule, renamed).
-    - ``internal``: every pair's verified owner sets must be identical.
-    - ``asymmetric``: every pair's verified owner sets must intersect
-      (this is exactly ``may_assign`` below, applied pairwise) — see
-      ``_pairwise_admitted``.
-
-    Raises whatever ``ownership_client.get_agent_owners`` raises (fail
-    closed — callers must catch and deny as
-    ``denied.ownership_unverified``, same posture as the former
-    ``add_task``). Assumes every participant is already known
-    board-``active`` for ``internal``/``asymmetric`` (callers check that
-    separately, e.g. via ``_resolve_targets``); ``open`` checks it here
-    directly since it has no other authorization step.
-    """
-    if conversation_type == "open":
-        return all(p.status == "active" for p in participants)
-    owner_sets = await _owner_sets_for(participants, ownership_client)
-    return _pairwise_admitted(conversation_type, participants, owner_sets)
 
 
 def may_invite(inviter_participant_status: str) -> bool:
@@ -935,6 +911,19 @@ async def _authorize_conversation_open(
             agent_id=initiator.id,
             detail={"conversation_type": conversation_type},
         )
+    if any(not owners for owners in owner_sets.values()):
+        # Fail closed on an empty owner set, same posture the deleted
+        # add_task used — an ownership_client that soft-fails to {"owners": []}
+        # instead of raising must not silently admit an unverified agent
+        # (internal's set-equality check would otherwise treat two empty
+        # sets as "identical" and admit them).
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.ownership_unverified",
+            agent_id=initiator.id,
+            detail={"conversation_type": conversation_type},
+        )
     if not _pairwise_admitted(conversation_type, participants, owner_sets):
         await _deny(
             session,
@@ -1062,6 +1051,28 @@ async def start_conversation(
                 joined_at=None,
             )
         )
+    await session.flush()
+
+    # DESIGN.md §9 Axis 2 applies to the seq-1 message exactly like every
+    # later one — the initiator's role in a freshly-opened conversation is
+    # always "owner", so that's passed directly rather than re-queried.
+    await _require_message_sender_role(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=initiator.id,
+        conversation_id=conversation.id,
+        message_type=message_type,
+        sender_role="owner",
+    )
+    await _check_boundary_crossing(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=initiator.id,
+        conversation=conversation,
+        message_type=message_type,
+        schema_version=schema_version,
+        ownership_client=ownership_client,
+    )
 
     message = Message(
         conversation_id=conversation.id,
@@ -1432,7 +1443,7 @@ async def _check_boundary_crossing(
                     select(Participant.agent_id).where(
                         Participant.conversation_id == conversation.id,
                         Participant.agent_id != sender_agent_id,
-                        Participant.status == "active",
+                        Participant.status.in_(("active", "invited")),
                     )
                 )
             )
@@ -1440,14 +1451,16 @@ async def _check_boundary_crossing(
             .all()
         )
         try:
-            sender_info, *other_infos = await asyncio.gather(
-                ownership_client.get_agent_owners(sender_agent_id),
-                *(ownership_client.get_agent_owners(pid) for pid in other_ids),
-            )
+            # Sequential, not asyncio.gather: AgentTableOwnershipClient's
+            # get_agent_owners shares this call's AsyncSession, which
+            # SQLAlchemy's AsyncSession does not support across concurrent
+            # coroutines.
+            sender_info = await ownership_client.get_agent_owners(sender_agent_id)
             sender_owners = frozenset(sender_info.get("owners") or [])
-            other_owners = frozenset().union(
-                *(frozenset(info.get("owners") or []) for info in other_infos)
-            )
+            other_owners = frozenset()
+            for pid in other_ids:
+                info = await ownership_client.get_agent_owners(pid)
+                other_owners = other_owners | frozenset(info.get("owners") or [])
         except Exception as exc:
             logger.warning(
                 "ownership lookup failed checking boundary crossing: %s",
@@ -1975,7 +1988,6 @@ __all__ = [
     "list_conversations",
     "may_assign",
     "may_invite",
-    "may_open",
     "post_message",
     "register_agent",
     "start_conversation",

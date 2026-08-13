@@ -174,7 +174,10 @@ Strict Pydantic (`extra='forbid'`), timezone-aware datetimes only, enum-coded re
 
 All tools enrolled in the fail-closed `TOOL_SCOPES` catalog (registry-parity enforced
 by test). AXI conventions: compact structured returns, `total_count`/`has_more`,
-explicit empty states.
+explicit empty states. `comms_list_conversations` deliberately omits
+`total_count`: it would need a second `SELECT COUNT(*)` replaying the same
+filter predicates, and `has_more`/`next_cursor` are sufficient for its
+scroll-to-load-more use case.
 
 | Tool | Scope | Notes |
 |---|---|---|
@@ -194,7 +197,9 @@ explicit empty states.
 
 1. Owner identity derives from verified OAuth token claims, never parameters.
 2. Judgments cross the boundary, never raw data (schemas have no field for it).
-3. Typed, schema-validated payloads only. No free text in v1.
+3. Typed, schema-validated payloads only. No free text except the
+   provisional `note` type (`boundary_safe=False`, blocked in `open`
+   conversations; pre-quarantine pipeline per §10).
 4. Uniform denial messages. Existence of unauthorized resources is never revealed.
 5. Append-only messages and audit. Every mutation and every denial is audited.
 6. Fail-closed tool scoping: unenrolled tool ⇒ unreachable by agent tokens.

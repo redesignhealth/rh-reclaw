@@ -470,6 +470,45 @@ class TestStartConversation:
         )
         assert "denied.unknown_agent" in actions
 
+    async def test_open_note_as_initial_message_denied(self, session: AsyncSession) -> None:
+        """DESIGN.md §9 Axis 2: ``open`` requires boundary_safe=True
+        unconditionally, and that must hold for the seq-1 message exactly
+        like every later one -- not just messages posted after accept."""
+        owner = await _register(session, "owner-open-note")
+        target = await _register(session, "target-open-note")
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="open",
+                target_agent_ids=[target.id],
+                initial_message={"text": "hello"},
+                message_type="note",
+            )
+        assert exc_info.value.reason == "denied.boundary_crossing"
+
+    async def test_task_decline_as_initial_message_denied(self, session: AsyncSession) -> None:
+        """``task_decline`` is member-role-restricted, but the initiator's
+        role is always "owner" for the seq-1 message -- exactly the
+        mismatch that would go uncaught if ``_require_message_sender_role``
+        weren't wired into ``start_conversation``."""
+        owner = await _register(session, "owner-task-decline")
+        target = await _register(session, "target-task-decline")
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="open",
+                target_agent_ids=[target.id],
+                initial_message={"reason": "no_longer_needed"},
+                message_type="task_decline",
+            )
+        assert exc_info.value.reason == "denied.wrong_sender_role"
+
 
 class _FakeOwnershipClient:
     """Test double for ``service.OwnershipClient`` — an in-memory owners map,
