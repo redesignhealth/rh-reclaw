@@ -155,8 +155,8 @@ and skip gracefully with a clear reason if they can't connect.
 
 Configuration is env-driven and **fail-fast**: the service refuses to start
 if any required variable (`OKTA_ISSUER_URL`, `OKTA_CLIENT_ID`,
-`OKTA_CLIENT_SECRET`, `MCP_JWT_SECRET`, `AGENT_JWT_SECRET`) is missing or
-empty. See `.env.example` for the full list. No secrets are committed
+`OKTA_CLIENT_SECRET`, `MCP_JWT_SECRET`, `AGENT_JWT_SECRET`, `DATABASE_URL`)
+is missing or empty. See `.env.example` for the full list. No secrets are committed
 anywhere in this repo.
 
 ## Observability
@@ -192,3 +192,7 @@ docker compose up --build
 
 `entrypoint.sh` runs `alembic upgrade head` automatically on every container
 start, so migrations apply before the server accepts traffic.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

@@ -291,9 +291,8 @@ if __name__ == "__main__":
     # is present and well-formed via db.database_url()'s require_env check.
     database_url()
 
-    # On ECS the Tailscale sidecar shares the task's network namespace so
-    # the server binds loopback only. Local
-    # docker-compose overrides MCP_HOST=0.0.0.0 to reach the port mapping.
+    # Bind loopback by default; docker-compose overrides MCP_HOST=0.0.0.0
+    # to reach the port mapping from the host.
     mcp.run(
         transport="streamable-http",
         host=os.environ.get("MCP_HOST", "127.0.0.1"),

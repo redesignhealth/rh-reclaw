@@ -316,9 +316,9 @@ class TestRegister:
     async def test_register_with_agent_key_creates_distinct_row(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        """TECH-5113: two agents sharing one token's base identity (today's
-        reality for multiple EA-managed agents acting for the same human)
-        must not collapse into one board row — a distinct ``agent_key``
+        """Two agents sharing one token's base identity (today's reality for
+        multiple EA-managed agents acting for the same human) must not
+        collapse into one board row — a distinct ``agent_key``
         each is what keeps them apart."""
         token = _token("shared-human-sub", owner_sub="shared-human-sub")
         first = await _call(
@@ -989,10 +989,9 @@ class TestMembershipTools:
 
 
 class TestTaskLifecycleToolLayer:
-    """End-to-end coverage for tasks-as-conversations (TECH-5118 phase 3,
-    supersedes TECH-5094's comms_add_task/comms_get_tasks/comms_update_task):
-    task_assign opens a conversation, task_report/task_complete/
-    task_decline/task_cancel drive it through comms_post_message."""
+    """End-to-end coverage for tasks-as-conversations: task_assign opens a
+    conversation, task_report/task_complete/task_decline/task_cancel drive
+    it through comms_post_message."""
 
     async def test_full_task_lifecycle(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]

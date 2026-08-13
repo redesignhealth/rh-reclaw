@@ -47,8 +47,7 @@ Key findings that drove the design:
 ## 3. Architecture decision: hub, not peer-to-peer
 
 One central board (this MCP server) that all EA agents connect to as clients, vs. per-agent
-servers with discovery and signed cards. Rationale: fits RH standards
-directly (FastMCP + MultiAuth, Tailscale-only, Postgres), one audit trail, no
+servers with discovery and signed cards. Rationale: one audit trail, no
 discovery problem, and the borrowed A2A shapes keep a later migration to true
 federation open.
 

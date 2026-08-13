@@ -409,7 +409,7 @@ class TestObservabilityMiddleware:
 
     def test_agent_jwt_token_with_forged_email_does_not_poison_user_active(self) -> None:
         """agent-jwt tokens resolve via ``sub`` only — a forged ``email``
-        claim must never reach ``log_user_active`` (TECH-3927 pattern)."""
+        claim must never reach ``log_user_active``."""
         middleware = self._middleware()
         context = self._make_context()
         call_next = AsyncMock(return_value=MagicMock())

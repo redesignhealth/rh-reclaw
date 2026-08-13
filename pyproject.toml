@@ -2,6 +2,7 @@
 name = "agent-comms-mcp"
 version = "0.1.0"
 description = "MCP service for permissioned, structured agent-to-agent communications"
+license = {text = "MIT"}
 requires-python = ">=3.12"
 # Exact version pins for reproducible builds.
 dependencies = [

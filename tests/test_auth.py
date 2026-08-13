@@ -246,9 +246,9 @@ class TestAuthFlowEventEmission:
 
 
 class TestRefreshTokenRotationGrace:
-    """Ported from rh-mcp: a concurrent connection presenting a just-rotated
-    (one-time-use) refresh token must transparently follow it to its
-    successor within the grace window, rather than forcing a full re-auth.
+    """A concurrent connection presenting a just-rotated (one-time-use)
+    refresh token must transparently follow it to its successor within the
+    grace window, rather than forcing a full re-auth.
 
     TTL expiry itself (a rotation entry becoming unreadable after
     ``_ROTATION_GRACE_SECONDS``) is NOT covered here -- that guarantee is

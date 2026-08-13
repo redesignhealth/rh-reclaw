@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Claims to extract from the Okta ID token into the FastMCP JWT.
 _UPSTREAM_CLAIM_KEYS = ["sub", "email", "preferred_username", "name"]
 
-_DEFAULT_TOKEN_STORAGE_PATH = "/data/fastmcp-tokens"  # EFS-backed on ECS
+_DEFAULT_TOKEN_STORAGE_PATH = "/data/fastmcp-tokens"
 
 _ROTATION_GRACE_SECONDS = 5 * 60
 _ROTATION_MAX_HOPS = 3
@@ -261,7 +261,7 @@ def _build_client_storage(storage_path: str) -> FileTreeStore:
 
     The stock ``FileTreeV1`` strategies hash any key or collection name
     containing filesystem-unsafe characters, so URL-style client IDs are
-    stored safely on the EFS-backed volume. The directory is created if
+    stored safely on the persistent volume. The directory is created if
     missing (the sanitization strategies require an existing path).
     """
     storage_root = Path(storage_path)

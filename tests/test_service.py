@@ -72,10 +72,9 @@ from service import (
 async def start_conversation(
     session: AsyncSession, *, ownership_client: OwnershipClient | None = None, **kwargs: Any
 ) -> Any:
-    """Thin wrapper defaulting ``ownership_client`` (TECH-5118 phase 2 added
-    it as a required kwarg) so every pre-existing call site in this file
-    keeps working unchanged — tests that care about ownership behavior
-    pass their own fake client explicitly."""
+    """Thin wrapper defaulting ``ownership_client`` so every pre-existing
+    call site in this file keeps working unchanged — tests that care about
+    ownership behavior pass their own fake client explicitly."""
     return await _service.start_conversation(
         session, ownership_client=ownership_client or AgentTableOwnershipClient(session), **kwargs
     )
@@ -587,8 +586,8 @@ class _FailingOwnershipClient:
 
 class TestConversationOwnershipAdmission:
     """N-party admission for ``internal``/``asymmetric`` conversations
-    (TECH-5118, DESIGN.md §9) — every pair must independently satisfy the
-    type's predicate; ``open`` never touches the ownership client."""
+    (DESIGN.md §9) — every pair must independently satisfy the type's
+    predicate; ``open`` never touches the ownership client."""
 
     async def test_internal_identical_owner_sets_admitted(self, session: AsyncSession) -> None:
         owner = await _register(session, "int-owner-1")
@@ -1082,9 +1081,9 @@ class TestInvite:
 
 
 class TestInviteOwnerFreeze:
-    """TECH-5118: an ``internal``/``asymmetric`` conversation's owner set is
-    frozen at creation — an invite that would introduce an outside owner is
-    rejected, not silently merged in."""
+    """An ``internal``/``asymmetric`` conversation's owner set is frozen at
+    creation — an invite that would introduce an outside owner is rejected,
+    not silently merged in."""
 
     async def test_open_conversation_skips_owner_freeze_check(self, session: AsyncSession) -> None:
         owner = await _register(session, "freeze-open-owner")
@@ -2176,10 +2175,10 @@ class TestMessageTypeAcceptedCapability:
 
 
 class TestTaskLifecycleMessages:
-    """TECH-5118 "tasks-as-conversations": task_assign opens a conversation
-    (assigner = owner participant, assignee = member participant);
-    task_report is non-terminal; task_complete/task_decline/task_cancel are
-    terminal and sender-role-restricted."""
+    """"tasks-as-conversations": task_assign opens a conversation (assigner
+    = owner participant, assignee = member participant); task_report is
+    non-terminal; task_complete/task_decline/task_cancel are terminal and
+    sender-role-restricted."""
 
     def _task_assign_payload(self, **overrides: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {"action": "report_status"}
@@ -2755,7 +2754,7 @@ class TestInbox:
         assert result["total_count"] == 2
 
 
-# --- accepted_types message-type vocabulary (TECH-5118 phase 4) ----------------
+# --- accepted_types message-type vocabulary -----------------------------------
 
 
 class TestAcceptedTypesMessageVocabulary:
@@ -2777,7 +2776,7 @@ class TestAcceptedTypesMessageVocabulary:
         assert agent.accepted_types
 
 
-# --- per-type TTL (TECH-5118 phase 4) ------------------------------------------
+# --- per-type TTL -------------------------------------------------------------
 
 
 class TestPerTypeTTL:
@@ -2851,7 +2850,7 @@ class TestPerTypeTTL:
         assert abs((conv.expires_at - custom).total_seconds()) < 1
 
 
-# --- list_conversations (TECH-5118 phase 4) ------------------------------------
+# --- list_conversations -------------------------------------------------------
 
 
 class TestListConversations:

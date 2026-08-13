@@ -263,11 +263,11 @@ class TestSchema:
         ):
             assert expected in cols, f"audit_log.{expected} missing"
         assert cols["detail"] == "jsonb"
-        assert "task_id" not in cols, "task_id should be dropped (TECH-5118 phase 3)"
+        assert "task_id" not in cols, "task_id should be dropped"
 
     async def test_tasks_table_dropped(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "tasks")
-        assert not cols, "tasks table should be dropped (TECH-5118 phase 3)"
+        assert not cols, "tasks table should be dropped"
 
     async def test_designed_indexes_exist(self, engine: AsyncEngine) -> None:
         participant_indexes = await _indexes(engine, "participants")

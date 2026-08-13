@@ -1,6 +1,6 @@
 """SQLAlchemy models for the comms domain.
 
-Schema conventions per the RH data standard (topics/03-data-persistence.md):
+Schema conventions:
 snake_case plural table names, UUID primary keys, TEXT over VARCHAR,
 TIMESTAMPTZ everywhere, ``created_at``/``updated_at`` on every mutable
 table, explicit ``idx_{table}_{columns}`` indexes.

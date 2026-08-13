@@ -1747,7 +1747,7 @@ async def _check_boundary_crossing(
 
 
 # Message types restricted to a specific sender participant role
-#: ``task_cancel`` is the creator-side
+# ``task_cancel`` is the creator-side
 # close (today's decline-cascade only counts role='member', no creator
 # path — this is that path), ``task_decline`` is the assignee's consent/
 # refusal mechanism, mirroring ``update_task``'s old assignee-only
