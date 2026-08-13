@@ -391,6 +391,30 @@ class TestRegisterAgent:
                 accepted_types=["availability_request", "bogus"],
             )
 
+    async def test_oversized_single_accepted_type_entry_rejected(
+        self, session: AsyncSession
+    ) -> None:
+        """Boundary test for the per-entry length cap (Argus round 3):
+        A single oversized entry (101 chars) must be rejected outright."""
+        with pytest.raises(ValueError, match="accepted_types entry exceeds 100 characters"):
+            await _register(
+                session,
+                "agent-oversized-entry",
+                accepted_types=["x" * 101],
+            )
+
+    async def test_accepted_type_entry_at_max_length_succeeds(
+        self, session: AsyncSession
+    ) -> None:
+        """Boundary-value test (Argus round 3): an entry exactly at
+        MAX_ACCEPTED_TYPE_LENGTH (100 chars) must be accepted."""
+        agent = await _register(
+            session,
+            "agent-at-cap",
+            accepted_types=["x" * 100],
+        )
+        assert agent.accepted_types == ["x" * 100]
+
 
 # --- start_conversation --------------------------------------------------------
 
