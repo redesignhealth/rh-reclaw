@@ -272,39 +272,27 @@ async def whoami(agent_key: str | None = None) -> dict[str, Any]:
 async def register(
     display_name: str, accepted_types: list[str], agent_key: str | None = None
 ) -> dict[str, Any]:
-    """Idempotently self-provision (or re-bind) the caller's board ``Agent`` row.
+    """Self-register or update this agent's board identity.
 
-    ``owner_sub``/``owner_email`` are NEVER accepted as parameters
-    (DESIGN.md §4 security invariant) — they are derived here from verified
-    token claims only:
+    Idempotent: re-calling with the same identity rebinds ``display_name``
+    and ``accepted_types`` in place. Safe to call on startup every time.
 
-    ``agent_key`` (optional) is a STOPGAP (TECH-5113), not new trusted
-    identity: today, every EA-managed agent acting for one human is minted
-    an rh-auth token with the SAME ``sub`` (that human's Okta sub), because
-    reclaw has no way yet to carry a distinct, verified per-agent identity
-    in the token or in message metadata. Without ``agent_key``, two such
-    agents registering under that one shared ``sub`` collapse into a single
-    board row — the second `register` silently overwrites the first's
-    `display_name`/`accepted_types` (this is exactly what happened when
-    "Pepper Pots" overwrote "Bond 007"). ``agent_key``, when given, is
-    appended to the caller's verified base identity to form the board
-    ``sub`` (``f"{base_sub}::{agent_key}"``) — a self-chosen partition
-    WITHIN an already-verified identity, never a substitute for one:
-    ``owner_sub``/``owner_email`` below are computed from the base identity
-    BEFORE this composition and are completely unaffected by ``agent_key``,
-    so admission decisions (``may_assign``) stay keyed on real verified
-    ownership regardless of what a caller passes here. Delete this
-    parameter once reclaw can pass real per-agent identity instead.
+    Parameters:
 
-    - ``owner_sub``: the token's ``owner_sub`` claim if present (an rh-auth
-      token minted for an EA agent acting on a human's behalf), else the
-      caller's own resolved identity (self-owned — e.g. a human calling
-      this directly, or an agent token with no distinct owner claim).
-    - ``owner_email``: the token's ``owner_email`` claim if present, else
-      — ONLY for interactive (Okta) callers — its upstream-verified
-      ``email`` claim, else the caller's own identity as a last resort so
-      the column is always populated with something attributable rather
-      than a placeholder.
+    - ``display_name``: human-readable label, max 255 chars.
+    - ``accepted_types``: message types this agent will handle. Must be a
+      subset of the 12 known types (see ``schemas.MessageType``):
+      ``availability_request``, ``availability_response``,
+      ``counter_proposal``, ``confirm``, ``decline``,
+      ``needs_clarification``, ``note``, ``task_assign``, ``task_report``,
+      ``task_complete``, ``task_decline``, ``task_cancel``.
+      Each entry capped at 100 chars; list capped at 20 entries.
+    - ``agent_key``: stopgap (TECH-5113) for running multiple agents under
+      one token. Appended to the token's verified sub
+      (``"{base_sub}::{agent_key}"``) to produce a distinct board row.
+      Omit if only one agent shares this token. A different ``agent_key``
+      registers a separate row; the same ``agent_key`` rebinds the
+      existing one.
 
       The ``email`` claim fallback is gated on ``is_interactive_token``
       (``scopes.py``). For a token with no ``iss`` at all, that check and
@@ -336,6 +324,9 @@ async def register(
     surfaces on someone else's call, not yours. Declare every message type
     your implementation actually handles, not just enough to pass whatever
     you're testing right now.
+
+    Identity (``owner_sub``, ``owner_email``) derives from verified token
+    claims only — never accepted as parameters.
     """
     token = _require_token()
     base_sub = _require_identity(token)
@@ -393,15 +384,22 @@ async def start_conversation(
 ) -> dict[str, Any]:
     """Open a conversation with N other agents, posting the seq-1 message.
 
-    ``target_agent_ids`` are agent ids (UUID strings, e.g. from
-    ``comms_list_agents``), capped at ``schemas.MAX_PARTICIPANTS_PER_CONVERSATION``
-    entries — a caller submitting more is rejected outright rather than
-    paying for an unbounded number of participant inserts and audit-log
-    writes. The caller becomes the ``owner`` participant; every target is
-    added as ``invited`` (not visible until they call ``comms_accept``).
-    ``expires_at``, if given, must be a timezone-aware ISO 8601 datetime
-    string; omit it to use the default 7-day TTL. ``schema_version`` is
-    explicit rather than an invisible default — only ``1`` exists today.
+    Parameters:
+
+    - ``conversation_type``: one of ``internal``, ``asymmetric``, ``open``.
+    - ``target_agent_ids``: UUID strings from ``comms_list_agents``; max 50.
+      Caller becomes ``owner``; each target starts as ``invited`` (invisible
+      until they call ``comms_accept``).
+    - ``message_type``: type of the opening message. Default:
+      ``availability_request``. All valid types: ``availability_request``,
+      ``availability_response``, ``counter_proposal``, ``confirm``,
+      ``decline``, ``needs_clarification``, ``note``, ``task_assign``,
+      ``task_report``, ``task_complete``, ``task_decline``, ``task_cancel``.
+      See ``comms_post_message`` for payload shapes per type.
+    - ``initial_message``: payload dict for the opening message. Must match
+      the schema for ``message_type`` (see ``comms_post_message``).
+    - ``expires_at``: timezone-aware ISO 8601 datetime; omit for 7-day TTL.
+    - ``schema_version``: only ``1`` exists today.
     """
     token = _require_token()
     base_sub = _require_identity(token)
@@ -452,13 +450,43 @@ async def post_message(
 ) -> dict[str, Any]:
     """Post a typed, schema-validated message to an active conversation.
 
-    Requires the caller to be a currently-``active`` participant (uniform
-    denial otherwise — identical whether the conversation doesn't exist,
-    the caller was never invited, is still ``invited``, or has
-    left/declined). ``confirm`` completes the conversation; ``decline``
-    marks the sender declined and may cancel the conversation if every
-    other member has also declined. ``schema_version`` is explicit rather
-    than an invisible default — only ``1`` exists today.
+    Caller must be an ``active`` participant (uniform denial otherwise).
+
+    ``message_type`` and required ``payload`` fields:
+
+    - ``availability_request``: ``window`` (``{start, end}`` aware ISO 8601),
+      ``duration_min`` (int 5–480), ``modality`` (video/phone/in_person),
+      ``priority`` (low/normal/high); optional ``constraints`` list (up to 10,
+      values: mornings_only/afternoons_only/avoid_fridays/buffer_15min).
+    - ``availability_response``: either ``slots`` (list of
+      ``{start, end, preference 0..1}``, max 10) OR ``none_available=True``
+      + ``reason`` (no_overlap/window_too_narrow/owner_unavailable).
+    - ``counter_proposal``: ``slots`` (1–10 slot dicts, same shape as above).
+    - ``confirm``: ``slot`` (``{start, end}`` aware ISO 8601). Marks
+      conversation complete.
+    - ``decline``: ``reason`` (owner_declined/no_availability/expired/other).
+      May cancel the conversation if all members have declined.
+    - ``needs_clarification``: ``about_seq`` (int ≥ 1, references a prior
+      message seq).
+    - ``note``: ``text`` (str 1–4000 chars). Boundary-restricted: allowed
+      only in ``internal`` conversations, or in ``asymmetric`` conversations
+      where the sender owns the conversation. Never allowed under ``open``.
+    - ``task_assign``: ``action`` enum:
+      gather_availability/schedule_meeting/reschedule_meeting/cancel_meeting/
+      confirm_slot/report_status. ``gather_availability``,
+      ``schedule_meeting``, ``reschedule_meeting`` require ``window`` +
+      ``duration_min``; ``confirm_slot`` requires ``window``. Optional:
+      ``counterparty_agent_ids``, ``related_conversation_id``, ``modality``,
+      ``priority``, ``due_at``, ``constraints``.
+    - ``task_report``: ``status`` (in_progress/blocked); optional
+      ``about_seq`` (int ≥ 1).
+    - ``task_complete``: optional ``about_seq`` (int ≥ 1).
+    - ``task_decline``: ``reason``
+      (no_longer_needed/unable_to_complete/expired/other).
+    - ``task_cancel``: ``reason``
+      (no_longer_needed/unable_to_complete/expired/other).
+
+    ``schema_version``: only ``1`` exists today.
     """
     token = _require_token()
     base_sub = _require_identity(token)
@@ -666,12 +694,12 @@ async def invite(
 ) -> dict[str, Any]:
     """Invite another board agent into an active conversation.
 
-    Requires the caller to currently be an ``active`` participant (v1: any
-    active member may invite, not just the owner). The target must be a
-    board-active agent, must not already have a participant row in any
-    status, and — for ``internal``/``asymmetric`` conversations — must not
-    introduce an owner outside the conversation's frozen owner set —
-    uniform denial for every failure mode.
+    Caller must be ``active``. Any active member may invite (not just owner).
+
+    - ``target_agent_id``: UUID string from ``comms_list_agents``. Target
+      must be board-active and have no existing participant row (any status).
+      For ``internal``/``asymmetric`` conversations, target must share the
+      conversation's owner set.
     """
     token = _require_token()
     base_sub = _require_identity(token)
