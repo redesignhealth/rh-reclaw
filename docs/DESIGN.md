@@ -420,10 +420,15 @@ deployment-warning docstring.
  deployment's trust domain. Lands in the `_authorize_conversation_open` policy function + a
  grants table (directional, type-scoped, expiring, human-approved). The
  anti-enumeration posture of `list_agents` also changes then -- `comms_lookup_agent_by_email`
- too: it's a targeted, O(1) equivalent of paginating the full directory (any
- `comms:read` holder already sees every `owner_email` via `list_agents` today, so this
- doesn't expose new data, only cheaper targeted access to the same data), and needs the
- same grants-layer treatment applied at that point, not before.
+ too: within the current internal-domain perimeter, it's a targeted, O(1) equivalent of
+ paginating the full directory (any `comms:read` holder already sees every `owner_email`
+ via `list_agents` today, so this doesn't expose new data, only cheaper targeted access
+ to the same data), and needs the same grants-layer treatment applied at that point.
+ That equivalence claim is perimeter-specific, though (Argus round 4): once an external
+ counterparty is in scope, a targeted "is alice@example.com registered?" lookup is a
+ meaningfully different privacy surface than paginated enumeration -- it may warrant
+ earlier or stricter gating than `list_agents` gets, not the same treatment "at that
+ point" implies.
 - **Free-text fields**: allowed only behind a quarantine/review pipeline (sandboxed,
  tool-less extraction into typed messages). Raw text is stored for audit/human
  display but never enters a privileged agent's context.

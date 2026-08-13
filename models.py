@@ -115,6 +115,13 @@ class Agent(Base):
         # so autogenerate kept proposing to DROP this index, defeating the
         # entire point of declaring it here. column(...).desc().nullslast()
         # produces the structured form that actually round-trips.
+        #
+        # Both string literals below ("owner_email", "bound_at") are bare
+        # names with no referential tie to the `owner_email`/`bound_at`
+        # mapped_column attributes defined further down this class -- a
+        # future rename of either column won't propagate here, and
+        # autogenerate will silently start proposing DROP + CREATE again.
+        # Keep these in sync by hand if either column is ever renamed.
         Index(
             "idx_agents_lower_owner_email_active",
             text("lower(owner_email)"),

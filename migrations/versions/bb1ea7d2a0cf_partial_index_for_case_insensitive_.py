@@ -11,18 +11,25 @@ sequential-scans ``agents`` on every call -- fine at today's table size, but
 worth having the index in place before ``comms_lookup_agent_by_email`` sees
 real traffic rather than adding it reactively later.
 
-NOTE on in-place amendment: like ``18f2d7735523`` before it, this revision
-was authored and iterated on entirely within this single unmerged PR (the
-column list changed from ``(lower(owner_email))`` alone to
+NOTE on in-place amendment (Argus round 4 correction: an earlier version of
+this note claimed "this service has no deployed environment yet" -- false;
+DESIGN.md §12 has said "Infrastructure: done -- deployed and running" since
+before this PR opened, and `entrypoint.sh` runs `alembic upgrade head`
+automatically on every deploy): like ``18f2d7735523`` before it, this
+revision was authored and iterated on entirely within this single unmerged
+PR (the column list changed from ``(lower(owner_email))`` alone to
 ``(lower(owner_email), bound_at DESC NULLS LAST)`` across Argus review
-rounds) -- it does not exist on ``main``, and has never been applied to any
-persistent or shared database (this service has no deployed environment
-yet; CI runs against a fresh, ephemeral Postgres container every run; local
-review testing always ran full ``downgrade`` -> ``upgrade head`` cycles
-against the latest file content, including recreating the local Postgres
-container between rounds). In-place amendment was therefore safe. Once
-this PR merges, treat this file as frozen: any further schema change
-requires a NEW Alembic revision, never an edit to this one.
+rounds). The reason in-place amendment is safe here is narrower than "no
+deployment exists": deployments run whatever image was built from `main`
+(or a release tag), never from an open feature branch, and this revision
+has never existed on `main` -- so the deployed dev/prod database has never
+run it, regardless of the service's own deployment status. CI runs against
+a fresh, ephemeral Postgres container every run, and all local review
+testing recreated the throwaway local Postgres container between rounds,
+so neither of those ran a stale version of it either. In-place amendment
+was therefore safe. Once this PR merges, treat this file as frozen: any
+further schema change requires a NEW Alembic revision, never an edit to
+this one.
 
 """
 
@@ -65,4 +72,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS idx_agents_lower_owner_email_active")
+    # Schema-qualified to match da3e1646c44d's convention: unqualified DROP
+    # INDEX under a wrong search_path would silently no-op (IF EXISTS makes
+    # that failure invisible), leaving the index behind for a later
+    # re-upgrade to collide with.
+    op.execute("DROP INDEX IF EXISTS public.idx_agents_lower_owner_email_active")

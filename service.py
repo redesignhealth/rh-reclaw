@@ -779,7 +779,11 @@ async def lookup_agent_by_email(
     applies -- this service has no dependency on that library (by design,
     per TECH-5158: the negotiation library and the comms board stay
     decoupled) and plain case-folding covers the realistic input space for
-    values sourced from Okta/Google identity claims.
+    values sourced from Okta/Google identity claims. Python's ``str.lower()``
+    (used on the input) and Postgres's ``lower()`` (used on the stored
+    value) can disagree on case-folding for some non-ASCII characters under
+    a non-UTF-8 database collation (Argus round 4) -- not addressed here,
+    since real input is Okta/Google email claims, which are ASCII.
 
     Fail-closed by construction, matching the retired module's contract:
     a non-string, empty/whitespace-only, or over-length (see
@@ -787,7 +791,21 @@ async def lookup_agent_by_email(
     than raising or querying -- there is no legitimate email this could
     ever match, and the dangerous failure mode here is a false positive
     (treating an unregistered counterparty as EA-represented), not a
-    missed match.
+    missed match. This validation intentionally lives here rather than at
+    the ``comms_lookup_agent_by_email`` tool boundary (Argus round 4): it
+    mirrors the retired module's own contract, which lived on the type
+    doing the lookup, not its caller.
+
+    This validation is one-sided: ``register_agent`` (the write path) does
+    not strip, lower-case, or length-cap ``owner_email`` before storing it
+    -- including the JWT ``sub``-fallback path (``providers/comms.py``),
+    which can write a non-email URI as ``owner_email`` for a token with no
+    ``email``/``owner_email`` claim. An agent whose stored ``owner_email``
+    has incidental leading/trailing whitespace, or came from that fallback
+    path, will not be found here -- indistinguishable from "not
+    registered" (Argus round 4). Not fixed in this pass: normalizing at
+    write time is a broader change to ``register_agent`` than this lookup
+    feature's scope.
 
     ``owner_email`` is NOT a unique column: ``register_agent`` never
     demotes another agent's status when a new ``sub`` registers under the
@@ -818,7 +836,7 @@ async def lookup_agent_by_email(
     stmt = (
         select(Agent)
         .where(func.lower(Agent.owner_email) == normalized, Agent.status == "active")
-        .order_by(Agent.bound_at.desc().nullslast(), Agent.created_at.desc(), Agent.id)
+        .order_by(Agent.bound_at.desc().nullslast(), Agent.created_at.desc(), Agent.id.asc())
         .limit(1)
     )
     agent = (await session.execute(stmt)).scalar_one_or_none()

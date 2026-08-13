@@ -2668,8 +2668,7 @@ class TestLookupAgentByEmail:
         second.created_at = first.created_at
         await session.flush()
         await session.commit()
-        # Agent.id has no explicit direction in the ORDER BY -- ascending,
-        # so the smaller id sorts first and wins the tie.
+        # Agent.id.asc() -- the smaller id sorts first and wins the tie.
         expected_sub = first.sub if first.id < second.id else second.sub
         result = await lookup_agent_by_email(session, owner_email="tie@example.com")
         assert result is not None
