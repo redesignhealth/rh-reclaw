@@ -22,15 +22,19 @@ Programmatic callers (agents, services, CI jobs):
 Health check (``/health``):
     Unauthenticated — handled by FastMCP before auth middleware runs.
 
-Deliberately omitted vs rh-mcp: the refresh-token rotation-grace machinery
-(``_ROTATION_*``), which mitigates an rh-mcp-specific Claude Desktop
-multi-connection issue at real production scale. Add it back (copy from
-rh-mcp) if ``refresh_token_miss``-style forced re-auths show up here.
+Refresh-token rotation grace (``_ROTATION_*``, ported from rh-mcp): FastMCP
+rotates refresh tokens on every use (one-time use). A second concurrent
+connection presenting the just-consumed old token would otherwise fail hard
+and force a full Okta re-auth. We record a short-lived
+old-token-hash -> new-token mapping in the same EFS-backed store on every
+rotation; a subsequent "miss" checks this mapping first and transparently
+follows it before declaring a real miss.
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +44,7 @@ from typing import Any
 from fastmcp.server.auth import MultiAuth
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from key_value.aio.protocols import AsyncKeyValue
 from key_value.aio.stores.filetree import (
     FileTreeStore,
     FileTreeV1CollectionSanitizationStrategy,
@@ -57,6 +62,14 @@ logger = logging.getLogger(__name__)
 _UPSTREAM_CLAIM_KEYS = ["sub", "email", "preferred_username", "name"]
 
 _DEFAULT_TOKEN_STORAGE_PATH = "/data/fastmcp-tokens"  # EFS-backed on ECS
+
+_ROTATION_GRACE_SECONDS = 5 * 60
+_ROTATION_MAX_HOPS = 3
+_ROTATION_COLLECTION = "mcp-refresh-token-rotations"
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def require_env(name: str) -> str:
@@ -83,6 +96,10 @@ class OktaOIDCProxy(OIDCProxy):
     ``verify_id_token=True`` the claims are also available directly. Emits
     structured ``auth_flow`` events for CloudWatch Metric Filters.
     """
+
+    def __init__(self, **kwargs: Any) -> None:
+        self._rotation_store: AsyncKeyValue = kwargs["client_storage"]
+        super().__init__(**kwargs)
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
         """Decode the Okta ID token and extract identity claims.
@@ -138,15 +155,53 @@ class OktaOIDCProxy(OIDCProxy):
         log_auth_flow("new_auth")
         return result
 
+    async def load_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+        _hops: int = 0,
+    ) -> RefreshToken | None:
+        """Look up a refresh token, following a rotation-grace redirect on miss.
+
+        FastMCP rotates refresh tokens on every use (one-time use). A second
+        concurrent connection presenting the just-consumed old token would
+        otherwise fail hard here and force a full Okta re-auth. Before
+        declaring a real miss, check whether this token was rotated recently
+        and, if so, transparently follow it to its successor (capped at
+        ``_ROTATION_MAX_HOPS`` to bound a pathological chain).
+        """
+        result = await super().load_refresh_token(client, refresh_token)
+        if result is not None:
+            return result
+        entry = await self._rotation_store.get(
+            collection=_ROTATION_COLLECTION, key=_hash_token(refresh_token)
+        )
+        successor = entry.get("new_token") if entry is not None else None
+        if successor and _hops < _ROTATION_MAX_HOPS:
+            logger.info("Refresh token reuse detected: redirecting to rotated successor")
+            log_auth_flow("refresh_token_grace_redirect")
+            return await self.load_refresh_token(client, successor, _hops + 1)
+        log_auth_flow("refresh_token_miss")
+        return None
+
     async def exchange_refresh_token(
         self,
         client: OAuthClientInformationFull,
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        """Exchange refresh token and emit a ``token_refresh`` event."""
+        """Exchange refresh token, emit a ``token_refresh`` event, and record
+        the old->new rotation mapping for the grace window."""
+        old_token = refresh_token.token
         result = await super().exchange_refresh_token(client, refresh_token, scopes)
         log_auth_flow("token_refresh")
+        if result.refresh_token:
+            await self._rotation_store.put(
+                collection=_ROTATION_COLLECTION,
+                key=_hash_token(old_token),
+                value={"new_token": result.refresh_token},
+                ttl=_ROTATION_GRACE_SECONDS,
+            )
         return result
 
 

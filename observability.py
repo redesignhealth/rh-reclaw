@@ -17,7 +17,8 @@ tool_call:
     available, adds ``"user_id": "<local-part|service-slug>"``.
 
 auth_flow:
-    {"event": "auth_flow", "service": "...", "auth_type": "new_auth|token_refresh"}
+    {"event": "auth_flow", "service": "...",
+     "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|refresh_token_miss"}
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",
@@ -159,7 +160,9 @@ def log_user_active(email: str) -> None:
 
 
 def log_auth_flow(
-    auth_type: Literal["new_auth", "token_refresh"],
+    auth_type: Literal[
+        "new_auth", "token_refresh", "refresh_token_grace_redirect", "refresh_token_miss"
+    ],
 ) -> None:
     """Emit an ``auth_flow`` event (browser auth completed / token refreshed)."""
     try:
