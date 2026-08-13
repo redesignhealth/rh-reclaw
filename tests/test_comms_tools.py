@@ -273,9 +273,7 @@ class TestRegister:
     async def test_register_persists_and_is_visible_via_whoami(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        token = _token(
-            "agent-a", owner_sub="owner-a-human", owner_email="ownera@example.com"
-        )
+        token = _token("agent-a", owner_sub="owner-a-human", owner_email="ownera@example.com")
         result = await _call(
             main,
             test_session_factory,
