@@ -1,9 +1,4 @@
-"""Tests for observability.py's structured logging helpers.
-
-``hash_user`` is tested under its current (deliberately-not-yet-renamed)
-name per a deferred follow-up ticket — see observability.py's own
-docstring for why it returns the email local-part.
-"""
+"""Tests for observability.py's structured logging helpers."""
 
 from __future__ import annotations
 
@@ -16,7 +11,7 @@ import observability
 from observability import (
     _resolve_log_level,
     configure_logging,
-    hash_user,
+    email_local_part,
     log_auth_flow,
     log_auth_rejected,
     log_scope_denial,
@@ -25,15 +20,15 @@ from observability import (
 )
 
 
-class TestHashUser:
+class TestEmailLocalPart:
     def test_email_shaped_input_returns_local_part(self) -> None:
-        assert hash_user("dan.costanza@redesignhealth.com") == "dan.costanza"
+        assert email_local_part("dan.costanza@redesignhealth.com") == "dan.costanza"
 
     def test_non_email_slug_shaped_input_passes_through_unchanged(self) -> None:
-        assert hash_user("ea-agent-svc") == "ea-agent-svc"
+        assert email_local_part("ea-agent-svc") == "ea-agent-svc"
 
     def test_strips_surrounding_whitespace(self) -> None:
-        assert hash_user("  person@redesignhealth.com  ") == "person"
+        assert email_local_part("  person@redesignhealth.com  ") == "person"
 
 
 class TestConfigureLoggingIdempotent:
@@ -154,14 +149,19 @@ class TestFallbackLoggerPaths:
         assert mock_warning.call_args.kwargs.get("exc_info") is True
 
     def test_log_auth_rejected_fallback_does_not_raise(self) -> None:
-        with patch.object(observability.obs_log, "info", side_effect=RuntimeError("boom")):
+        """``log_auth_rejected`` logs at ``warning`` (an access-control
+        failure, not routine traffic), so the forced failure is on
+        ``obs_log.warning``, not ``.info`` like the helpers above."""
+        with patch.object(observability.obs_log, "warning", side_effect=RuntimeError("boom")):
             with patch.object(observability._fallback_logger, "warning") as mock_warning:
                 log_auth_rejected("sub_missing")
         mock_warning.assert_called_once()
         assert mock_warning.call_args.kwargs.get("exc_info") is True
 
     def test_log_scope_denial_fallback_does_not_raise(self) -> None:
-        with patch.object(observability.obs_log, "info", side_effect=RuntimeError("boom")):
+        """Same reasoning as ``log_auth_rejected`` above: this helper logs
+        at ``warning``."""
+        with patch.object(observability.obs_log, "warning", side_effect=RuntimeError("boom")):
             with patch.object(observability._fallback_logger, "warning") as mock_warning:
                 log_scope_denial(tool="comms_whoami", reason="missing_token", client_id="unknown")
         mock_warning.assert_called_once()

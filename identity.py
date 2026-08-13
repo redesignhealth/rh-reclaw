@@ -32,6 +32,7 @@ from fastmcp.exceptions import ToolError
 
 __all__ = [
     "RH_AUTH_ISSUER",
+    "require_owner_identity",
     "try_resolve_email",
     "validate_sub_shape",
 ]
@@ -107,3 +108,22 @@ def try_resolve_email(token: Any) -> str | None:
     if sub is None:
         return None
     return str(sub).strip()
+
+
+def require_owner_identity(token: Any) -> str:
+    """Return the verified caller's identity, or raise if it can't be trusted.
+
+    Unlike ``try_resolve_email``, which fails OPEN for observability
+    attribution (a bad ``user_id`` tag doesn't corrupt any state), this
+    fails CLOSED. Any tool that turns resolved identity into a
+    security-critical state key — e.g. keying a negotiation, ledger entry,
+    or approval hold on the caller's identity — must never silently
+    proceed with no identity, or worse, the wrong one: that would let one
+    caller's agent read or spend against another caller's state. Use this,
+    not ``try_resolve_email``, wherever resolved identity becomes more than
+    a log field.
+    """
+    identity = try_resolve_email(token)
+    if not identity:
+        raise ToolError("unable to resolve a verified caller identity for this token")
+    return identity

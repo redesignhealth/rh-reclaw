@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -49,9 +48,7 @@ from mcp.server.auth.provider import AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from identity import RH_AUTH_ISSUER
-from observability import log_auth_flow
-
-logger = logging.getLogger(__name__)
+from observability import log_auth_flow, log_security_event
 
 # Claims to extract from the Okta ID token into the FastMCP JWT.
 _UPSTREAM_CLAIM_KEYS = ["sub", "email", "preferred_username", "name"]
@@ -109,10 +106,17 @@ class OktaOIDCProxy(OIDCProxy):
             header_b64 += "=" * (-len(header_b64) % 4)  # base64 padding
             header = json.loads(base64.urlsafe_b64decode(header_b64))
             if not isinstance(header, dict):
-                logger.error("Rejecting Okta id_token with non-object header")
+                log_security_event("okta_id_token_rejected", reason="non_object_header")
                 return None
             if str(header.get("alg", "")).lower() == "none":
-                logger.error("Rejecting Okta id_token with alg=none")
+                # severity="critical": this is an explicit signature-bypass
+                # attempt, qualitatively more adversarial than a routine
+                # scope mismatch or malformed token — lets a CloudWatch
+                # Metric Filter/alarm distinguish it from the other
+                # okta_id_token_rejected reasons without a dedicated
+                # log-level-based alarm (log_security_event always logs at
+                # warning; structlog has no separate "critical" level).
+                log_security_event("okta_id_token_rejected", reason="alg_none", severity="critical")
                 return None
             # Decode the JWT payload without verification — the upstream
             # provider already validated the token during the auth flow.
@@ -120,12 +124,18 @@ class OktaOIDCProxy(OIDCProxy):
             payload_b64 += "=" * (-len(payload_b64) % 4)  # base64 padding
             payload = json.loads(base64.urlsafe_b64decode(payload_b64))
             if not isinstance(payload, dict):
-                logger.error("Rejecting Okta id_token with non-object payload")
+                log_security_event("okta_id_token_rejected", reason="non_object_payload")
                 return None
             claims = {k: payload[k] for k in _UPSTREAM_CLAIM_KEYS if k in payload}
             return claims or None
-        except (IndexError, json.JSONDecodeError, ValueError):
-            logger.error("Failed to decode Okta id_token for upstream claims")
+        except (IndexError, json.JSONDecodeError, ValueError) as exc:
+            # No exc_info=True here: JSONDecodeError.doc holds the raw
+            # (attacker-controlled) decoded token payload that failed to
+            # parse. error_type alone is enough to distinguish this failure
+            # mode without risking that payload reaching the log stream.
+            log_security_event(
+                "okta_id_token_rejected", reason="decode_failed", error_type=type(exc).__name__
+            )
             return None
 
     async def exchange_authorization_code(

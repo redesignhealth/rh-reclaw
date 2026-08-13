@@ -105,14 +105,22 @@ class TestExtractUpstreamClaims:
 
         assert await proxy._extract_upstream_claims({"id_token": ""}) is None
 
-    async def test_malformed_id_token_returns_none_and_logs_error(self) -> None:
+    async def test_malformed_id_token_returns_none_and_logs_decode_failed(self) -> None:
         proxy = _build_proxy()
 
-        with patch("auth.logger") as mock_logger:
+        with patch("auth.log_security_event") as mock_log:
             claims = await proxy._extract_upstream_claims({"id_token": "not-a-jwt-at-all"})
 
         assert claims is None
-        mock_logger.error.assert_called_once()
+        mock_log.assert_called_once()
+        args, kwargs = mock_log.call_args
+        assert args == ("okta_id_token_rejected",)
+        assert kwargs["reason"] == "decode_failed"
+        assert "error_type" in kwargs
+        # JSONDecodeError.doc carries the raw (attacker-controlled) decoded
+        # payload -- exc_info must not be passed here, unlike other
+        # log_security_event call sites in this module.
+        assert "exc_info" not in kwargs
 
     async def test_truncated_base64_payload_returns_none(self) -> None:
         proxy = _build_proxy()
@@ -126,13 +134,17 @@ class TestExtractUpstreamClaims:
         )
         truncated = f"{valid_header}.not-valid-base64-json!!!.sig"
 
-        with patch("auth.logger") as mock_logger:
+        with patch("auth.log_security_event") as mock_log:
             claims = await proxy._extract_upstream_claims({"id_token": truncated})
 
         assert claims is None
-        mock_logger.error.assert_called_once()
+        mock_log.assert_called_once()
+        args, kwargs = mock_log.call_args
+        assert args == ("okta_id_token_rejected",)
+        assert kwargs["reason"] == "decode_failed"
+        assert "error_type" in kwargs
 
-    async def test_non_dict_header_returns_none_and_logs_error(self) -> None:
+    async def test_non_dict_header_returns_none_and_logs_event(self) -> None:
         # A header segment that base64-decodes to valid-but-non-dict JSON
         # (e.g. a JSON array) must not reach `header.get(...)` — that would
         # raise an unhandled AttributeError instead of failing closed.
@@ -142,17 +154,17 @@ class TestExtractUpstreamClaims:
         )
         id_token = f"{non_dict_header}.eyJzdWIiOiJ4In0.sig"
 
-        with patch("auth.logger") as mock_logger:
+        with patch("auth.log_security_event") as mock_log:
             claims = await proxy._extract_upstream_claims({"id_token": id_token})
 
         assert claims is None
-        mock_logger.error.assert_called_once()
+        mock_log.assert_called_once_with("okta_id_token_rejected", reason="non_object_header")
 
-    async def test_non_dict_payload_returns_none_and_logs_error(self) -> None:
+    async def test_non_dict_payload_returns_none_and_logs_event(self) -> None:
         # A payload segment that base64-decodes to valid-but-non-dict JSON
         # (e.g. a JSON array) must not reach `payload[k]`-style dict access
         # -- that would raise instead of failing closed. Mirrors the header
-        # guard's ``test_non_dict_header_returns_none_and_logs_error`` above.
+        # guard's ``test_non_dict_header_returns_none_and_logs_event`` above.
         proxy = _build_proxy()
         valid_header = (
             base64.urlsafe_b64encode(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
@@ -164,24 +176,26 @@ class TestExtractUpstreamClaims:
         )
         id_token = f"{valid_header}.{non_dict_payload}.sig"
 
-        with patch("auth.logger") as mock_logger:
+        with patch("auth.log_security_event") as mock_log:
             claims = await proxy._extract_upstream_claims({"id_token": id_token})
 
         assert claims is None
-        mock_logger.error.assert_called_once()
+        mock_log.assert_called_once_with("okta_id_token_rejected", reason="non_object_payload")
 
-    async def test_alg_none_id_token_returns_none_and_logs_error(self) -> None:
+    async def test_alg_none_id_token_returns_none_and_logs_critical_event(self) -> None:
         # Defense-in-depth guard: even though signature verification is the
         # parent OIDCProxy's job, an alg=none header must be rejected here
         # rather than have its claims extracted and trusted.
         proxy = _build_proxy()
         id_token = _fake_id_token({"sub": "attacker-controlled"}, alg="none")
 
-        with patch("auth.logger") as mock_logger:
+        with patch("auth.log_security_event") as mock_log:
             claims = await proxy._extract_upstream_claims({"id_token": id_token})
 
         assert claims is None
-        mock_logger.error.assert_called_once()
+        mock_log.assert_called_once_with(
+            "okta_id_token_rejected", reason="alg_none", severity="critical"
+        )
 
     async def test_alg_none_case_insensitive_returns_none(self) -> None:
         proxy = _build_proxy()
