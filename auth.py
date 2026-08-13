@@ -30,19 +30,30 @@ old-token-hash -> new-token mapping in the same EFS-backed store on every
 rotation; a subsequent "miss" checks this mapping first and transparently
 follows it before declaring a real miss.
 
-This is now duplicated verbatim across at least this service and rh-mcp
-(and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet despite
-running the identical FastMCP OIDCProxy + Okta app combination -- same
-forced-re-auth exposure there, not yet ported). Extraction into a shared
-``rh_lib``-style base class is a reasonable follow-up once a third copy
-exists; not done here to avoid a cross-repo refactor as a side effect of
-a one-service bug fix.
+This shares its grace-window semantics, ``_ROTATION_*`` constants, and
+store layout with rh-mcp's version, but is NOT a verbatim copy: the hop
+counter here is deliberately NOT a parameter of the public
+``load_refresh_token`` override (see that method's own docstring) to close
+a cap-reset weakness rh-mcp's public-``_hops`` design has. Consider
+porting this hardening back to rh-mcp.
 
-Emitting ``refresh_token_miss`` on a path that previously logged nothing
-means an undiscriminating ``$.event = "auth_flow"`` CloudWatch filter now
-also counts failed refresh lookups as auth activity -- worth an explicit
-metric filter on ``auth_type = "refresh_token_miss"`` if this gets alerted
-on, not just folded into an undifferentiated auth_flow count.
+This machinery is now duplicated across at least this service and rh-mcp
+(and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet
+despite running the identical FastMCP OIDCProxy + Okta app combination --
+same forced-re-auth exposure would apply there too, once that service is
+actually deployed; see its own docstring's KNOWN DIVERGENCE note).
+Extraction into a shared ``rh_lib``-style base class is a reasonable
+follow-up once a third copy exists; not done here to avoid a cross-repo
+refactor as a side effect of a one-service bug fix.
+
+Emitting ``refresh_token_miss`` / ``refresh_token_hop_cap_exceeded`` on
+paths that previously logged nothing means an undiscriminating
+``$.event = "auth_flow"`` CloudWatch filter now also counts failed refresh
+lookups as auth activity -- worth explicit metric filters on each
+``auth_type`` value separately if either gets alerted on, not folded into
+one undifferentiated auth_flow count. (Metric filters live in
+rh-data-platform's Terraform, not this repo -- tracking that audit as a
+follow-up there, not blocking this fix on it.)
 """
 
 from __future__ import annotations
@@ -186,14 +197,14 @@ class OktaOIDCProxy(OIDCProxy):
         No hop counter in this signature on purpose: it's the base class's
         override point (FastMCP calls it positionally), so a public
         ``_hops`` parameter would let any caller reset the cap. Hop-tracking
-        lives in the private ``_follow_rotation_grace`` instead.
+        lives in the name-mangled ``__follow_rotation_grace`` instead.
         """
         result = await super().load_refresh_token(client, refresh_token)
         if result is not None:
             return result
-        return await self._follow_rotation_grace(client, refresh_token, hops=0)
+        return await self.__follow_rotation_grace(client, refresh_token, hops=0)
 
-    async def _follow_rotation_grace(
+    async def __follow_rotation_grace(
         self,
         client: OAuthClientInformationFull,
         refresh_token: str,
@@ -202,10 +213,13 @@ class OktaOIDCProxy(OIDCProxy):
     ) -> RefreshToken | None:
         """Recursive hop-following helper for ``load_refresh_token``.
 
-        Not reachable from outside this class -- the hop counter that
-        enforces ``_ROTATION_MAX_HOPS`` is a keyword-only parameter of a
-        private method, not an overridable default on the public override
-        point FastMCP calls.
+        Double-underscore (name-mangled to ``_OktaOIDCProxy__follow_rotation_grace``)
+        rather than single: a single-underscore method is still an ordinary
+        overridable attribute, so a subclass overriding it and calling the
+        original with ``hops=0`` at every recursive step would defeat
+        ``_ROTATION_MAX_HOPS`` the same way the public ``_hops`` parameter
+        this replaced did. Name mangling makes that override target a
+        different, subclass-qualified name instead.
         """
         entry = await self._rotation_store.get(
             collection=_ROTATION_COLLECTION, key=_hash_token(refresh_token)
@@ -217,15 +231,17 @@ class OktaOIDCProxy(OIDCProxy):
             result = await super().load_refresh_token(client, successor)
             if result is not None:
                 return result
-            return await self._follow_rotation_grace(client, successor, hops=hops + 1)
+            return await self.__follow_rotation_grace(client, successor, hops=hops + 1)
         if successor:
-            # Distinguishable from a genuine miss below: the chain kept
-            # going past the cap, not "no rotation entry at all" -- worth
-            # a separate signal for on-call triage.
-            logger.warning(
-                "Refresh token rotation-grace hop cap exceeded",
-                extra={"hops": hops, "token_hash": _hash_token(refresh_token)},
-            )
+            # A dedicated auth_type, not folded into refresh_token_miss:
+            # the chain kept going past the cap, which is a structurally
+            # different condition from "no rotation entry at all" and
+            # needs its own CloudWatch signal for on-call triage. hops is
+            # not sensitive; the token/its hash is deliberately NOT
+            # included here (observability.py's never-log-tokens policy).
+            logger.warning("Refresh token rotation-grace hop cap exceeded", extra={"hops": hops})
+            log_auth_flow("refresh_token_hop_cap_exceeded")
+            return None
         log_auth_flow("refresh_token_miss")
         return None
 

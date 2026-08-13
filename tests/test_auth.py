@@ -286,11 +286,13 @@ class TestRefreshTokenRotationGrace:
                 AsyncMock(return_value=None),
             ),
             patch("auth.log_auth_flow") as mock_log_auth_flow,
+            patch("auth.logger") as mock_logger,
         ):
-            # token-0 -> token-1 -> token-2 -> token-3 -> token-4 (5 hops,
-            # one more than _ROTATION_MAX_HOPS == 3), each recorded as a
-            # rotation of the previous.
-            for i in range(5):
+            # token-0 -> token-1 -> token-2 -> token-3: _ROTATION_MAX_HOPS
+            # == 3 hops (0, 1, 2) are followed; the 4th lookup (hop 3) hits
+            # the cap. range(_ROTATION_MAX_HOPS + 1) seeds exactly the
+            # entries this chain actually consumes, no unreachable extras.
+            for i in range(_ROTATION_MAX_HOPS + 1):
                 await proxy._rotation_store.put(
                     collection="mcp-refresh-token-rotations",
                     key=hashlib.sha256(f"token-{i}".encode()).hexdigest(),
@@ -300,12 +302,17 @@ class TestRefreshTokenRotationGrace:
             result = await proxy.load_refresh_token(MagicMock(), "token-0")
 
         assert result is None
-        # 3 hops followed (grace_redirect each time) before the cap kills
-        # the 4th, ending in exactly one terminal miss -- not one miss per
-        # exhausted hop.
+        # _ROTATION_MAX_HOPS hops followed (grace_redirect each time)
+        # before the cap kills the next one, ending in exactly one
+        # terminal hop_cap_exceeded -- not one per exhausted hop, and
+        # distinct from a genuine refresh_token_miss (own auth_type).
         expected_calls = [call("refresh_token_grace_redirect")] * _ROTATION_MAX_HOPS
-        expected_calls.append(call("refresh_token_miss"))
+        expected_calls.append(call("refresh_token_hop_cap_exceeded"))
         assert mock_log_auth_flow.call_args_list == expected_calls
+        mock_logger.warning.assert_called_once_with(
+            "Refresh token rotation-grace hop cap exceeded",
+            extra={"hops": _ROTATION_MAX_HOPS},
+        )
 
     async def test_exchange_refresh_token_records_rotation_mapping(self) -> None:
         proxy = _build_proxy()

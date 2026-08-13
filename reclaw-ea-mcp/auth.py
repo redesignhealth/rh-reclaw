@@ -6,13 +6,19 @@ implementation named in the RH tech guide, topics/04-auth-and-identity.md
 §MCP Server Auth). See that module's docstring for the full auth-path
 writeup; only the differences are called out here.
 
-KNOWN DIVERGENCE (not yet reconciled): reclaw-comms-mcp/auth.py has since
-gained the refresh-token rotation-grace mechanism (``_ROTATION_*``) to fix
-forced Okta re-auths under concurrent connections sharing one cached
-refresh token. This service runs the identical FastMCP OIDCProxy + Okta
-app combination and is subject to the same one-time-use rotation behavior,
-but has not been ported yet. See docs/proposals/reclaw-ea-plugin-registry.md
-§1 for the broader plan to reconcile these two auth.py files.
+KNOWN DIVERGENCE (not yet reconciled, no tracking ticket yet): reclaw-comms-mcp/
+auth.py has since gained the refresh-token rotation-grace mechanism
+(``_ROTATION_*``) to fix forced Okta re-auths under concurrent connections
+sharing one cached refresh token. This service runs the identical FastMCP
+OIDCProxy + Okta app combination and would be subject to the same
+one-time-use rotation behavior once actually deployed -- reclaw-ea-mcp
+currently has zero Terraform/ECR/IAM footprint (see
+docs/proposals/reclaw-ea-plugin-registry.md's Context section), so this is
+a latent gap, not an active production issue today. That proposal doc's
+§1 covers reconciling these two auth.py files' JWT-rejection routing, not
+this rotation-grace gap specifically -- port ``_ROTATION_*`` here (or file
+a dedicated ticket) before/if this service is ever deployed standalone,
+independent of whether the plugin-registry merge happens first.
 
 Auth paths
 ----------
@@ -75,7 +81,11 @@ def require_env(name: str) -> str:
 class OktaOIDCProxy(OIDCProxy):
     """OIDC proxy configured for Okta SSO (copied idiom from rh-mcp /
     reclaw-comms-mcp). See reclaw-comms-mcp/auth.py's version of this class
-    for the full security rationale (identical here, verbatim)."""
+    for the full security rationale of ``_extract_upstream_claims`` and the
+    claim-extraction path (identical here, verbatim). The rotation-grace
+    overrides (``load_refresh_token``/``__follow_rotation_grace``) present
+    in that version are NOT present here -- see this module's own
+    docstring's KNOWN DIVERGENCE note."""
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
         """Decode the Okta ID token and extract identity claims.

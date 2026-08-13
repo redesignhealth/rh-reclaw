@@ -18,13 +18,19 @@ tool_call:
 
 auth_flow:
     {"event": "auth_flow", "service": "...",
-     "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|refresh_token_miss"}
-    The latter two values are emitted on a path that previously logged
+     "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|
+                   refresh_token_miss|refresh_token_hop_cap_exceeded"}
+    The last three values are emitted on paths that previously logged
     nothing at all (rh-mcp's rotation-grace port, auth.py). A
     ``$.event = "auth_flow"`` filter that doesn't discriminate on
     ``auth_type`` now also counts failed refresh-token lookups as auth
-    activity; an alarm on ``auth_type = "refresh_token_miss"`` specifically
-    needs its own metric filter, not reuse of an undifferentiated count.
+    activity. ``refresh_token_miss`` and ``refresh_token_hop_cap_exceeded``
+    are deliberately SEPARATE values, not one conflated "failed" bucket:
+    a genuine miss (token never issued or long expired) and a rotation
+    chain exceeding ``_ROTATION_MAX_HOPS`` (token IS being actively rotated,
+    just faster than the chain can be followed) are different operational
+    conditions and should get independent metric filters if either is
+    alerted on.
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",
@@ -167,7 +173,11 @@ def log_user_active(email: str) -> None:
 
 def log_auth_flow(
     auth_type: Literal[
-        "new_auth", "token_refresh", "refresh_token_grace_redirect", "refresh_token_miss"
+        "new_auth",
+        "token_refresh",
+        "refresh_token_grace_redirect",
+        "refresh_token_miss",
+        "refresh_token_hop_cap_exceeded",
     ],
 ) -> None:
     """Emit an ``auth_flow`` event (browser auth completed / token refreshed)."""
