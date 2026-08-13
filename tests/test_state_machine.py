@@ -154,3 +154,18 @@ class TestIsBoundaryCrossingSafe:
         # more permissive handling.
         assert is_boundary_crossing_safe("scheduling.availability", True, _EMPTY, _EMPTY) is False
         assert is_boundary_crossing_safe("bogus", False, _A, _B) is False
+
+    def test_every_registered_conversation_type_is_explicitly_handled(self) -> None:
+        # This module deliberately doesn't import schemas.py (kept pure/
+        # DB-and-service-free), so this cross-check lives here rather than
+        # as a runtime assertion inside is_boundary_crossing_safe itself --
+        # a future CONVERSATION_TYPES addition that is_boundary_crossing_safe
+        # doesn't yet special-case would otherwise silently fall through to
+        # the default-deny branch instead of getting real handling.
+        from schemas import CONVERSATION_TYPES
+
+        for conversation_type in CONVERSATION_TYPES:
+            assert conversation_type in ("open", "internal", "asymmetric"), (
+                f"{conversation_type!r} is in schemas.CONVERSATION_TYPES but "
+                "is_boundary_crossing_safe has no explicit branch for it"
+            )

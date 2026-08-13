@@ -79,16 +79,21 @@ Every mutation AND every authorization/validation/rate-limit denial writes
 an ``audit_log`` row, committed together with (or in place of) the
 operation it describes. Denial actions are namespaced ``denied.*``:
 ``denied.not_member`` (no participant row at all), ``denied.wrong_state.
-<status>`` (participant row exists but is in the wrong status — keeps each
-of "already active", "declined", "left" distinguishable in the trail even
-though the client sees one uniform message), ``denied.unknown_agent``,
+<status>`` (the participant OR the conversation itself is in the wrong
+state for this operation — keeps each of a participant's "already
+active"/"declined"/"left", and a conversation's "completed"/"canceled"
+zombie-invite case, distinguishable in the trail even though the client
+sees one uniform message), ``denied.unknown_agent``,
 ``denied.already_participant``, ``denied.bad_state`` (state-machine
 violation), ``denied.bad_schema`` (payload validation),
 ``denied.rate_limited``, ``denied.ownership_unverified`` (an ownership
 lookup failed — fail closed, TECH-5094/TECH-5118), ``denied.not_same_owner``/
 ``denied.no_owner_overlap`` (conversation-open admission failed for
 ``internal``/``asymmetric``), ``denied.owner_set_frozen`` (an invite would
-expand a frozen owner set), and ``denied.boundary_crossing``/
+expand a frozen owner set), ``denied.unknown_conversation_type`` (a
+conversation row's ``type`` isn't in ``schemas.CONVERSATION_TYPES`` — a
+migration/data-integrity gap, e.g. a legacy pre-rename row — distinct from
+an actual ownership-boundary crossing), and ``denied.boundary_crossing``/
 ``denied.wrong_sender_role`` (DESIGN.md §9 Axis 2's per-message checks).
 """
 
@@ -545,10 +550,21 @@ def _agent_public(agent: Agent) -> dict[str, Any]:
 
 
 def _conversation_dict(conversation: Conversation) -> dict[str, Any]:
+    # Project the reconciled logical state, not necessarily the raw
+    # column: a conversation past expires_at stays stored as "active"
+    # until the next lazy-expiry touch (_maybe_expire), and read-only
+    # paths (list_conversations, inbox) never make that touch themselves.
+    # This is read-only display, not a mutation -- no audit row, no
+    # commit, no change to the ORM object itself. A no-op for any caller
+    # that already ran _maybe_expire (get_conversation, post_message,
+    # etc.), since conversation.state is already "expired" there.
+    state = conversation.state
+    if state == "active" and conversation.expires_at <= _now():
+        state = "expired"
     return {
         "conversation_id": str(conversation.id),
         "type": conversation.type,
-        "state": conversation.state,
+        "state": state,
         "created_by": str(conversation.created_by),
         "expires_at": _iso(conversation.expires_at),
         "created_at": _iso(conversation.created_at),
@@ -810,20 +826,9 @@ async def list_conversations(
     has_more = len(rows) > limit
     rows = rows[:limit]
 
-    def _summary(c: Conversation) -> dict[str, Any]:
-        # list_conversations deliberately skips _maybe_expire per-row (see
-        # the state="active"/"expired" filter above) -- reconcile the
-        # projected "state" the same way, so a caller filtering on
-        # state="expired" doesn't get back JSON objects that still say
-        # "active".
-        summary = _conversation_dict(c)
-        if c.state == "active" and c.expires_at <= _now():
-            summary["state"] = "expired"
-        return summary
-
     next_cursor = f"{rows[-1].created_at.isoformat()}|{rows[-1].id}" if has_more and rows else None
     return {
-        "conversations": [_summary(c) for c in rows],
+        "conversations": [_conversation_dict(c) for c in rows],
         "has_more": has_more,
         "next_cursor": next_cursor,
     }
@@ -1567,15 +1572,19 @@ async def _enforce_boundary_crossing(
         # default-deny path — this is a migration/data-integrity gap, not
         # an actual ownership-boundary crossing, and debugging it as the
         # latter would be misleading.
-        action = (
-            "denied.unknown_conversation_type"
-            if conversation_type not in CONVERSATION_TYPES
-            else "denied.boundary_crossing"
-        )
+        if conversation_type not in CONVERSATION_TYPES:
+            await _deny(
+                session,
+                actor_sub=actor_sub,
+                action="denied.unknown_conversation_type",
+                agent_id=sender_agent_id,
+                conversation_id=conversation_id,
+                detail={"message_type": message_type, "conversation_type": conversation_type},
+            )
         await _deny(
             session,
             actor_sub=actor_sub,
-            action=action,
+            action="denied.boundary_crossing",
             agent_id=sender_agent_id,
             conversation_id=conversation_id,
             detail={

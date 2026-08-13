@@ -72,16 +72,23 @@ def upgrade() -> None:
         END $$;
         """
     )
-    op.drop_index("idx_tasks_assignee_id_status", table_name="tasks", if_exists=True)
-    op.drop_index("idx_tasks_created_at_id", table_name="tasks", if_exists=True)
-    op.drop_index("idx_tasks_created_by_status", table_name="tasks", if_exists=True)
-    op.drop_index("idx_audit_log_task_id", table_name="audit_log", if_exists=True)
+    # Schema-qualified throughout (matching the guard above) so none of
+    # these resolve through search_path to a different schema than the
+    # guard actually inspected.
+    op.drop_index(
+        "idx_tasks_assignee_id_status", table_name="tasks", schema="public", if_exists=True
+    )
+    op.drop_index("idx_tasks_created_at_id", table_name="tasks", schema="public", if_exists=True)
+    op.drop_index(
+        "idx_tasks_created_by_status", table_name="tasks", schema="public", if_exists=True
+    )
+    op.drop_index("idx_audit_log_task_id", table_name="audit_log", schema="public", if_exists=True)
     # Raw SQL for IF EXISTS guards — op.drop_constraint/op.drop_column/op.drop_table
     # have no native IF EXISTS support, and this migration may run on a DB where
     # 6d2a8e63e469 was never applied (e.g. a fresh dev environment).
-    op.execute("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_task_id_fkey")
-    op.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS task_id")
-    op.execute("DROP TABLE IF EXISTS tasks")
+    op.execute("ALTER TABLE public.audit_log DROP CONSTRAINT IF EXISTS audit_log_task_id_fkey")
+    op.execute("ALTER TABLE public.audit_log DROP COLUMN IF EXISTS task_id")
+    op.execute("DROP TABLE IF EXISTS public.tasks")
 
 
 def downgrade() -> None:

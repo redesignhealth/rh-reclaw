@@ -898,31 +898,42 @@ class TestAcceptDeclineInvite:
             )
         assert str(exc_info.value) == str(nonmember_exc.value)
 
+    @pytest.mark.parametrize(
+        ("message_type", "initial_message", "expected_state"),
+        [
+            ("task_cancel", {"reason": "no_longer_needed"}, "canceled"),
+            ("task_complete", {}, "completed"),
+        ],
+    )
     async def test_accept_denied_after_terminal_opening_message(
-        self, session: AsyncSession
+        self,
+        session: AsyncSession,
+        message_type: str,
+        initial_message: dict[str, Any],
+        expected_state: str,
     ) -> None:
         """A target invited by a terminal-opener (task_cancel/task_complete/
         confirm) must not be able to accept into the now-completed/canceled
         conversation -- that would leave them a permanent zombie member,
         unable to post since is_message_legal requires "active"."""
-        owner = await _register(session, "acc-owner-terminal")
-        target = await _register(session, "acc-target-terminal")
+        owner = await _register(session, f"acc-owner-terminal-{message_type}")
+        target = await _register(session, f"acc-target-terminal-{message_type}")
         conversation = await start_conversation(
             session,
             actor_sub=owner.sub,
             initiator_agent_id=owner.id,
             conversation_type="open",
             target_agent_ids=[target.id],
-            initial_message={"reason": "no_longer_needed"},
-            message_type="task_cancel",
+            initial_message=initial_message,
+            message_type=message_type,
         )
-        assert conversation.state == "canceled"
+        assert conversation.state == expected_state
 
         with pytest.raises(AccessDeniedError) as exc_info:
             await accept_invite(
                 session, actor_sub=target.sub, agent_id=target.id, conversation_id=conversation.id
             )
-        assert exc_info.value.reason == "denied.wrong_state.canceled"
+        assert exc_info.value.reason == f"denied.wrong_state.{expected_state}"
 
 
 # --- invite --------------------------------------------------------------------
@@ -1659,6 +1670,60 @@ class TestPostMessageBoundaryCrossing:
             ownership_client=_FailingOwnershipClient(),
         )
         assert message.type == "note"
+
+    async def test_unrecognized_conversation_type_denied_with_own_audit_action(
+        self, session: AsyncSession
+    ) -> None:
+        """A row with a conversation_type this process doesn't recognize
+        (e.g. a legacy pre-rename row the backfill migration missed) must
+        be denied via its own denied.unknown_conversation_type action, not
+        the misleading denied.boundary_crossing label -- and even a
+        boundary_safe message is denied, since is_boundary_crossing_safe's
+        default-deny path doesn't special-case boundary_safe for unknown
+        types."""
+        owner = await _register(session, "bc-legacy-owner")
+        target = await _register(session, "bc-legacy-target")
+        conversation = Conversation(
+            type="scheduling.availability",
+            state="active",
+            created_by=owner.id,
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+        )
+        session.add(conversation)
+        await session.flush()
+        session.add(
+            Participant(
+                conversation_id=conversation.id,
+                agent_id=owner.id,
+                role="owner",
+                status="active",
+                joined_at=datetime.now(UTC),
+            )
+        )
+        session.add(
+            Participant(
+                conversation_id=conversation.id,
+                agent_id=target.id,
+                role="member",
+                status="active",
+                joined_at=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=owner.sub,
+                sender_agent_id=owner.id,
+                conversation_id=conversation.id,
+                message_type="counter_proposal",
+                payload=_counter_proposal_payload(),
+                ownership_client=_FailingOwnershipClient(),
+            )
+        assert exc_info.value.reason == "denied.unknown_conversation_type"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.unknown_conversation_type" in actions
 
 
 class TestTaskLifecycleMessages:
