@@ -144,8 +144,10 @@ def downgrade() -> None:
             name="ck_tasks_status",
         ),
         sa.CheckConstraint("created_by <> assignee_id", name="ck_tasks_distinct_parties"),
-        sa.ForeignKeyConstraint(["assignee_id"], ["agents.id"], name="tasks_assignee_id_fkey"),
-        sa.ForeignKeyConstraint(["created_by"], ["agents.id"], name="tasks_created_by_fkey"),
+        sa.ForeignKeyConstraint(
+            ["assignee_id"], ["public.agents.id"], name="tasks_assignee_id_fkey"
+        ),
+        sa.ForeignKeyConstraint(["created_by"], ["public.agents.id"], name="tasks_created_by_fkey"),
         sa.PrimaryKeyConstraint("id", name="tasks_pkey"),
         schema="public",
     )

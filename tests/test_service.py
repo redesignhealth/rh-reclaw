@@ -1754,6 +1754,9 @@ class TestPostMessageBoundaryCrossing:
                 ownership_client=_FailingOwnershipClient(),
             )
         assert exc_info.value.reason == "denied.ownership_unverified"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.ownership_unverified" in actions
+        assert "denied.boundary_crossing" not in actions
 
 
 class TestTaskLifecycleMessages:
@@ -2262,6 +2265,31 @@ class TestInbox:
         assert len(result["pending_invites"]) == 1
         assert result["pending_invites"][0]["conversation_id"] == str(conversation.id)
         assert result["pending_invites"][0]["state"] == "expired"
+
+    async def test_unread_reflects_expired_state(self, session: AsyncSession) -> None:
+        """Same reconciliation as above, but through the `unread` branch
+        (accepted membership) rather than `pending_invites` -- both branches
+        go through _conversation_dict, but only one was previously covered."""
+        agent = await _register(session, "inbox-expired-2")
+        sender = await _register(session, "inbox-expired-sender-2")
+        already_expired = datetime.now(UTC) - timedelta(seconds=1)
+        conversation = await start_conversation(
+            session,
+            actor_sub=sender.sub,
+            initiator_agent_id=sender.id,
+            conversation_type="open",
+            target_agent_ids=[agent.id],
+            initial_message=_request_payload(),
+            expires_at=already_expired,
+        )
+        await accept_invite(
+            session, actor_sub=agent.sub, agent_id=agent.id, conversation_id=conversation.id
+        )
+
+        result = await inbox(session, caller_agent_id=agent.id)
+        assert len(result["unread"]) == 1
+        assert result["unread"][0]["conversation_id"] == str(conversation.id)
+        assert result["unread"][0]["state"] == "expired"
 
     async def test_both_unread_and_pending_invite(self, session: AsyncSession) -> None:
         agent = await _register(session, "inbox-both-1")

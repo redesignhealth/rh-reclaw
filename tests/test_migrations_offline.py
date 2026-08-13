@@ -51,7 +51,12 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     assert "ALTER TABLE public.audit_log DROP COLUMN IF EXISTS task_id" in result.stdout
     # TECH-5118 round 7 fix: pre-flight guard against dropping non-empty tasks rows
     assert "tasks table is not empty" in result.stdout
-    # TECH-5118 round 8 fix: index drops schema-qualified to match the guard
+    # TECH-5118 round 8 fix: upgrade()'s index drops are schema-qualified
+    # to match the guard. This is upgrade()-side coverage only -- alembic
+    # --sql only emits forward DDL, so downgrade()'s equivalent
+    # qualification (round 10/11 fixes) has no offline-SQL coverage here;
+    # it's exercised only by the live-DB _migrated_schema fixture
+    # (test_db_models.py) via upgrade/downgrade/upgrade round-trips.
     assert "DROP INDEX IF EXISTS public.idx_tasks_assignee_id_status" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_at_id" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_by_status" in result.stdout

@@ -171,8 +171,11 @@ class TestIsBoundaryCrossingSafe:
                 f"{conversation_type!r} is in schemas.CONVERSATION_TYPES but "
                 "is_boundary_crossing_safe has no explicit branch for it"
             )
-            # Also prove it's actually handled (True for at least the
-            # unconditionally-legal boundary_safe=True case), not just
-            # membership in a hardcoded tuple this test could drift from
-            # the real function's own branches.
+            # Also prove it's actually handled -- boundary_safe=True is
+            # legal for all three types (for "internal" unconditionally,
+            # since the type itself decides there, not the flag; for
+            # "open"/"asymmetric" specifically because boundary_safe=True is
+            # what each of their branches requires) -- not just membership
+            # in a hardcoded tuple this test could drift from the real
+            # function's own branches.
             assert is_boundary_crossing_safe(conversation_type, True, _EMPTY, _EMPTY) is True
