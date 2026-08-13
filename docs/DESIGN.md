@@ -345,55 +345,56 @@ deployment-warning docstring.
 
 Terraform only, no Dokploy (explicit decision: this service goes straight to
 the tech-team-managed path). Infrastructure lives centrally in
-`rh-data-platform/infrastructure/`, not in this repo (matches `rh-mcp`'s convention:
-service repos hold app code + Dockerfile. The platform repo holds all Terraform).
+`rh-data-platform/infrastructure/environments/{dev,prod}/reclaw_comms.tf` (a
+`module "reclaw_comms" { source = "../../modules/mcp-server" ... }` block per
+environment, matching `rh-mcp`'s convention: this repo holds app code +
+Dockerfile only, the platform repo holds all Terraform), and is applied and
+running in both environments as of TECH-5050 — this is no longer a "when
+ready" plan, see the runbook below for the steady-state deploy process.
 
-**Reference pattern: `vc-hub`** (`infrastructure/environments/{dev,prod}/vc_hub.tf`)
-is the closest existing analog: an ECS Fargate service on the `mcp-server` module
-with its own RDS Postgres, which is exactly this service's shape (rh-mcp/rh-google-mcp
-have no database of their own, so they aren't a full template here).
+Shape: ECS Fargate task with a Tailscale sidecar (tailnet-only, no public
+endpoint), its own dedicated RDS Postgres instance (not shared, per the
+security guide's "never shared across services" rule), SSM-sourced secrets
+(`OKTA_*`, `MCP_JWT_SECRET`, `RH_AUTH_SECRET`, `DATABASE_URL`), and an EFS
+mount for FastMCP's OAuth token storage (`MCP_TOKEN_STORAGE_PATH`) — the
+same pattern as `rh-mcp`/`vc-hub`. `entrypoint.sh` runs `alembic upgrade
+head` before the server starts on every container start.
 
-Concretely, a new `module "reclaw_comms" { source = "../../modules/mcp-server" ... }`
-block per environment, plus:
+### Runbook: deploying a new version
 
-- **`aws_db_instance`**: dedicated RDS Postgres (own instance, not shared, per the
-  security guide's "never shared across services" rule). Start small
-  (`db.t4g.micro`/`small`). Prod gets `multi_az`, `deletion_protection`,
-  `performance_insights_enabled` per the vc-hub prod pattern.
-- **SSM secrets** (`secret_ssm_paths` on the module call): `OKTA_CLIENT_ID`,
-  `OKTA_CLIENT_SECRET`, `OKTA_ISSUER_URL`, `MCP_JWT_SECRET`, `RH_AUTH_SECRET` (shared
-  path, same as rh-mcp), and the RDS-derived `DATABASE_URL`
-  (`postgresql+asyncpg://reclaw_comms_app:<password>@<rds-address>:5432/reclaw_comms`).
-- **EFS** for FastMCP's OAuth token storage (`MCP_TOKEN_STORAGE_PATH`): same pattern
-  as rh-mcp, one file system per service, `prevent_destroy`.
-- **DNS**: Route53 CNAME → the module's Tailscale MagicDNS hostname
-  (`reclaw-mcp.drum-mackarel.ts.net`), plus a human-friendly alias if this ever
-  needs one (`comms.core.redesignhealth.com`), though likely unnecessary, since the
-  only clients are EA agents, not humans in a browser.
-- **Migrations**: confirm the execution mechanism against an existing DB-backed
-  ECS service (vc-hub-api or similar) before implementing: likely `alembic upgrade
-  head` in the container entrypoint before the server starts, but this needs
-  verification, not assumption, since the vc-hub Terraform doesn't show the
-  application-side wiring.
-- **IAM**: the module provisions the task role. No extra `aws_iam_role_policy` should
-  be needed unless a future tool needs cross-service SSM reads (rh-mcp's colosseum
-  grant is the pattern to copy if that ever applies here).
+The two repos are split (`rh-reclaw` for app code, `rh-data-platform` for
+infrastructure), so **a merge to this repo's `main` does not by itself
+redeploy anything** — it only pushes a new image to ECR. See the
+[README's Deployment section](../README.md#deployment) for the exact
+commands. In short: confirm the image landed in both
+`rh-platform-dev/apps/reclaw-comms-mcp` and `rh-platform/apps/reclaw-comms-mcp`
+ECR repos, then `gh workflow run deploy-reclaw-comms.yml -R
+redesignhealth/rh-data-platform -f image_tag=sha-<commit-sha>`.
 
-That work belongs to `rh-data-platform`, reviewed by the tech team and tracked as
-its own ticket (see delivery plan): not something built inside `reclaw-comms-mcp`.
+That single dispatch deploys dev, then prod, automatically — **no approval
+gate exists between them yet** (tracked in `rh-data-platform` as TECH-5089).
+Treat every dispatch as a real prod deploy, not a dev-first canary.
+
+**IAM**: the `mcp-server` module provisions the task role; no extra
+`aws_iam_role_policy` exists today. `rh-mcp`'s colosseum grant is the
+pattern to copy if a future tool needs cross-service SSM reads.
+
+That infrastructure lives in and is reviewed as part of `rh-data-platform`,
+not built or changed inside `reclaw-comms-mcp` itself.
 
 ## 12. Delivery plan
 
 1. ~~Standards-compliant scaffold~~: done (FastMCP + MultiAuth, scopes middleware,
    structlog, Docker, CI, 44 tests green, connectivity verified end-to-end with an
    rh-auth-style agent JWT over streamable HTTP).
-2. Domain layer (this repo): SQLAlchemy models + Alembic migration, service layer
-   with the access rules above (including invite→accept), Pydantic schemas, MCP
+2. ~~Domain layer (this repo)~~: done — SQLAlchemy models + Alembic migrations,
+   service layer with the access rules above (including invite→accept and the
+   two-axis conversation/message-type model, TECH-5118), Pydantic schemas, MCP
    tools, tests against real Postgres (uniform denials, membership enforcement,
    invite/accept/decline flow, seq race-safety, state machine, expiry, rate limits,
    audit completeness).
-3. Infrastructure (`rh-data-platform`, separate ticket/PR, tech-team reviewed):
-   `mcp-server` module call + dedicated RDS Postgres + SSM secrets + EFS + DNS, per
-   §11.
+3. ~~Infrastructure (`rh-data-platform`, tech-team reviewed)~~: done (TECH-5050) —
+   `mcp-server` module call + dedicated RDS Postgres + SSM secrets + EFS, per §11.
+   Applied and running in both dev and prod.
 4. Integrate: EA agents (separate workstream, `reclaw-ea-implementation`) connect as
    MCP clients with rh-auth tokens.

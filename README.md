@@ -172,25 +172,47 @@ matches the MCP fleet (`tool_call`, `user_active`, `auth_flow`,
 queries apply. Never log message content or attacker-controlled claim
 values.
 
-## Deployment (not yet wired)
+## Deployment
 
-Like the other RH MCP services, this deploys as an **ECS Fargate task with a
-Tailscale sidecar** (tailnet-only, no public endpoint) via the shared
-[`mcp-server` Terraform module](https://github.com/redesignhealth/rh-data-platform/tree/main/infrastructure/modules/mcp-server).
-When ready:
+Runs as an **ECS Fargate task with a Tailscale sidecar** (tailnet-only, no
+public endpoint) in both `dev` and `prod`, provisioned by Terraform in
+[`rh-data-platform`](https://github.com/redesignhealth/rh-data-platform)
+(`infrastructure/environments/{dev,prod}/reclaw_comms.tf`). No Terraform
+lives in this repo — that repo keeps all infrastructure in its own
+`infrastructure/` tree.
 
-1. Add a `module "reclaw_comms_mcp"` block in
-   `rh-data-platform/infrastructure/environments/{dev,prod}/` invoking
-   `../../modules/mcp-server` (see the `rh_mcp` invocation in
-   `environments/prod/main.tf` for the shape: ECR image, Tailscale hostname,
-   EFS mount for `/data/fastmcp-tokens`, and `secret_ssm_paths` for
-   `OKTA_*`, `MCP_JWT_SECRET`, `RH_AUTH_SECRET`, and later `DATABASE_URL`).
-2. Provision the SSM parameters (Terraform `random_password` for
-   `MCP_JWT_SECRET`; the rest via the Tech Team's SSM process) and register
-   the Okta application for this service's `BASE_URL`.
-3. Add an ECR repository + a deploy workflow (build/push via GitHub OIDC,
-   then update the image tag), modeled on
-   `rh-data-platform/.github/workflows/deploy-rh-mcp.yml`.
+**The two repos are split, so a merge to this repo's `main` does NOT by
+itself redeploy anything.** This repo's own CI (`.github/workflows/ci.yml`,
+`build` job) only builds the image and pushes it, tagged `sha-<commit-sha>`,
+to both ECR repos (`rh-platform-dev/apps/reclaw-comms-mcp` and
+`rh-platform/apps/reclaw-comms-mcp`) — it stops there. Getting that image
+running requires a second, manual step in `rh-data-platform`:
 
-No Terraform lives in this repo — rh-data-platform keeps infrastructure in
-its own `infrastructure/` tree, and this repo follows that convention.
+1. Confirm the merge commit's image landed in both ECR repos — check this
+   repo's `main`-branch CI run for the `Docker build` job, or:
+   ```bash
+   aws ecr describe-images --repository-name rh-platform-dev/apps/reclaw-comms-mcp \
+     --image-ids imageTag=sha-<commit-sha> --region us-east-1
+   aws ecr describe-images --repository-name rh-platform/apps/reclaw-comms-mcp \
+     --image-ids imageTag=sha-<commit-sha> --region us-east-1
+   ```
+2. Trigger the deploy workflow in `rh-data-platform` (requires `actions:write`
+   there):
+   ```bash
+   gh workflow run deploy-reclaw-comms.yml -R redesignhealth/rh-data-platform \
+     -f image_tag=sha-<commit-sha>
+   ```
+3. **This one dispatch deploys dev, then prod, automatically — there is no
+   approval gate between them** (a known, deliberately-deferred gap in that
+   workflow, tracked there as TECH-5089; don't assume dev is a safety net
+   before prod rolls out). Watch the run via the URL the command above
+   prints, or `gh run list -R redesignhealth/rh-data-platform --workflow
+   deploy-reclaw-comms.yml`.
+
+See `rh-data-platform/.github/workflows/deploy-reclaw-comms.yml`'s own
+header comment for the full mechanics (image-tag validation against both
+ECR repos, then a `deploy-terraform.yml` call per environment that commits
+the new tag into `terraform.tfvars` and applies it), and
+`redesign-health-data/docs/deployment/SSM_DEPLOYMENT.md`'s "reclaw-comms-mcp"
+section for the underlying SSM parameter / Okta app bootstrap that only
+needs to happen once per environment, not on every deploy.
