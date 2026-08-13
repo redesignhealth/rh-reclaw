@@ -370,20 +370,24 @@ async def list_agents(limit: int = 50, cursor: str | None = None) -> dict[str, A
 
 
 @comms_server.tool
-async def lookup_agent_by_email(owner_email: str) -> dict[str, Any] | None:
+async def lookup_agent_by_email(owner_email: str) -> dict[str, Any]:
     """Directory lookup: is ``owner_email`` bound to a board-active agent?
 
-    Returns the same per-agent shape as ``comms_list_agents``' ``agents``
-    entries, or ``None`` if no active agent is bound to that email.
-    Case-insensitive; never raises on a malformed/empty ``owner_email`` —
-    resolves to ``None`` instead (see ``service.lookup_agent_by_email``).
+    Returns ``{"agent": {...same per-agent shape as comms_list_agents'
+    "agents" entries...}, "found": True}`` on a match, or
+    ``{"agent": None, "found": False}`` otherwise -- an explicit empty
+    state, never a bare ``None`` (this module's own contract, rule 5).
+    Case-insensitive; never raises on a malformed, empty, or over-length
+    (see ``service.MAX_LOOKUP_EMAIL_LENGTH``) ``owner_email`` -- resolves
+    to the not-found shape instead (see ``service.lookup_agent_by_email``).
 
     Same internal-domain trust posture as ``comms_list_agents`` (DESIGN.md
-    §10) — pure directory read, no ``agent_key`` needed.
+    §10) -- pure directory read, no ``agent_key`` needed.
     """
     _require_token()
     async with get_session_factory()() as session:
-        return await service.lookup_agent_by_email(session, owner_email=owner_email)
+        agent = await service.lookup_agent_by_email(session, owner_email=owner_email)
+    return {"agent": agent, "found": agent is not None}
 
 
 # --- Conversation lifecycle ---------------------------------------------------------

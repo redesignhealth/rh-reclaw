@@ -61,6 +61,7 @@ from service import (
     leave,
     list_agents,
     list_conversations,
+    lookup_agent_by_email,
     register_agent,
 )
 
@@ -2604,6 +2605,45 @@ class TestListAgents:
         page = await list_agents(session, limit=1)
         assert len(page["agents"]) == 1
         assert page["total_count"] == 3
+
+
+class TestLookupAgentByEmail:
+    async def test_found(self, session: AsyncSession) -> None:
+        await _register(session, "lae-agent", owner_email="Dan@Example.com")
+        result = await lookup_agent_by_email(session, owner_email="  dan@example.com\t")
+        assert result is not None
+        assert result["sub"] == "lae-agent"
+        assert result["owner_email"] == "Dan@Example.com"
+
+    async def test_not_found(self, session: AsyncSession) -> None:
+        assert await lookup_agent_by_email(session, owner_email="nobody@example.com") is None
+
+    async def test_empty_and_non_string_fail_closed(self, session: AsyncSession) -> None:
+        assert await lookup_agent_by_email(session, owner_email="   ") is None
+        assert await lookup_agent_by_email(session, owner_email=None) is None  # type: ignore[arg-type]
+
+    async def test_over_length_fails_closed(self, session: AsyncSession) -> None:
+        # 255 chars, one over MAX_LOOKUP_EMAIL_LENGTH (254) -- never reaches
+        # the query, so no matching row is required for this to prove the
+        # guard fires rather than a legitimate not-found.
+        assert await lookup_agent_by_email(session, owner_email="a" * 255) is None
+
+    async def test_status_filter_excludes_non_active_agent(self, session: AsyncSession) -> None:
+        agent = await _register(session, "lae-suspended", owner_email="suspend@example.com")
+        agent.status = "suspended"
+        await session.flush()
+        await session.commit()
+        assert await lookup_agent_by_email(session, owner_email="suspend@example.com") is None
+
+    async def test_tie_break_prefers_most_recently_bound(self, session: AsyncSession) -> None:
+        # Same owner_email, two distinct subs -- an anticipated state (see
+        # lookup_agent_by_email's docstring): the agent_key mechanism lets
+        # one owner run multiple board-active agents under one email.
+        await _register(session, "lae-old", owner_email="multi@example.com")
+        await _register(session, "lae-new", owner_email="multi@example.com")
+        result = await lookup_agent_by_email(session, owner_email="multi@example.com")
+        assert result is not None
+        assert result["sub"] == "lae-new"
 
 
 # --- inbox -------------------------------------------------------------------------
