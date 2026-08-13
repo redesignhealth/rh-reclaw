@@ -724,6 +724,33 @@ class TestConversationOwnershipAdmission:
             )
         assert exc_info.value.reason == "denied.ownership_unverified"
 
+    async def test_asymmetric_empty_owner_set_soft_fail_denied(self, session: AsyncSession) -> None:
+        """Same soft-fail posture for ``asymmetric`` -- an ownership_client
+        returning ``{"owners": []}`` must not admit two unverified agents,
+        regardless of whether the empty-set guard that catches it in
+        practice is ``_authorize_conversation_open``'s (admission runs
+        first) or ``_enforce_boundary_crossing``'s (both exist and agree)."""
+        owner = await _register(session, "asym-owner-empty")
+        target = await _register(session, "asym-target-empty")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": []},
+                target.id: {"is_shared": False, "owners": []},
+            }
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="asymmetric",
+                target_agent_ids=[target.id],
+                initial_message={"text": "hello"},
+                message_type="note",
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.ownership_unverified"
+
 
 # --- accept_invite / decline_invite -------------------------------------------
 

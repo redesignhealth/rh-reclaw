@@ -1221,6 +1221,19 @@ async def _authorize_invite_owner_freeze(
             conversation_id=conversation.id,
             detail={"target_agent_id": str(target.id)},
         )
+    if not target_owners:
+        # Fail closed, same posture as _authorize_conversation_open and
+        # _enforce_boundary_crossing: an empty owner set (a soft-failing
+        # client returning {"owners": []} instead of raising) must not be
+        # treated as "subset of everything" and silently admitted.
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.ownership_unverified",
+            agent_id=inviter_agent_id,
+            conversation_id=conversation.id,
+            detail={"target_agent_id": str(target.id)},
+        )
     snapshot_owners = frozenset((conversation.owner_snapshot or {}).get("owners") or [])
     if not target_owners <= snapshot_owners:
         await _deny(
@@ -1454,6 +1467,7 @@ async def _enforce_boundary_crossing(
     boundary_safe = is_boundary_safe(message_type, schema_version)
     sender_owners: frozenset[str] = frozenset()
     other_owners: frozenset[str] = frozenset()
+    other_owner_sets: list[frozenset[str]] = []
     if conversation_type == "asymmetric" and not boundary_safe:
         try:
             # Sequential, not asyncio.gather: AgentTableOwnershipClient's
@@ -1462,7 +1476,6 @@ async def _enforce_boundary_crossing(
             # coroutines.
             sender_info = await ownership_client.get_agent_owners(sender_agent_id)
             sender_owners = frozenset(sender_info.get("owners") or [])
-            other_owner_sets = []
             for pid in other_agent_ids:
                 info = await ownership_client.get_agent_owners(pid)
                 other_owner_sets.append(frozenset(info.get("owners") or []))

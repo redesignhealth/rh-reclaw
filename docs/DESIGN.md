@@ -118,7 +118,8 @@ verified identity, at which point `agent_key` should be removed.
   revokes access immediately.
 - No pairwise grants in v1 (internal trust domain: colleagues don't need a consent
   handshake to ask availability). Conversation-open authorization is routed through a
-  single policy function (`_authorize_conversation_open`), which is the seam where a
+  single policy function (`_authorize_conversation_open` in `service.py` — a
+  module-private implementation hook, not a public API), which is the seam where a
   grants/consent layer lands when external counterparties arrive.
 
 ## 5. Data model (Postgres)
