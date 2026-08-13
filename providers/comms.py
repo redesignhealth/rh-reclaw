@@ -102,7 +102,8 @@ def _validate_agent_key(agent_key: str | None) -> str | None:
 
     # Strict allowlist: alphanumeric, dot, underscore, hyphen
     import re
-    if not re.match(r'^[A-Za-z0-9._-]+$', agent_key):
+
+    if not re.match(r"^[A-Za-z0-9._-]+$", agent_key):
         msg = (
             "invalid_request: agent_key must contain only alphanumeric"
             " characters, dots, underscores, or hyphens"
