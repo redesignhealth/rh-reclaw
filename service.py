@@ -753,6 +753,58 @@ async def list_agents(
     }
 
 
+async def lookup_agent_by_email(
+    session: AsyncSession, *, owner_email: str
+) -> dict[str, Any] | None:
+    """Directory lookup: is ``owner_email`` bound to a board-active agent?
+
+    This is the "handshake registry" concept (``docs/comms-architecture.md``
+    §"Handshake registry": "does this email belong to a registered EA")
+    realized directly on the existing ``Agent`` table rather than a
+    separate store — ``owner_email``/``sub`` already carry exactly what a
+    caller needs (which email, which board-wide identity), so there is
+    nothing left to duplicate. Formerly its own module
+    (``registry/directory.py``, TECH-4945) inside the negotiation library;
+    folded in here per TECH-5159 once each EA agent started holding its own
+    calendar and that library stopped needing a copy of this lookup for
+    itself — the comms board is the one place every agent can already
+    reach, so this is where the lookup belongs.
+
+    Comparison is case-insensitive (``func.lower``) since OAuth-sourced
+    email claims are not guaranteed to arrive in one canonical case, but
+    does not attempt the fuller NFKC-normalization ``rh_maiea.canonical``
+    applies — this service has no dependency on that library (by design,
+    per TECH-5158: the negotiation library and the comms board stay
+    decoupled) and plain case-folding covers the realistic input space for
+    values sourced from Okta/Google identity claims.
+
+    Fail-closed by construction, matching the retired module's contract:
+    a non-string or empty/whitespace-only ``owner_email`` returns ``None``
+    rather than raising or querying — there is no legitimate email this
+    could ever match, and the dangerous failure mode here is a false
+    positive (treating an unregistered counterparty as EA-represented),
+    not a missed match. ``owner_email`` is not a unique column (an owner
+    can rebind an agent under a new ``sub``), so ties break on most
+    recently (re)bound, active agent only — a deregistered/superseded
+    agent is never returned even if a stale row for the same email exists.
+    """
+    if not isinstance(owner_email, str):
+        return None
+    normalized = owner_email.strip().lower()
+    if not normalized:
+        return None
+    stmt = (
+        select(Agent)
+        .where(func.lower(Agent.owner_email) == normalized, Agent.status == "active")
+        .order_by(Agent.bound_at.desc().nullslast())
+        .limit(1)
+    )
+    agent = (await session.execute(stmt)).scalar_one_or_none()
+    if agent is None:
+        return None
+    return _agent_public(agent)
+
+
 async def list_conversations(
     session: AsyncSession,
     *,

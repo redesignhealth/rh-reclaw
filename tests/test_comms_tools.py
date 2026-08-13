@@ -213,8 +213,9 @@ async def _register(
     display_name: str | None = None,
     accepted_types: list[str] | None = None,
     owner_sub: str | None = None,
+    owner_email: str | None = None,
 ) -> dict[str, Any]:
-    token = _token(sub, owner_sub=owner_sub)
+    token = _token(sub, owner_sub=owner_sub, owner_email=owner_email)
     result: dict[str, Any] = await _call(
         main,
         test_session_factory,
@@ -532,6 +533,47 @@ class TestAxiShapes:
         assert result["total_count"] == 2
         assert result["has_more"] is False
         assert {a["sub"] for a in result["agents"]} == {"dir-agent-1", "dir-agent-2"}
+
+    async def test_lookup_agent_by_email_finds_registered_agent(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "ea-dan", owner_email="Dan@Example.com"
+        )
+        result = await _call(
+            main,
+            test_session_factory,
+            _token("dir-agent-1"),
+            "comms_lookup_agent_by_email",
+            {"owner_email": "  dan@example.com\t"},
+        )
+        assert result is not None
+        assert result["sub"] == "ea-dan"
+        assert result["owner_email"] == "Dan@Example.com"
+
+    async def test_lookup_agent_by_email_unknown_email_returns_none(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        result = await _call(
+            main,
+            test_session_factory,
+            _token("dir-agent-1"),
+            "comms_lookup_agent_by_email",
+            {"owner_email": "nobody@example.com"},
+        )
+        assert result is None
+
+    async def test_lookup_agent_by_email_rejects_empty_email(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        result = await _call(
+            main,
+            test_session_factory,
+            _token("dir-agent-1"),
+            "comms_lookup_agent_by_email",
+            {"owner_email": "   "},
+        )
+        assert result is None
 
 
 # --- Unregistered-caller path --------------------------------------------------------
