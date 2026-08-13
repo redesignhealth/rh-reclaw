@@ -796,9 +796,14 @@ async def lookup_agent_by_email(
     board-active agents under the same email). So multiple active rows
     for one ``owner_email`` is an expected, not exceptional, state, and
     this function deterministically returns whichever is most recently
-    (re)bound (``created_at`` DESC breaks a same-``bound_at`` tie, which
-    two rows can otherwise share down to the microsecond) -- NOT "the"
-    registered EA in any stronger sense. Do not read the
+    (re)bound. Ties break, in order: ``bound_at`` DESC, then ``created_at``
+    DESC (two rows can share the same ``bound_at``/``created_at`` down to
+    the microsecond -- ``created_at`` in particular freezes to transaction
+    start time via ``server_default=text("now()")``, so two agents
+    registered in the same transaction get an identical value), then
+    ``id`` (the UUID primary key, the only column here actually guaranteed
+    unique) as the final, always-deterministic tiebreaker. This is NOT
+    "the" registered EA in any stronger sense. Do not read the
     ``status == "active"`` filter as "a deregistered agent is
     never returned": nothing in this codebase currently transitions an
     agent to ``"suspended"`` (the only other value ``AGENT_STATUSES``
@@ -813,7 +818,7 @@ async def lookup_agent_by_email(
     stmt = (
         select(Agent)
         .where(func.lower(Agent.owner_email) == normalized, Agent.status == "active")
-        .order_by(Agent.bound_at.desc().nullslast(), Agent.created_at.desc())
+        .order_by(Agent.bound_at.desc().nullslast(), Agent.created_at.desc(), Agent.id)
         .limit(1)
     )
     agent = (await session.execute(stmt)).scalar_one_or_none()

@@ -11,6 +11,19 @@ sequential-scans ``agents`` on every call -- fine at today's table size, but
 worth having the index in place before ``comms_lookup_agent_by_email`` sees
 real traffic rather than adding it reactively later.
 
+NOTE on in-place amendment: like ``18f2d7735523`` before it, this revision
+was authored and iterated on entirely within this single unmerged PR (the
+column list changed from ``(lower(owner_email))`` alone to
+``(lower(owner_email), bound_at DESC NULLS LAST)`` across Argus review
+rounds) -- it does not exist on ``main``, and has never been applied to any
+persistent or shared database (this service has no deployed environment
+yet; CI runs against a fresh, ephemeral Postgres container every run; local
+review testing always ran full ``downgrade`` -> ``upgrade head`` cycles
+against the latest file content, including recreating the local Postgres
+container between rounds). In-place amendment was therefore safe. Once
+this PR merges, treat this file as frozen: any further schema change
+requires a NEW Alembic revision, never an edit to this one.
+
 """
 
 from __future__ import annotations
@@ -29,10 +42,13 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     # Expression index on (lower(owner_email), bound_at DESC NULLS LAST),
     # partial on status = 'active': matches lookup_agent_by_email's WHERE
-    # predicate AND its ORDER BY bound_at DESC NULLS LAST LIMIT 1, so a
-    # multi-active-agent owner_email (an expected, not exceptional, state --
-    # see that function's docstring) resolves via a single index scan
-    # instead of a heap-fetch-then-sort. op.create_index doesn't support
+    # predicate and the bound_at half of its ORDER BY, so a multi-active-
+    # agent owner_email (an expected, not exceptional, state -- see that
+    # function's docstring) resolves the bound_at ordering via a single
+    # index scan. This does NOT cover the query's secondary sort key
+    # (created_at DESC, added to break a same-bound_at tie) -- that case
+    # still falls back to an in-memory sort, but only for the rare
+    # equal-bound_at rows, not every call. op.create_index doesn't support
     # Postgres expression indexes, partial WHERE clauses, or per-column
     # NULLS ordering directly, so this is raw DDL.
     #

@@ -2655,6 +2655,26 @@ class TestLookupAgentByEmail:
         assert result is not None
         assert result["sub"] == "lae-new"
 
+    async def test_tie_break_falls_through_to_id_on_equal_bound_at_and_created_at(
+        self, session: AsyncSession
+    ) -> None:
+        # The documented equal-bound_at case (Argus round 3): two agents
+        # sharing bound_at AND created_at (both explicitly forced equal
+        # here, not merely left to same-transaction chance) must still
+        # resolve deterministically via the id tiebreaker, not arbitrarily.
+        first = await _register(session, "lae-tie-a", owner_email="tie@example.com")
+        second = await _register(session, "lae-tie-b", owner_email="tie@example.com")
+        second.bound_at = first.bound_at
+        second.created_at = first.created_at
+        await session.flush()
+        await session.commit()
+        # Agent.id has no explicit direction in the ORDER BY -- ascending,
+        # so the smaller id sorts first and wins the tie.
+        expected_sub = first.sub if first.id < second.id else second.sub
+        result = await lookup_agent_by_email(session, owner_email="tie@example.com")
+        assert result is not None
+        assert result["sub"] == expected_sub
+
 
 # --- inbox -------------------------------------------------------------------------
 

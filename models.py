@@ -33,6 +33,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    column,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP, UUID
@@ -100,10 +101,24 @@ class Agent(Base):
         # __table_args__ is evaluated before this class's own attributes
         # exist as a fully-formed class, so "Agent" isn't a valid name yet
         # at this point in the class body.
+        #
+        # Column 1 stays text("lower(owner_email)") -- Postgres stores a
+        # computed expression like this as a raw expression in
+        # pg_index.indexprs, and Alembic's autogenerate comparator treats
+        # text() as that same kind of opaque expression, so the two compare
+        # equal. Column 2 must NOT also be text() (Argus round 3, verified
+        # via `alembic revision --autogenerate` against a live DB): Postgres
+        # stores `bound_at DESC NULLS LAST` as a plain column reference plus
+        # sort attributes in pg_index.indoption, which autogenerate
+        # introspects as a structured column+modifier, not raw expression
+        # text -- a text()-based declaration never compares equal to that,
+        # so autogenerate kept proposing to DROP this index, defeating the
+        # entire point of declaring it here. column(...).desc().nullslast()
+        # produces the structured form that actually round-trips.
         Index(
             "idx_agents_lower_owner_email_active",
             text("lower(owner_email)"),
-            text("bound_at DESC NULLS LAST"),
+            column("bound_at").desc().nullslast(),
             postgresql_where=text("status = 'active'"),
         ),
     )
