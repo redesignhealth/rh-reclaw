@@ -1,11 +1,37 @@
 """Okta OIDC + rh-auth JWT authentication for reclaw-ea-mcp.
 
-Identical shape to reclaw-comms-mcp/auth.py one directory up (same fleet
-pattern, adapted from rh-data-platform ``services/rh-mcp/auth.py``, the
-reference implementation named in the RH tech guide,
-topics/04-auth-and-identity.md §MCP Server Auth). See that module's
-docstring for the full auth-path writeup; only the differences are called
-out here.
+Same fleet pattern as reclaw-comms-mcp/auth.py one directory up (both
+adapted from rh-data-platform ``services/rh-mcp/auth.py``, the reference
+implementation named in the RH tech guide, topics/04-auth-and-identity.md
+§MCP Server Auth). See that module's docstring for the full auth-path
+writeup; only the differences are called out here.
+
+KNOWN DIVERGENCE (not yet reconciled, tracked by TECH-5153): reclaw-comms-mcp/
+auth.py has since gained the refresh-token rotation-grace mechanism
+(``_ROTATION_*``) to fix forced Okta re-auths under concurrent connections
+sharing one cached refresh token. This service runs the identical FastMCP
+OIDCProxy + Okta app combination and would be subject to the same
+one-time-use rotation behavior once actually deployed -- reclaw-ea-mcp
+currently has zero Terraform/ECR/IAM footprint (see
+docs/proposals/reclaw-ea-plugin-registry.md's Context section), so this is
+a latent gap, not an active production issue today. That proposal doc's
+§1 covers reconciling these two auth.py files' JWT-rejection routing, not
+this rotation-grace gap specifically -- TECH-5153 tracks porting
+``_ROTATION_*`` here before/if this service is ever deployed standalone,
+independent of whether the plugin-registry merge happens first.
+Any port of the ``_ROTATION_*`` machinery here must also widen THIS
+SERVICE's own ``observability.py`` (``reclaw-ea-mcp/observability.py``,
+not the repo-root one, which already has all five values) -- its
+``log_auth_flow`` ``Literal`` is currently only
+``"new_auth" | "token_refresh"``. A partial port that only touches
+auth.py would be a mypy error at the new call sites, but silent at
+runtime: Python's ``Literal`` is a static-analysis-only construct and
+raises nothing when violated, regardless of ``log_auth_flow``'s own
+try/except (which guards structlog I/O failures, not type violations).
+mypy for this service is manual-only today -- ``reclaw-ea-mcp/`` is
+excluded from the root mypy run and no CI job invokes its own strict
+config yet (blocked on TECH-5067's Tailscale-reachable rh-auth index), so
+this mismatch will NOT be caught automatically in CI.
 
 Auth paths
 ----------
@@ -68,7 +94,11 @@ def require_env(name: str) -> str:
 class OktaOIDCProxy(OIDCProxy):
     """OIDC proxy configured for Okta SSO (copied idiom from rh-mcp /
     reclaw-comms-mcp). See reclaw-comms-mcp/auth.py's version of this class
-    for the full security rationale (identical here, verbatim)."""
+    for the full security rationale of ``_extract_upstream_claims`` and the
+    claim-extraction path (identical here, verbatim). The rotation-grace
+    overrides (``load_refresh_token``/``__follow_rotation_grace``) present
+    in that version are NOT present here -- see this module's own
+    docstring's KNOWN DIVERGENCE note."""
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
         """Decode the Okta ID token and extract identity claims.

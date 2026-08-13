@@ -166,3 +166,40 @@ class TestFallbackLoggerPaths:
                 log_scope_denial(tool="comms_whoami", reason="missing_token", client_id="unknown")
         mock_warning.assert_called_once()
         assert mock_warning.call_args.kwargs.get("exc_info") is True
+
+
+class TestLogAuthFlowEventTypes:
+    """``Literal`` isn't enforced at runtime, and mypy alone doesn't confirm
+    the actual emitted JSON field -- these pin every ``auth_type`` value
+    (both the original two and the three added for the refresh-token
+    rotation-grace port, auth.py) actually reaching ``obs_log.info`` with
+    the exact literal, not a typo'd string."""
+
+    def test_new_auth_reaches_obs_log(self) -> None:
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("new_auth")
+        mock_info.assert_called_once_with("auth_flow", auth_type="new_auth")
+
+    def test_token_refresh_reaches_obs_log(self) -> None:
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("token_refresh")
+        mock_info.assert_called_once_with("auth_flow", auth_type="token_refresh")
+
+    def test_refresh_token_grace_redirect_reaches_obs_log(self) -> None:
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("refresh_token_grace_redirect")
+        mock_info.assert_called_once_with("auth_flow", auth_type="refresh_token_grace_redirect")
+
+    def test_refresh_token_miss_reaches_obs_log(self) -> None:
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("refresh_token_miss")
+        mock_info.assert_called_once_with("auth_flow", auth_type="refresh_token_miss")
+
+    def test_refresh_token_hop_cap_exceeded_reaches_obs_log(self) -> None:
+        """This value is deliberately distinct from refresh_token_miss --
+        a rotation chain exceeding _ROTATION_MAX_HOPS is a different
+        operational condition from a genuine miss and must not collapse
+        into the same auth_type at the observability layer."""
+        with patch.object(observability.obs_log, "info") as mock_info:
+            log_auth_flow("refresh_token_hop_cap_exceeded")
+        mock_info.assert_called_once_with("auth_flow", auth_type="refresh_token_hop_cap_exceeded")

@@ -1,4 +1,4 @@
-"""Tests for auth.py's ``OktaOIDCProxy._extract_upstream_claims``.
+"""Tests for auth.py's ``OktaOIDCProxy``.
 
 Mirrors ``tests/test_main.py``'s idiom: the OIDC discovery fetch is patched
 out so tests never touch the network, and the required auth env vars are
@@ -10,11 +10,16 @@ provided (via ``_ENV_PATCH``, on top of ``conftest.py``'s autouse
 from __future__ import annotations
 
 import base64
+import hashlib
+import itertools
 import json
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from auth import OktaOIDCProxy, build_okta_provider
+from mcp.server.auth.provider import RefreshToken
+from mcp.shared.auth import OAuthToken
+
+from auth import _ROTATION_MAX_HOPS, OktaOIDCProxy, build_okta_provider
 
 _MOCK_OIDC_CONFIG = MagicMock()
 _OIDC_PATCH = patch(
@@ -201,3 +206,221 @@ class TestExtractUpstreamClaims:
         claims = await proxy._extract_upstream_claims({"id_token": id_token})
 
         assert claims is None
+
+
+def _refresh_token(token: str) -> RefreshToken:
+    return RefreshToken(token=token, client_id="test-client", scopes=["openid"])
+
+
+class TestAuthFlowEventEmission:
+    """The rotation-grace tests below assert log_auth_flow at each of their
+    own call sites explicitly -- these two do the same for the two
+    pre-existing call sites, so deleting either wouldn't go unnoticed."""
+
+    async def test_exchange_authorization_code_emits_new_auth(self) -> None:
+        proxy = _build_proxy()
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.exchange_authorization_code",
+                AsyncMock(return_value=OAuthToken(access_token="tok", token_type="bearer")),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            await proxy.exchange_authorization_code(MagicMock(), MagicMock())
+
+        mock_log_auth_flow.assert_called_once_with("new_auth")
+
+    async def test_exchange_refresh_token_emits_token_refresh(self) -> None:
+        proxy = _build_proxy()
+        old = _refresh_token("some-old-token")
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.exchange_refresh_token",
+                AsyncMock(return_value=OAuthToken(access_token="tok", token_type="bearer")),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            await proxy.exchange_refresh_token(MagicMock(), old, ["openid"])
+
+        mock_log_auth_flow.assert_called_once_with("token_refresh")
+
+
+class TestRefreshTokenRotationGrace:
+    """Ported from rh-mcp: a concurrent connection presenting a just-rotated
+    (one-time-use) refresh token must transparently follow it to its
+    successor within the grace window, rather than forcing a full re-auth.
+
+    TTL expiry itself (a rotation entry becoming unreadable after
+    ``_ROTATION_GRACE_SECONDS``) is NOT covered here -- that guarantee is
+    owned by ``key_value.aio.stores.filetree.FileTreeStore``'s own TTL
+    implementation, not by this class's logic, and asserting it here would
+    mean either mocking time (fragile against that library's internal
+    clock source) or a real 5-minute sleep in the test suite. Trusted as
+    the dependency's own tested behavior.
+    """
+
+    async def test_load_refresh_token_returns_directly_when_found(self) -> None:
+        proxy = _build_proxy()
+        found = _refresh_token("still-valid")
+        with patch(
+            "fastmcp.server.auth.oidc_proxy.OIDCProxy.load_refresh_token",
+            AsyncMock(return_value=found),
+        ):
+            result = await proxy.load_refresh_token(MagicMock(), "still-valid")
+
+        assert result is found
+
+    async def test_load_refresh_token_follows_rotation_on_miss(self) -> None:
+        proxy = _build_proxy()
+        successor = _refresh_token("new-token")
+
+        async def fake_super_lookup(_client: object, token: str) -> RefreshToken | None:
+            return successor if token == "new-token" else None
+
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.load_refresh_token",
+                AsyncMock(side_effect=fake_super_lookup),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            await proxy._rotation_store.put(
+                collection="mcp-refresh-token-rotations",
+                key=hashlib.sha256(b"old-token").hexdigest(),
+                value={"new_token": "new-token"},
+                ttl=300,
+            )
+            result = await proxy.load_refresh_token(MagicMock(), "old-token")
+
+        assert result is successor
+        mock_log_auth_flow.assert_called_once_with("refresh_token_grace_redirect")
+
+    async def test_load_refresh_token_returns_none_when_no_rotation_entry(self) -> None:
+        proxy = _build_proxy()
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.load_refresh_token",
+                AsyncMock(return_value=None),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            result = await proxy.load_refresh_token(MagicMock(), "never-issued")
+
+        assert result is None
+        mock_log_auth_flow.assert_called_once_with("refresh_token_miss")
+
+    async def test_load_refresh_token_resolves_full_hop_chain(self) -> None:
+        """A chain of exactly _ROTATION_MAX_HOPS hops (the guard is
+        evaluated at hops == 0, 1, ..., _ROTATION_MAX_HOPS - 1, never
+        reaching _ROTATION_MAX_HOPS itself here) must resolve successfully
+        -- guards against an off-by-one that caps the chain too early.
+
+        This does NOT by itself pin whether the guard's comparison is
+        strict `<` or `<=` against _ROTATION_MAX_HOPS -- the hop counter
+        never reaches _ROTATION_MAX_HOPS in this chain, so both operators
+        would pass it. test_load_refresh_token_caps_hop_chain is the one
+        that actually discriminates: it forces the guard to evaluate AT
+        hops == _ROTATION_MAX_HOPS, where `<` denies and `<=` would not.
+        Don't remove that test on the assumption this one covers it."""
+        proxy = _build_proxy()
+        final_token = _refresh_token("token-final")
+
+        async def fake_super_lookup(_client: object, token: str) -> RefreshToken | None:
+            return final_token if token == "token-final" else None
+
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.load_refresh_token",
+                AsyncMock(side_effect=fake_super_lookup),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            # token-0 -> token-1 -> ... -> token-final, exactly
+            # _ROTATION_MAX_HOPS hops (0 through _ROTATION_MAX_HOPS - 1).
+            chain = [f"token-{i}" for i in range(_ROTATION_MAX_HOPS)] + ["token-final"]
+            for old, new in itertools.pairwise(chain):
+                await proxy._rotation_store.put(
+                    collection="mcp-refresh-token-rotations",
+                    key=hashlib.sha256(old.encode()).hexdigest(),
+                    value={"new_token": new},
+                    ttl=300,
+                )
+            result = await proxy.load_refresh_token(MagicMock(), "token-0")
+
+        assert result is final_token
+        expected_calls = [call("refresh_token_grace_redirect")] * _ROTATION_MAX_HOPS
+        assert mock_log_auth_flow.call_args_list == expected_calls
+
+    async def test_load_refresh_token_caps_hop_chain(self) -> None:
+        """A chain longer than _ROTATION_MAX_HOPS must not be followed
+        indefinitely -- each hop's own token is itself immediately
+        rotated again, one hop too many."""
+        proxy = _build_proxy()
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.load_refresh_token",
+                AsyncMock(return_value=None),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+            patch("auth.logger") as mock_logger,
+        ):
+            # token-0 -> token-1 -> token-2 -> token-3: _ROTATION_MAX_HOPS
+            # == 3 hops (0, 1, 2) are followed; the 4th lookup (hop 3) hits
+            # the cap. range(_ROTATION_MAX_HOPS + 1) seeds exactly the
+            # entries this chain actually consumes, no unreachable extras.
+            for i in range(_ROTATION_MAX_HOPS + 1):
+                await proxy._rotation_store.put(
+                    collection="mcp-refresh-token-rotations",
+                    key=hashlib.sha256(f"token-{i}".encode()).hexdigest(),
+                    value={"new_token": f"token-{i + 1}"},
+                    ttl=300,
+                )
+            result = await proxy.load_refresh_token(MagicMock(), "token-0")
+
+        assert result is None
+        # _ROTATION_MAX_HOPS hops followed (grace_redirect each time)
+        # before the cap kills the next one, ending in exactly one
+        # terminal hop_cap_exceeded -- not one per exhausted hop, and
+        # distinct from a genuine refresh_token_miss (own auth_type).
+        expected_calls = [call("refresh_token_grace_redirect")] * _ROTATION_MAX_HOPS
+        expected_calls.append(call("refresh_token_hop_cap_exceeded"))
+        assert mock_log_auth_flow.call_args_list == expected_calls
+        mock_logger.warning.assert_called_once_with(
+            "Refresh token rotation-grace hop cap exceeded",
+            extra={"hops": _ROTATION_MAX_HOPS},
+        )
+
+    async def test_exchange_refresh_token_records_rotation_mapping(self) -> None:
+        proxy = _build_proxy()
+        old = _refresh_token("old-token")
+        new_oauth_token = OAuthToken(
+            access_token="new-access", token_type="bearer", refresh_token="new-token"
+        )
+        with patch(
+            "fastmcp.server.auth.oidc_proxy.OIDCProxy.exchange_refresh_token",
+            AsyncMock(return_value=new_oauth_token),
+        ):
+            result = await proxy.exchange_refresh_token(MagicMock(), old, ["openid"])
+
+        assert result is new_oauth_token
+        entry = await proxy._rotation_store.get(
+            collection="mcp-refresh-token-rotations",
+            key=hashlib.sha256(b"old-token").hexdigest(),
+        )
+        assert entry == {"new_token": "new-token"}
+
+    async def test_exchange_refresh_token_records_nothing_when_no_new_refresh_token(self) -> None:
+        proxy = _build_proxy()
+        old = _refresh_token("old-token-2")
+        new_oauth_token = OAuthToken(access_token="new-access", token_type="bearer")
+        with patch(
+            "fastmcp.server.auth.oidc_proxy.OIDCProxy.exchange_refresh_token",
+            AsyncMock(return_value=new_oauth_token),
+        ):
+            await proxy.exchange_refresh_token(MagicMock(), old, ["openid"])
+
+        entry = await proxy._rotation_store.get(
+            collection="mcp-refresh-token-rotations",
+            key=hashlib.sha256(b"old-token-2").hexdigest(),
+        )
+        assert entry is None

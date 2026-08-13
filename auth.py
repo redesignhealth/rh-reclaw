@@ -22,15 +22,45 @@ Programmatic callers (agents, services, CI jobs):
 Health check (``/health``):
     Unauthenticated — handled by FastMCP before auth middleware runs.
 
-Deliberately omitted vs rh-mcp: the refresh-token rotation-grace machinery
-(``_ROTATION_*``), which mitigates an rh-mcp-specific Claude Desktop
-multi-connection issue at real production scale. Add it back (copy from
-rh-mcp) if ``refresh_token_miss``-style forced re-auths show up here.
+Refresh-token rotation grace (``_ROTATION_*``, ported from rh-mcp): FastMCP
+rotates refresh tokens on every use (one-time use). A second concurrent
+connection presenting the just-consumed old token would otherwise fail hard
+and force a full Okta re-auth. We record a short-lived
+old-token-hash -> new-token mapping in the same EFS-backed store on every
+rotation; a subsequent "miss" checks this mapping first and transparently
+follows it before declaring a real miss.
+
+This shares its grace-window semantics, ``_ROTATION_*`` constants, and
+store layout with rh-mcp's version, but is NOT a verbatim copy: the hop
+counter here is deliberately NOT a parameter of the public
+``load_refresh_token`` override (see that method's own docstring) to close
+a cap-reset weakness rh-mcp's public-``_hops`` design has. Consider
+porting this hardening back to rh-mcp.
+
+This machinery is now duplicated across at least this service and rh-mcp
+(and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet
+despite running the identical FastMCP OIDCProxy + Okta app combination --
+same forced-re-auth exposure would apply there too, once that service is
+actually deployed; TECH-5153 tracks porting it there, and any such port
+must also widen reclaw-ea-mcp/observability.py's own ``log_auth_flow``
+Literal -- see that service's own docstring for why). Extraction into a
+shared ``rh_lib``-style base class is a reasonable idea once a third copy
+exists (which TECH-5153 would create), but is not itself tracked by any
+ticket -- revisit it as a follow-up if/when TECH-5153 lands, don't assume
+it happens automatically. Not done here to avoid a cross-repo refactor as
+a side effect of a one-service bug fix.
+
+Emitting ``refresh_token_miss`` / ``refresh_token_hop_cap_exceeded`` on
+paths that previously logged nothing means an undiscriminating
+``$.event = "auth_flow"`` CloudWatch filter now also counts failed refresh
+lookups as auth activity -- TECH-5155 tracks adding the dedicated metric
+filters this needs (see observability.py's own docstring for detail).
 """
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -40,6 +70,7 @@ from typing import Any
 from fastmcp.server.auth import MultiAuth
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.jwt import JWTVerifier
+from key_value.aio.protocols import AsyncKeyValue
 from key_value.aio.stores.filetree import (
     FileTreeStore,
     FileTreeV1CollectionSanitizationStrategy,
@@ -57,6 +88,14 @@ logger = logging.getLogger(__name__)
 _UPSTREAM_CLAIM_KEYS = ["sub", "email", "preferred_username", "name"]
 
 _DEFAULT_TOKEN_STORAGE_PATH = "/data/fastmcp-tokens"  # EFS-backed on ECS
+
+_ROTATION_GRACE_SECONDS = 5 * 60
+_ROTATION_MAX_HOPS = 3
+_ROTATION_COLLECTION = "mcp-refresh-token-rotations"
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def require_env(name: str) -> str:
@@ -83,6 +122,10 @@ class OktaOIDCProxy(OIDCProxy):
     ``verify_id_token=True`` the claims are also available directly. Emits
     structured ``auth_flow`` events for CloudWatch Metric Filters.
     """
+
+    def __init__(self, *, client_storage: AsyncKeyValue, **kwargs: Any) -> None:
+        self._rotation_store = client_storage
+        super().__init__(client_storage=client_storage, **kwargs)
 
     async def _extract_upstream_claims(self, idp_tokens: dict[str, Any]) -> dict[str, Any] | None:
         """Decode the Okta ID token and extract identity claims.
@@ -138,15 +181,102 @@ class OktaOIDCProxy(OIDCProxy):
         log_auth_flow("new_auth")
         return result
 
+    async def load_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+    ) -> RefreshToken | None:
+        """Look up a refresh token, following a rotation-grace redirect on miss.
+
+        FastMCP rotates refresh tokens on every use (one-time use). A second
+        concurrent connection presenting the just-consumed old token would
+        otherwise fail hard here and force a full Okta re-auth. Before
+        declaring a real miss, check whether this token was rotated recently
+        and, if so, transparently follow it to its successor (capped at
+        ``_ROTATION_MAX_HOPS`` to bound a pathological chain).
+
+        No hop counter in this signature on purpose: it's the base class's
+        override point (FastMCP calls it positionally), so a public
+        ``_hops`` parameter would let any caller reset the cap. Hop-tracking
+        lives in the name-mangled ``__follow_rotation_grace`` instead.
+        """
+        result = await super().load_refresh_token(client, refresh_token)
+        if result is not None:
+            return result
+        return await self.__follow_rotation_grace(client, refresh_token, hops=0)
+
+    async def __follow_rotation_grace(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+        *,
+        hops: int,
+    ) -> RefreshToken | None:
+        """Recursive hop-following helper for ``load_refresh_token``.
+
+        Double-underscore (name-mangled to ``_OktaOIDCProxy__follow_rotation_grace``)
+        rather than single, mainly to avoid an accidental same-name collision
+        in a subclass -- NOT an access-control guarantee. Name mangling is
+        trivially bypassable (``self._OktaOIDCProxy__follow_rotation_grace(...,
+        hops=0)`` from a subclass, or simply overriding ``load_refresh_token``
+        itself), so it does not by itself defend against a malicious
+        subclass. The actual hardening that closed the original weakness is
+        that ``hops`` is not a parameter of the PUBLIC ``load_refresh_token``
+        override point FastMCP calls -- an ordinary caller (not a subclass
+        author deliberately reaching for the mangled name) has no way to
+        supply it at all.
+        """
+        entry = await self._rotation_store.get(
+            collection=_ROTATION_COLLECTION, key=_hash_token(refresh_token)
+        )
+        successor = entry.get("new_token") if entry is not None else None
+        if successor and hops < _ROTATION_MAX_HOPS:
+            logger.info("Refresh token reuse detected: redirecting to rotated successor")
+            log_auth_flow("refresh_token_grace_redirect")
+            result = await super().load_refresh_token(client, successor)
+            if result is not None:
+                return result
+            return await self.__follow_rotation_grace(client, successor, hops=hops + 1)
+        if successor:
+            # A dedicated auth_type, not folded into refresh_token_miss:
+            # the chain kept going past the cap, which is a structurally
+            # different condition from "no rotation entry at all" and
+            # needs its own CloudWatch signal for on-call triage. hops is
+            # not sensitive; the token/its hash is deliberately NOT
+            # included here (observability.py's never-log-tokens policy).
+            logger.warning("Refresh token rotation-grace hop cap exceeded", extra={"hops": hops})
+            log_auth_flow("refresh_token_hop_cap_exceeded")
+            return None
+        log_auth_flow("refresh_token_miss")
+        return None
+
     async def exchange_refresh_token(
         self,
         client: OAuthClientInformationFull,
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        """Exchange refresh token and emit a ``token_refresh`` event."""
+        """Exchange refresh token, emit a ``token_refresh`` event, and record
+        the old->new rotation mapping for the grace window."""
+        old_token = refresh_token.token
         result = await super().exchange_refresh_token(client, refresh_token, scopes)
         log_auth_flow("token_refresh")
+        if result.refresh_token:
+            # SECURITY: the stored value is the live successor refresh
+            # token in plaintext, not a hash -- the hashed KEY only
+            # prevents reverse-lookup of the just-consumed OLD token, it
+            # does not protect the new one. Accepted posture, at parity
+            # with rh-mcp (the source of this port): this collection lives
+            # in the same EFS-backed, task-role-scoped store as the primary
+            # token store, which already holds live refresh tokens
+            # unencrypted (see build_okta_provider's client_storage). Anyone
+            # who can read one collection can read the other.
+            await self._rotation_store.put(
+                collection=_ROTATION_COLLECTION,
+                key=_hash_token(old_token),
+                value={"new_token": result.refresh_token},
+                ttl=_ROTATION_GRACE_SECONDS,
+            )
         return result
 
 

@@ -6,7 +6,9 @@ CloudWatch. The event schema matches the MCP fleet's shared
 ``mcp_observability`` contract (rh-data-platform ``services/shared``) so
 CloudWatch Metric Filters and Logs Insights queries written for rh-mcp /
 rh-google-mcp (``$.event = "tool_call"``, ``$.event = "scope_denial"``, ...)
-work unchanged against this service.
+work unchanged against this service -- with one exception noted below
+(``refresh_token_hop_cap_exceeded``, a service-local addition not yet in
+the shared contract).
 
 Event schema
 ------------
@@ -17,7 +19,29 @@ tool_call:
     available, adds ``"user_id": "<local-part|service-slug>"``.
 
 auth_flow:
-    {"event": "auth_flow", "service": "...", "auth_type": "new_auth|token_refresh"}
+    {"event": "auth_flow", "service": "...",
+     "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|
+                   refresh_token_miss|refresh_token_hop_cap_exceeded"}
+    ``refresh_token_grace_redirect`` and ``refresh_token_miss`` are ported
+    from rh-mcp's rotation-grace mechanism (auth.py);
+    ``refresh_token_hop_cap_exceeded`` is this service's own addition on
+    top of that port (see auth.py) and does NOT yet exist in rh-mcp or the
+    shared ``mcp_observability`` contract -- update both if/when this
+    hardening is ported back (no tracking ticket yet for that contract
+    update). All three are emitted on paths that previously logged nothing
+    at all. A ``$.event = "auth_flow"`` filter that doesn't discriminate on
+    ``auth_type`` now also counts failed refresh-token lookups as auth
+    activity. ``refresh_token_miss`` and ``refresh_token_hop_cap_exceeded``
+    are deliberately SEPARATE values, not one conflated "failed" bucket:
+    a genuine miss (token never issued or long expired) and a rotation
+    chain exceeding ``_ROTATION_MAX_HOPS`` (token IS being actively rotated,
+    just faster than the chain can be followed) are different operational
+    conditions and need independent CloudWatch metric filters before
+    either is alerted on -- a burst of hop-cap events specifically
+    indicates rotation outpacing the grace chain, a signal otherwise
+    invisible outside a manual Logs Insights query. No metric filter
+    exists for either value yet (Terraform, rh-data-platform, not this
+    repo) -- tracked by TECH-5155.
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",
@@ -159,7 +183,13 @@ def log_user_active(email: str) -> None:
 
 
 def log_auth_flow(
-    auth_type: Literal["new_auth", "token_refresh"],
+    auth_type: Literal[
+        "new_auth",
+        "token_refresh",
+        "refresh_token_grace_redirect",
+        "refresh_token_miss",
+        "refresh_token_hop_cap_exceeded",
+    ],
 ) -> None:
     """Emit an ``auth_flow`` event (browser auth completed / token refreshed)."""
     try:
