@@ -291,8 +291,8 @@ def _check_no_duplicates(values: Sequence[Any], field_name: str) -> None:
 
 
 class TaskAssignV1(_StrictModel):
-    """task_assign / v1 — opens a task-coordination conversation (,
-    DESIGN.md §9; supersedes's ``task_spec``/dedicated ``tasks``
+    """task_assign / v1 — opens a task-coordination conversation (DESIGN.md §9;
+    supersedes the ``task_spec``/dedicated ``tasks``
     table). Posted as the seq-1 message of an ``internal``/``asymmetric``
     conversation between the assigning agent (participant ``role='owner'``)
     and the assignee (participant ``role='member'``).

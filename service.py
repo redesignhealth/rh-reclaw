@@ -696,8 +696,8 @@ async def register_agent(
         session.add(agent)
     else:
         agent = existing
-        # owner_sub is deliberately NOT overwritten on re-registration
-        #: it is now read by
+        # owner_sub is deliberately NOT overwritten on re-registration —
+        # it is now read by
         # AgentTableOwnershipClient as the input to may_assign's admission
         # decision, and agent-jwt extra claims (including owner_sub) are
         # caller-supplied and unverified (providers/comms.py). Allowing a
@@ -1342,7 +1342,7 @@ async def invite(
     be overridable by another member, since decline is the consent
     mechanism), and — for ``internal``/``asymmetric`` conversations — must
     not introduce an owner outside the conversation's frozen
-    ``owner_snapshot`` (: the owner set is frozen at creation, not
+    ``owner_snapshot`` (the owner set is frozen at creation, not
     retroactively reconciled against prior messages when it would expand).
     ``open`` conversations have no ownership concept and skip this check.
     """
@@ -2163,7 +2163,7 @@ class OwnershipClient(Protocol):
     """Resolves a board agent's verified owner set — the seam for ``may_assign``.
 
     The real implementation calls the platform's ownership lookup
-    (not yet built as of; tracked as a follow-up). Tests fake
+    (not yet built; tracked as a follow-up). Tests fake
     this protocol directly. Every caller of ``get_agent_owners`` MUST fail
     closed on any exception — never treat a lookup error as "no match" vs.
     "match", since either silently loosens or tightens admission depending
@@ -2226,7 +2226,7 @@ class AgentTableOwnershipClient:
 def may_assign(creator_owners: AbstractSet[str], assignee_owners: AbstractSet[str]) -> bool:
     """Symmetric verified owner-set intersection — ``owners(a) ∩ owners(b) ≠ ∅``.
 
-    Originally's ``add_task`` admission policy; reused verbatim
+    Originally the ``add_task`` admission policy; reused verbatim
     by ``_pairwise_admitted`` as the ``asymmetric`` conversation-type
     predicate. ``AbstractSet`` (not ``set``) so callers
     may pass either mutable ``set``s or the ``frozenset``s the ownership-

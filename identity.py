@@ -4,7 +4,7 @@ Threat model:
 
 - Okta OIDC tokens carry identity in ``email`` / ``preferred_username``;
   their ``sub`` is an opaque Okta id.
-- agent-jwt Bearer JWTs carry identity in ``sub`` ONLY. The the JWT issuer
+- agent-jwt Bearer JWTs carry identity in ``sub`` ONLY. The JWT issuer
   CLI accepts arbitrary ``--sub`` strings and arbitrary extra claims, so an
   agent-jwt token's ``email`` claim is untrusted by design. Three
   impersonation variants are closed here:

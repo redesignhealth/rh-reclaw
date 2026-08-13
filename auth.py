@@ -97,7 +97,7 @@ class OktaOIDCProxy(OIDCProxy):
     ``_extract_upstream_claims`` embeds the Okta id_token identity claims in
     the FastMCP JWT as a fallback for code paths that read from there; with
     ``verify_id_token=True`` the claims are also available directly. Emits
-    structured ``auth_flow`` events for CloudWatch Metric Filters.
+    structured ``auth_flow`` observability events.
     """
 
     def __init__(self, *, client_storage: AsyncKeyValue, **kwargs: Any) -> None:
@@ -242,9 +242,8 @@ class OktaOIDCProxy(OIDCProxy):
             # SECURITY: the stored value is the live successor refresh
             # token in plaintext, not a hash -- the hashed KEY only
             # prevents reverse-lookup of the just-consumed OLD token, it
-            # does not protect the new one. Accepted posture, at parity
-            # with rh-mcp (the source of this port): this collection lives
-            # in the same EFS-backed, task-role-scoped store as the primary
+            # does not protect the new one. Accepted posture: this collection
+            # lives in the same EFS-backed, task-role-scoped store as the primary
             # token store, which already holds live refresh tokens
             # unencrypted (see build_okta_provider's client_storage). Anyone
             # who can read one collection can read the other.

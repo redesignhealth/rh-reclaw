@@ -417,7 +417,7 @@ class TestRegister:
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         """An agent-jwt (agent) token's ``email`` claim is caller-supplied and
-        unverified (the the JWT issuer CLI accepts arbitrary extra
+        unverified (the JWT issuer CLI accepts arbitrary extra
         claims) — it must never be trusted as ``owner_email``, even when
         present. This is the negative case the existing "no email claim at
         all" tests don't cover: here the token DOES carry an ``email``

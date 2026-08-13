@@ -120,8 +120,8 @@ class Conversation(Base):
     state: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
-    # Frozen verified owner-set snapshot at creation time (,
-    # DESIGN.md §9), ``{"owners": [...]}`` — populated only for
+    # Frozen verified owner-set snapshot at creation time (DESIGN.md §9),
+    # ``{"owners": [...]}`` — populated only for
     # ``internal``/``asymmetric`` conversations (NULL for ``open``, which
     # has no ownership concept). ``service.invite`` reads this to reject an
     # invite that would introduce an owner outside the frozen set, rather

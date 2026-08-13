@@ -234,8 +234,8 @@ class ObservabilityMiddleware(Middleware):
 mcp: FastMCP[Any] = FastMCP(
     "agent-comms-mcp",
     instructions=(
-        "Permissioned, structured agent-to-agent communications layer for "
-        "Redesign Health. Supports EA-style agents negotiating availability "
+        "Permissioned, structured agent-to-agent communications layer. "
+        "Supports EA-style agents negotiating availability "
         "and coordinating tasks across users via scoped, structured "
         "messages — no free text except the provisional 'note' type "
         "(boundary_safe=False; pre-quarantine pipeline, subject to change) "

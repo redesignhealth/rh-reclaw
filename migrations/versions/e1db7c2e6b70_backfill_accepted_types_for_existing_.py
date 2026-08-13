@@ -4,7 +4,7 @@ Revision ID: e1db7c2e6b70
 Revises: da3e1646c44d
 Create Date: 2026-08-13 10:07:06.090851
 
--followup: this PR turns ``accepted_types`` from a purely
+Followup: this PR turns ``accepted_types`` from a purely
 informational, unenforced declaration (DESIGN.md's own prior wording) into
 a real per-message capability gate (``service._enforce_message_type_accepted``)
 that denies a send when a recipient hasn't declared the message's type.

@@ -2,7 +2,7 @@
 
 Unit-tests ``try_resolve_email`` directly against constructed claims dicts
 (no DB, no MCP tool stack), AND unit-tests the private ``_is_agent_jwt_token``
-helper directly (``TestIsRhAuthToken`` below) — mirroring
+helper directly (``TestIsAgentJwtToken`` below) — mirroring
 ``tests/test_scopes.py``'s ``TestIsInteractiveToken`` pattern, which is the
 scopes.py counterpart to the ``iss is None`` fail-closed guard tested here.
 Direct coverage of ``_is_agent_jwt_token`` is deliberately kept alongside the
@@ -105,7 +105,7 @@ class TestTryResolveEmail:
         assert try_resolve_email(token) is None
 
 
-class TestIsRhAuthToken:
+class TestIsAgentJwtToken:
     """Direct unit tests for the private ``_is_agent_jwt_token`` gate.
 
     Complements ``TestTryResolveEmail`` above (which exercises this

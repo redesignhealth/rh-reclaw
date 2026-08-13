@@ -125,7 +125,7 @@ agent-token access gate, not a human-user gate.
 - Decline/leave is the consent mechanism. `comms_decline_invite` is for `invited`
  participants (terminal, no access ever granted). `comms_leave` covers already-`active`
  members. Leaving revokes access immediately.
-- No pairwise grants in v1 (internal trust domain: colleagues don't need a consent
+- No pairwise grants in v1 (within the deployment's trust domain: colleagues don't need a consent
  handshake to ask availability). Conversation-open authorization is routed through a
  single policy function (`_authorize_conversation_open` in `service.py` — a
  module-private implementation hook, not a public API), which is the seam where a
@@ -415,8 +415,8 @@ deployment-warning docstring.
 
 ## 10. Known extensions (explicitly deferred)
 
-- **Grants/consent layer**: required the moment a counterparty is outside the RH
- trust domain. Lands in the `_authorize_conversation_open` policy function + a
+- **Grants/consent layer**: required the moment a counterparty is outside the
+ deployment's trust domain. Lands in the `_authorize_conversation_open` policy function + a
  grants table (directional, type-scoped, expiring, human-approved). The
  anti-enumeration posture of `list_agents` also changes then.
 - **Free-text fields**: allowed only behind a quarantine/review pipeline (sandboxed,

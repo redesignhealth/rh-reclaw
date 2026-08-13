@@ -308,7 +308,7 @@ async def register(
       Do not "harmonize" these two checks into one shared helper on the
       assumption that they encode the same rule — an agent-jwt (agent)
       token's extra claims are caller-supplied and unverified (the
-      the JWT issuer CLI accepts arbitrary ``--sub`` and extra claims),
+      JWT issuer CLI accepts arbitrary ``--sub`` and extra claims),
       so ``email`` must never be trusted as an ``owner_email`` fallback for
       those tokens, regardless of which check is used to detect them.
 

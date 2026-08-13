@@ -4,7 +4,7 @@ Revision ID: da3e1646c44d
 Revises: 15ef34885e30
 Create Date: 2026-08-12 14:42:56.308473
 
- ("tasks-as-conversations"): drops the dedicated `tasks`
+This revision ("tasks-as-conversations") drops the dedicated `tasks`
 table and `audit_log.task_id` FK/index added by 6d2a8e63e469,
 now that task lifecycle is represented as a conversation carrying
 `task_assign`/`task_report`/`task_complete`/`task_decline`/`task_cancel`
