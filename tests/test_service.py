@@ -43,7 +43,6 @@ from exceptions import (
 )
 from models import Agent, AuditLog, Conversation, Participant
 from schemas import (
-    MAX_ACCEPTED_TYPE_LENGTH,
     MAX_ACCEPTED_TYPES,
     MAX_PAYLOAD_BYTES,
     MESSAGE_TYPES,
