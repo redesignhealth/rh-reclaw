@@ -1697,6 +1697,14 @@ async def _check_boundary_crossing(
     already-established reason to include ``invited``: keeping it
     consistent with the owner-set-freeze snapshot taken at invite time --
     see that function's own docstring.)
+
+    Accepted trade-off: this query now runs on every ``post_message`` call,
+    including ones where the capability gate turns out to be a no-op (an
+    ``open``/``internal`` conversation with every participant already
+    accepting everything). Skipping it in that case would mean re-deriving
+    "is this skippable" some other way -- which needs participant data
+    anyway -- so it isn't actually a savings; the query is the cheapest
+    correct way to answer "does anyone here need checking."
     """
     rows = (
         await session.execute(

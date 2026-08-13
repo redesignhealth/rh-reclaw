@@ -301,15 +301,27 @@ before the state-machine transition.
 ### Capability gate: `accepted_types`
 
 Independent of, and checked alongside, the `boundary_safe` crossing rule above:
-every other **active** participant/target (invited-but-not-yet-accepted
-participants are excluded here, unlike the boundary-crossing check's
-active-or-invited set — inviting someone must not retroactively block sends
-between the already-active members just because the invitee hasn't declared
-support yet; the check simply applies to them once they accept and become
-active) must have `message_type` in their own `agents.accepted_types`, or the
-send is denied (`denied.message_type_not_accepted`, uniform
-`AccessDeniedError`, detail omits which recipient rejected it or their
-declared set — same anti-enumeration posture as `denied.boundary_crossing`).
+every other **active** participant/target must have `message_type` in their
+own `agents.accepted_types`, or the send is denied
+(`denied.message_type_not_accepted`, uniform `AccessDeniedError`, detail omits
+which recipient rejected it or their declared set — same anti-enumeration
+posture as `denied.boundary_crossing`).
+
+The "active" scoping means two different things depending on which call this
+runs from — both are the capability gate, not two separate mechanisms:
+
+- **`start_conversation`**: the named targets themselves are checked
+  directly (see "Membership rules" above) — they aren't yet participants at
+  all at this point, let alone `invited`, so this is the gate's only chance
+  to catch a target that can't handle the opening message before any row is
+  created.
+- **`post_message`** (on an already-open conversation): scoped to
+  currently-**active** participants only — invited-but-not-yet-accepted
+  participants are excluded here, unlike the boundary-crossing check's
+  active-or-invited set. Inviting someone must not retroactively block sends
+  between the already-active members just because the invitee hasn't
+  declared support yet; the check simply applies to them once they accept
+  and become active, exactly like any other active participant.
 
 This is deliberately **universal**, unlike `boundary_safe`: `boundary_safe`
 answers a trust question (is this payload shaped safely enough to cross an

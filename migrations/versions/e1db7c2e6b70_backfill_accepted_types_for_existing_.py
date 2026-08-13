@@ -32,6 +32,14 @@ migrations are frozen historical artifacts (see other revisions' own notes
 on this), and `schemas.MESSAGE_TYPES` reflects the CURRENT registry, not
 "whatever existed at this migration's authoring time" -- importing it would
 make this file's behavior depend on future changes to that module.
+
+DEPLOYMENT: the parent revision (`da3e1646c44d`)'s own stop-then-start
+deployment warning does NOT apply to this one. That warning is about
+dropping `audit_log.task_id`, which breaks old-container audit writes
+during a rolling-deploy drain window -- this revision only widens an
+existing `agents.accepted_types` column's VALUES, touching no column that
+any currently-running container (old or new) reads or writes differently
+because of it. Safe to ship as a normal rolling deploy.
 """
 
 from __future__ import annotations

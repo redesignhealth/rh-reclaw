@@ -43,6 +43,7 @@ from exceptions import (
 )
 from models import Agent, AuditLog, Conversation, Participant
 from schemas import (
+    MAX_ACCEPTED_TYPE_LENGTH,
     MAX_ACCEPTED_TYPES,
     MAX_PAYLOAD_BYTES,
     MESSAGE_TYPES,
@@ -1806,6 +1807,19 @@ class TestMessageTypeAcceptedCapability:
                 message_type="availability_request",
             )
         assert exc_info.value.reason == "denied.message_type_not_accepted"
+        # No conversation row exists on this denial path (checked before
+        # session.add(conversation)), so _audit_actions' conversation_id
+        # filter can't be reused here -- query by agent_id instead.
+        actions = (
+            (
+                await session.execute(
+                    select(AuditLog.action).where(AuditLog.agent_id == initiator.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert "denied.message_type_not_accepted" in actions
 
     async def test_start_conversation_allowed_when_target_declared_type(
         self, session: AsyncSession
@@ -2008,6 +2022,89 @@ class TestMessageTypeAcceptedCapability:
             session,
             actor_sub=member.sub,
             sender_agent_id=member.id,
+            conversation_id=conversation.id,
+            message_type="counter_proposal",
+            payload=_counter_proposal_payload(),
+        )
+        assert message.type == "counter_proposal"
+
+    async def test_capability_gate_applies_once_invitee_accepts(
+        self, session: AsyncSession
+    ) -> None:
+        """The other half of the invite-poisoning fix: excluding invited
+        participants only DEFERS the check, it doesn't skip it forever --
+        once narrow_invitee accepts and becomes active, an existing
+        member's send of a type narrow_invitee doesn't accept IS denied."""
+        initiator = await _register(session, "cap-post-accept-initiator")
+        member = await _register(session, "cap-post-accept-member")
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[member.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=member.sub, agent_id=member.id, conversation_id=conversation.id
+        )
+        narrow_invitee = await _register(
+            session, "cap-post-accept-narrow-invitee", accepted_types=["confirm"]
+        )
+        await invite(
+            session,
+            actor_sub=member.sub,
+            inviter_agent_id=member.id,
+            conversation_id=conversation.id,
+            target_agent_id=narrow_invitee.id,
+        )
+        await accept_invite(
+            session,
+            actor_sub=narrow_invitee.sub,
+            agent_id=narrow_invitee.id,
+            conversation_id=conversation.id,
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=member.sub,
+                sender_agent_id=member.id,
+                conversation_id=conversation.id,
+                message_type="counter_proposal",
+                payload=_counter_proposal_payload(),
+            )
+        assert exc_info.value.reason == "denied.message_type_not_accepted"
+
+    async def test_pre_accept_bypass_is_a_deliberate_asymmetry_not_a_general_hole(
+        self, session: AsyncSession
+    ) -> None:
+        """Pins the intentional scope of the invite-poisoning fix: the
+        capability gate is a no-op ONLY because the sole other participant
+        is still merely invited (never yet active) -- this is not a
+        general "capability gate doesn't apply pre-accept" rule that would
+        also cover an ALREADY-active member sending to the SAME
+        conversation; it's specific to accepted_types not yet being
+        something the not-yet-active party has actually agreed to be
+        checked against."""
+        initiator = await _register(session, "cap-preaccept-initiator")
+        narrow_target = await _register(
+            session, "cap-preaccept-narrow-target", accepted_types=["availability_request"]
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[narrow_target.id],
+            initial_message=_request_payload(),
+        )
+        # narrow_target is still merely "invited" -- capability_others is
+        # empty, so this send is NOT gated by narrow_target's declared
+        # types at all, even though counter_proposal isn't among them.
+        message = await post_message(
+            session,
+            actor_sub=initiator.sub,
+            sender_agent_id=initiator.id,
             conversation_id=conversation.id,
             message_type="counter_proposal",
             payload=_counter_proposal_payload(),
