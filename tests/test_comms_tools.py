@@ -39,6 +39,12 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from schemas import MESSAGE_TYPES
+
+# Coverage for MESSAGE_TYPES fitting within MAX_ACCEPTED_TYPES (a precondition
+# for sorted(MESSAGE_TYPES) as a default accepted_types below) lives in
+# tests/test_schemas.py as a collected test, not a module-level assert here.
+
 SERVICE_ROOT = Path(__file__).parent.parent
 _DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
 
@@ -216,7 +222,10 @@ async def _register(
         "comms_register",
         {
             "display_name": display_name or sub,
-            "accepted_types": accepted_types or ["availability_request"],
+            # Permissive default so tests unrelated to the accepted_types
+            # capability gate don't need to opt in per-type; those tests
+            # narrow this explicitly via the accepted_types param.
+            "accepted_types": accepted_types or sorted(MESSAGE_TYPES),
         },
     )
     return result
@@ -1134,6 +1143,87 @@ class TestTaskLifecycleToolLayer:
                     "conversation_id": conversation_id,
                     "message_type": "task_decline",
                     "payload": {"reason": "unable_to_complete"},
+                },
+            )
+
+
+class TestMessageTypeAcceptedToolLayer:
+    """MCP-boundary counterpart to test_service.py's
+    TestMessageTypeAcceptedCapability -- confirms denied.message_type_not_accepted
+    collapses to the same uniform ToolError every other denial family does,
+    not a leaked reason string."""
+
+    async def test_denied_uniformly_at_tool_boundary(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "cap-tool-initiator")
+        target = await _register(
+            main, test_session_factory, "cap-tool-target", accepted_types=["confirm"]
+        )
+        initiator_token = _token("cap-tool-initiator")
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                initiator_token,
+                "comms_start_conversation",
+                {
+                    "conversation_type": "open",
+                    "target_agent_ids": [target["agent_id"]],
+                    "initial_message": _availability_request(),
+                    "message_type": "availability_request",
+                },
+            )
+
+    async def test_post_message_denied_uniformly_at_tool_boundary(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "cap-tool-post-initiator")
+        target = await _register(
+            main,
+            test_session_factory,
+            "cap-tool-post-target",
+            accepted_types=["availability_request"],
+        )
+        initiator_token = _token("cap-tool-post-initiator")
+        target_token = _token("cap-tool-post-target")
+
+        started = await _call(
+            main,
+            test_session_factory,
+            initiator_token,
+            "comms_start_conversation",
+            {
+                "conversation_type": "open",
+                "target_agent_ids": [target["agent_id"]],
+                "initial_message": _availability_request(),
+                "message_type": "availability_request",
+            },
+        )
+        await _call(
+            main,
+            test_session_factory,
+            target_token,
+            "comms_accept",
+            {"conversation_id": started["conversation_id"]},
+        )
+
+        # target's accepted_types doesn't include availability_response.
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                initiator_token,
+                "comms_post_message",
+                {
+                    "conversation_id": started["conversation_id"],
+                    "message_type": "availability_response",
+                    "payload": _availability_response(),
                 },
             )
 

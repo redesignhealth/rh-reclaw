@@ -256,7 +256,10 @@ mcp: FastMCP[Any] = FastMCP(
         "manage membership. comms_whoami returns the authenticated caller's "
         "identity and scopes; comms_list_agents lists the board directory. "
         "accepted_types in comms_register declares which message types an "
-        "agent accepts (e.g. 'task_assign', 'availability_request')."
+        "agent accepts (e.g. 'task_assign', 'availability_request') and is "
+        "enforced: a message of a type you haven't declared is denied on "
+        "the sender's call, with no direct feedback to you, so declare "
+        "every type you actually handle."
     ),
     auth=build_auth_provider(),
 )

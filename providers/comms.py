@@ -328,6 +328,14 @@ async def register(
     (both absent counts as the same) re-binds ``display_name``/
     ``accepted_types`` in place (see ``service.register_agent``); a
     different ``agent_key`` registers a distinct row instead.
+
+    ``accepted_types`` is enforced, not just declarative (DESIGN.md §9's
+    capability gate): a message type omitted here causes any message of
+    that type directed at THIS agent to be denied for the SENDER, not for
+    you — you get no direct feedback when this happens, since the failure
+    surfaces on someone else's call, not yours. Declare every message type
+    your implementation actually handles, not just enough to pass whatever
+    you're testing right now.
     """
     token = _require_token()
     base_sub = _require_identity(token)

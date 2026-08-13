@@ -67,3 +67,14 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_at_id" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_by_status" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_audit_log_task_id" in result.stdout
+    # accepted_types enforcement follow-up: backfill grandfathers every
+    # pre-existing agent row to the full message-type set so the new
+    # per-message capability gate doesn't retroactively break an agent
+    # registered under the old "informational, no effect" contract.
+    assert (
+        "UPDATE public.agents SET accepted_types = ARRAY['availability_request', "
+        "'availability_response', 'confirm', 'counter_proposal', 'decline', "
+        "'needs_clarification', 'note', 'task_assign', 'task_cancel', "
+        "'task_complete', 'task_decline', 'task_report']::text[], "
+        "updated_at = now();" in result.stdout
+    )
