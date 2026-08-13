@@ -309,14 +309,19 @@ class TestRefreshTokenRotationGrace:
         assert result is None
         mock_log_auth_flow.assert_called_once_with("refresh_token_miss")
 
-    async def test_load_refresh_token_resolves_chain_exactly_at_the_cap(self) -> None:
-        """Boundary from the other side of test_load_refresh_token_caps_hop_chain:
-        a chain of exactly _ROTATION_MAX_HOPS hops (hops 0..MAX_HOPS-1, all
-        strictly less than the cap) must still resolve successfully. A
-        chain shorter than this would pass under EITHER a `<` or `<=`
-        comparison against _ROTATION_MAX_HOPS, so it wouldn't actually pin
-        which operator the guard uses -- this length only succeeds if the
-        guard is strict `<`, which is the real invariant being tested."""
+    async def test_load_refresh_token_resolves_full_hop_chain(self) -> None:
+        """A chain of exactly _ROTATION_MAX_HOPS hops (the guard is
+        evaluated at hops == 0, 1, ..., _ROTATION_MAX_HOPS - 1, never
+        reaching _ROTATION_MAX_HOPS itself here) must resolve successfully
+        -- guards against an off-by-one that caps the chain too early.
+
+        This does NOT by itself pin whether the guard's comparison is
+        strict `<` or `<=` against _ROTATION_MAX_HOPS -- the hop counter
+        never reaches _ROTATION_MAX_HOPS in this chain, so both operators
+        would pass it. test_load_refresh_token_caps_hop_chain is the one
+        that actually discriminates: it forces the guard to evaluate AT
+        hops == _ROTATION_MAX_HOPS, where `<` denies and `<=` would not.
+        Don't remove that test on the assumption this one covers it."""
         proxy = _build_proxy()
         final_token = _refresh_token("token-final")
 

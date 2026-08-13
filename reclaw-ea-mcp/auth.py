@@ -19,11 +19,19 @@ a latent gap, not an active production issue today. That proposal doc's
 this rotation-grace gap specifically -- TECH-5153 tracks porting
 ``_ROTATION_*`` here before/if this service is ever deployed standalone,
 independent of whether the plugin-registry merge happens first.
-TECH-5153's scope explicitly includes widening this repo's
-observability.py's own ``log_auth_flow`` ``Literal`` (currently only
-``"new_auth" | "token_refresh"``) to match -- a partial port that only
-touches auth.py would be a mypy error at the new ``log_auth_flow`` call
-sites, and since that helper swallows exceptions, silent at runtime too.
+Any port of the ``_ROTATION_*`` machinery here must also widen THIS
+SERVICE's own ``observability.py`` (``reclaw-ea-mcp/observability.py``,
+not the repo-root one, which already has all five values) -- its
+``log_auth_flow`` ``Literal`` is currently only
+``"new_auth" | "token_refresh"``. A partial port that only touches
+auth.py would be a mypy error at the new call sites, but silent at
+runtime: Python's ``Literal`` is a static-analysis-only construct and
+raises nothing when violated, regardless of ``log_auth_flow``'s own
+try/except (which guards structlog I/O failures, not type violations).
+mypy for this service is manual-only today -- ``reclaw-ea-mcp/`` is
+excluded from the root mypy run and no CI job invokes its own strict
+config yet (blocked on TECH-5067's Tailscale-reachable rh-auth index), so
+this mismatch will NOT be caught automatically in CI.
 
 Auth paths
 ----------

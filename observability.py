@@ -36,13 +36,12 @@ auth_flow:
     a genuine miss (token never issued or long expired) and a rotation
     chain exceeding ``_ROTATION_MAX_HOPS`` (token IS being actively rotated,
     just faster than the chain can be followed) are different operational
-    conditions and ideally get independent CloudWatch metric filters
-    before either is alerted on -- a burst of hop-cap events specifically
+    conditions and need independent CloudWatch metric filters before
+    either is alerted on -- a burst of hop-cap events specifically
     indicates rotation outpacing the grace chain, a signal otherwise
     invisible outside a manual Logs Insights query. No metric filter
     exists for either value yet (Terraform, rh-data-platform, not this
-    repo) and no ticket tracks adding one -- this docstring is advisory
-    until that audit happens, not a standing guarantee.
+    repo) -- tracked by TECH-5155.
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",
