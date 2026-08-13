@@ -37,18 +37,12 @@ counter here is deliberately NOT a parameter of the public
 a cap-reset weakness rh-mcp's public-``_hops`` design has. Consider
 porting this hardening back to rh-mcp.
 
-This machinery is now duplicated across at least this service and rh-mcp
-(and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet
-despite running the identical FastMCP OIDCProxy + Okta app combination --
-same forced-re-auth exposure would apply there too, once that service is
-actually deployed; TECH-5153 tracks porting it there, and any such port
-must also widen reclaw-ea-mcp/observability.py's own ``log_auth_flow``
-Literal -- see that service's own docstring for why). Extraction into a
-shared ``rh_lib``-style base class is a reasonable idea once a third copy
-exists (which TECH-5153 would create), but is not itself tracked by any
-ticket -- revisit it as a follow-up if/when TECH-5153 lands, don't assume
-it happens automatically. Not done here to avoid a cross-repo refactor as
-a side effect of a one-service bug fix.
+This machinery is now duplicated across at least this service and rh-mcp.
+Extraction into a shared ``rh_lib``-style base class is a reasonable idea
+once a third copy exists, but is not itself tracked by any ticket --
+revisit it as a follow-up if a third service needs it, don't assume it
+happens automatically. Not done here to avoid a cross-repo refactor as a
+side effect of a one-service bug fix.
 
 Emitting ``refresh_token_miss`` / ``refresh_token_hop_cap_exceeded`` on
 paths that previously logged nothing means an undiscriminating

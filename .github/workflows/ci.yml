@@ -6,13 +6,8 @@
 # works around with an alternate host port (see README.md).
 #
 # This workflow covers ONLY this project (reclaw-comms-mcp, at the repo
-# root). Neither reclaw-ea/ nor reclaw-ea-mcp/ (sibling projects) have a CI
-# job yet — both transitively depend on the private Gitea `rh-auth` package
-# index, reachable only over the Redesign Health Tailscale tailnet, and
-# these runners have no Tailscale sidecar. TECH-5067 (reclaw-ea-mcp's
-# Terraform + deployment flow) is where that gets wired up; don't add a
-# lint/test job for either sibling here until it does — a job that can
-# never succeed is worse than an explicit gap.
+# root). EA/negotiation tooling has moved out of this repo entirely
+# (destination TBD, see TECH-5157) and has no CI job here.
 name: CI
 
 on:
