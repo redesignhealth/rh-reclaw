@@ -455,20 +455,20 @@ async def post_message(
     ``message_type`` and required ``payload`` fields:
 
     - ``availability_request``: ``window`` (``{start, end}`` aware ISO 8601),
-      ``duration_min`` (int 5–480), ``modality`` (video/phone/in_person),
+      ``duration_min`` (int 5-480), ``modality`` (video/phone/in_person),
       ``priority`` (low/normal/high); optional ``constraints`` list (up to 10,
       values: mornings_only/afternoons_only/avoid_fridays/buffer_15min).
     - ``availability_response``: either ``slots`` (list of
       ``{start, end, preference 0..1}``, max 10) OR ``none_available=True``
       + ``reason`` (no_overlap/window_too_narrow/owner_unavailable).
-    - ``counter_proposal``: ``slots`` (1–10 slot dicts, same shape as above).
+    - ``counter_proposal``: ``slots`` (1-10 slot dicts, same shape as above).
     - ``confirm``: ``slot`` (``{start, end}`` aware ISO 8601). Marks
       conversation complete.
     - ``decline``: ``reason`` (owner_declined/no_availability/expired/other).
       May cancel the conversation if all members have declined.
     - ``needs_clarification``: ``about_seq`` (int ≥ 1, references a prior
       message seq).
-    - ``note``: ``text`` (str 1–4000 chars). Boundary-restricted: allowed
+    - ``note``: ``text`` (str 1-4000 chars). Boundary-restricted: allowed
       only in ``internal`` conversations, or in ``asymmetric`` conversations
       where the sender owns the conversation. Never allowed under ``open``.
     - ``task_assign``: ``action`` enum:
