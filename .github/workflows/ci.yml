@@ -115,7 +115,7 @@ jobs:
         run: |
           docker run --rm --entrypoint sh agent-comms-mcp:${{ github.sha }} -c \
             "command -v agent-comms-mcp && command -v agent-comms-mcp-migrate && \
-             (agent-comms-mcp --help || true)"
+             python -c 'import agent_comms_mcp'"
 
       - name: Verify pyproject.toml version matches requirements.lock pin
         run: |
@@ -125,11 +125,12 @@ jobs:
       - name: Verify migration continuity (wheel vs repo)
         run: |
           LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3 | tr -d ' \\')
-          pip download "agent-comms-mcp==${LOCK_VER}" --dest /tmp/acm-dl --no-deps --quiet
+          pip download "agent-comms-mcp==${LOCK_VER}" --dest /tmp/acm-dl --no-deps --quiet --prefer-binary
           python3 - <<'EOF'
           import zipfile, os, sys
           wheel_dir = '/tmp/acm-dl'
-          wheel_file = next(f for f in os.listdir(wheel_dir) if f.endswith('.whl'))
+          wheel_file = next((f for f in os.listdir(wheel_dir) if f.endswith('.whl')), None)
+          assert wheel_file, f"No .whl found in {wheel_dir} — pip may have downloaded an sdist only"
           with zipfile.ZipFile(os.path.join(wheel_dir, wheel_file)) as z:
               wheel_migrations = sorted(
                   n.split('/')[-1] for n in z.namelist()

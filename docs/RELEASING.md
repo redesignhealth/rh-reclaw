@@ -12,7 +12,7 @@ source live at [redesignhealth/agent-comms-mcp](https://github.com/redesignhealt
    filenames against this repo's `migrations/versions/`:
    ```sh
    pip download agent-comms-mcp==X.Y.Z --dest /tmp/acm-dl --no-deps
-   unzip -p /tmp/acm-dl/agent_comms_mcp-X.Y.Z-*.whl 'migrations/versions/*' -d /tmp/acm-inspect
+   unzip /tmp/acm-dl/agent_comms_mcp-X.Y.Z-*.whl 'migrations/versions/*' -d /tmp/acm-inspect
    diff <(ls /tmp/acm-inspect/migrations/versions/) <(ls migrations/versions/)
    ```
    The diff must be empty. If the wheel adds new migration files that are not yet
