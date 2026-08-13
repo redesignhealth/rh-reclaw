@@ -44,6 +44,12 @@ RUN uv sync --frozen --no-dev --no-install-project
 # build --network=host` works the same). The mounted `netrc` BuildKit
 # secret authenticates to the Gitea package registry; build with:
 #   docker build --secret id=netrc,src=$HOME/.netrc --network=host -t reclaw-comms-mcp .
+#
+# `git` isn't present in the python:3.12-slim base -- reclaw-ea's own
+# scheduler-mcp dependency is a git+SHA source (ea-deps/uv.lock), so `uv`
+# needs a real git executable on PATH to fetch it, not just network access.
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
 COPY ea-deps/pyproject.toml ea-deps/uv.lock ea-deps/
 COPY reclaw-ea/ reclaw-ea/
 COPY scripts/install-ea-deps.sh scripts/install-ea-deps.sh
