@@ -405,7 +405,8 @@ only change needed when the platform endpoint ships.
 ### Known gap: rolling-deploy safety of the `tasks`-table-drop migration
 
 `migrations/versions/da3e1646c44d_drop_tasks_table.py` drops `audit_log.task_id`.
-`entrypoint.sh` runs `alembic upgrade head` in the new container before the old
+`entrypoint.sh` runs `agent-comms-mcp-migrate` (which calls `alembic upgrade head`
+via the migrations bundled in the PyPI wheel) in the new container before the old
 container drains, so a standard rolling deploy of this image would break every
 audit-log write (not just task-scoped ones) from any still-running old container
 for the entire drain window. This PR must ship as a stop-then-start deploy, or
@@ -429,7 +430,8 @@ deployment-warning docstring.
 See [README.md — Deployment](../README.md#deployment) for setup and
 configuration. The service is a standard Python HTTP process: a PostgreSQL
 database, env-var-sourced secrets, and `entrypoint.sh` runs
-`alembic upgrade head` automatically before the server starts.
+`agent-comms-mcp-migrate` automatically before the server starts (invokes
+`alembic upgrade head` using the migrations bundled in the PyPI wheel).
 
 ## 12. Delivery plan
 

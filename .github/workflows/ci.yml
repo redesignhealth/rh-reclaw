@@ -28,8 +28,7 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@38f3f104447c67c051c4a08e39b64a148898af3a # v4.2.0
         with:
-          # Pinned; must be recent enough to parse this repo's uv.lock
-          # revision. Matches the Dockerfile's uv pin.
+          # Pinned; must be recent enough to parse this repo's uv.lock revision.
           version: "0.11.28"
 
       - name: Load uv cache
@@ -111,3 +110,34 @@ jobs:
 
       - name: Build image
         run: docker build -t agent-comms-mcp:${{ github.sha }} .
+
+      - name: Smoke-test entry points
+        run: |
+          docker run --rm --entrypoint sh agent-comms-mcp:${{ github.sha }} -c \
+            "command -v agent-comms-mcp && command -v agent-comms-mcp-migrate"
+
+      - name: Verify pyproject.toml version matches requirements.lock pin
+        run: |
+          LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3 | tr -d ' \\')
+          grep -q "version = \"$LOCK_VER\"" pyproject.toml
+
+      - name: Verify migration continuity (wheel vs repo)
+        run: |
+          LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3 | tr -d ' \\')
+          pip download "agent-comms-mcp==${LOCK_VER}" --dest /tmp/acm-dl --no-deps --quiet --prefer-binary
+          python3 - <<'EOF'
+          import zipfile, os, sys
+          wheel_dir = '/tmp/acm-dl'
+          wheel_file = next((f for f in os.listdir(wheel_dir) if f.endswith('.whl')), None)
+          assert wheel_file, f"No .whl found in {wheel_dir} — pip may have downloaded an sdist only"
+          with zipfile.ZipFile(os.path.join(wheel_dir, wheel_file)) as z:
+              wheel_migrations = sorted(
+                  n.split('/')[-1] for n in z.namelist()
+                  if 'migrations/versions/' in n and n.endswith('.py')
+              )
+          repo_migrations = sorted(f for f in os.listdir('migrations/versions') if f.endswith('.py'))
+          if wheel_migrations != repo_migrations:
+              print(f"Migration mismatch!\nWheel: {wheel_migrations}\nRepo:  {repo_migrations}", file=sys.stderr)
+              sys.exit(1)
+          print(f"Migration continuity OK: {len(wheel_migrations)} files match")
+          EOF

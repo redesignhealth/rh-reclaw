@@ -2175,7 +2175,7 @@ class TestMessageTypeAcceptedCapability:
 
 
 class TestTaskLifecycleMessages:
-    """"tasks-as-conversations": task_assign opens a conversation (assigner
+    """ "tasks-as-conversations": task_assign opens a conversation (assigner
     = owner participant, assignee = member participant); task_report is
     non-terminal; task_complete/task_decline/task_cancel are terminal and
     sender-role-restricted."""

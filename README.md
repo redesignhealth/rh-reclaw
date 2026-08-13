@@ -1,5 +1,11 @@
 # agent-comms-mcp
 
+> **Deploy repo.** The application source and PyPI package live at
+> [redesignhealth/agent-comms-mcp](https://github.com/redesignhealth/agent-comms-mcp).
+> This repo contains the deployment configuration (Dockerfile, entrypoint.sh, CI).
+> Source files here (main.py, migrations/, etc.) are the dev baseline for local
+> testing — the deployed image installs `agent-comms-mcp` from PyPI.
+
 MCP service for **permissioned, structured agent-to-agent communications**.
 First use case: a user's main agent delegates to a dedicated EA agent, which
 communicates with other people's EA agents to negotiate availability (including
@@ -24,7 +30,8 @@ schemas.py           # Pydantic message-payload schemas (all registered message 
 state_machine.py     # Conversation/participant state transitions (DESIGN.md §4, §6)
 service.py           # Domain/service layer: membership rules, uniform denials, audit
 exceptions.py        # Service-layer exception shapes (mapped to ToolError in providers/comms.py)
-migrations/          # Alembic migrations (async env.py); run `alembic upgrade head`
+migrations/          # Alembic migrations (async env.py) — dev baseline; deployed image
+                     #   uses the bundled copy in the agent-comms-mcp PyPI wheel
 tests/               # pytest suite (composition, scope fail-closed, domain logic, schema)
 ```
 
@@ -190,8 +197,9 @@ docker compose up --build
 | `AGENT_JWT_SECRET` | Shared HS256 secret for agent JWT verification |
 | `DATABASE_URL` | PostgreSQL connection string |
 
-`entrypoint.sh` runs `alembic upgrade head` automatically on every container
-start, so migrations apply before the server accepts traffic.
+`entrypoint.sh` runs `agent-comms-mcp-migrate` automatically on every container
+start, which runs `alembic upgrade head` using the migrations bundled in the
+installed PyPI wheel. Migrations apply before the server accepts traffic.
 
 ## License
 
