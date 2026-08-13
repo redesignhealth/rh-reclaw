@@ -115,16 +115,16 @@ jobs:
         run: |
           docker run --rm --entrypoint sh agent-comms-mcp:${{ github.sha }} -c \
             "command -v agent-comms-mcp && command -v agent-comms-mcp-migrate && \
-             agent-comms-mcp --help > /dev/null 2>&1 || true"
+             (agent-comms-mcp --help || true)"
 
       - name: Verify pyproject.toml version matches requirements.lock pin
         run: |
-          LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3)
+          LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3 | tr -d ' \\')
           grep -q "version = \"$LOCK_VER\"" pyproject.toml
 
       - name: Verify migration continuity (wheel vs repo)
         run: |
-          LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3)
+          LOCK_VER=$(grep '^agent-comms-mcp==' requirements.lock | head -1 | cut -d= -f3 | tr -d ' \\')
           pip download "agent-comms-mcp==${LOCK_VER}" --dest /tmp/acm-dl --no-deps --quiet
           python3 - <<'EOF'
           import zipfile, os, sys
