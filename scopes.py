@@ -1,23 +1,18 @@
-"""Scope registry and enforcement helpers for reclaw-comms-mcp tools.
+"""Scope registry and enforcement helpers for agent-comms-mcp tools.
 
-Adapted from rh-data-platform ``services/rh-mcp/scopes.py`` (TECH-2752), the
-canonical pattern named in the RH tech guide (topics/04-auth-and-identity.md
-§Scope Enforcement).
-
-Maps each fully-qualified, mount-prefixed tool name to the single rh-auth
+Maps each fully-qualified, mount-prefixed tool name to the single agent-jwt
 scope required to invoke it. The mapping is the source of truth — every new
 tool MUST be added here in the same PR that introduces it, or it will be
-unreachable by rh-auth Bearer callers (fail-closed default in
+unreachable by agent-jwt Bearer callers (fail-closed default in
 ``ScopeEnforcementMiddleware``).
 
 Caller classification
 ---------------------
 Interactive users (Okta OIDCProxy) bypass scope checks: their tokens carry
-an ``iss`` claim that is NOT ``"rh-auth"`` (the OIDCProxy issues
+an ``iss`` claim that is NOT ``"agent-jwt"`` (the OIDCProxy issues
 FastMCP-internal JWTs whose ``iss`` is the server's own URL). All
-non-interactive callers must present an ``iss="rh-auth"`` token issued by
-the rh-auth CLI and must carry the required scope in the token's ``scopes``
-claim.
+non-interactive callers must present an ``iss="agent-jwt"`` token and carry
+the required scope in the token's ``scopes`` claim.
 """
 
 from __future__ import annotations
@@ -27,7 +22,7 @@ from __future__ import annotations
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth import AccessToken
 
-from identity import RH_AUTH_ISSUER, validate_sub_shape
+from identity import AGENT_JWT_ISSUER, validate_sub_shape
 from observability import log_auth_rejected
 
 # Fully-qualified tool names (post-mount prefix in FastMCP 3.x:
@@ -57,8 +52,8 @@ TOOL_SCOPES: dict[str, str] = {
 }
 
 
-# Resources gated for rh-auth callers (interactive Okta users bypass, like
-# tools). Maps resource URI to required scope. Fail-closed: an rh-auth
+# Resources gated for agent-jwt callers (interactive Okta users bypass, like
+# tools). Maps resource URI to required scope. Fail-closed: an agent-jwt
 # caller reading an unmapped resource is denied, mirroring the unmapped-tool
 # behavior. Empty today — this service registers no resources yet.
 RESOURCE_SCOPES: dict[str, str] = {}
@@ -69,8 +64,8 @@ def is_interactive_token(token: AccessToken | None) -> bool:
 
     Interactive (browser) users authenticate via FastMCP's OIDCProxy, which
     mints its own FastMCP-internal JWT whose ``iss`` claim is the server's
-    own URL — never ``"rh-auth"``. rh-auth Bearer tokens always carry
-    ``iss="rh-auth"`` (enforced by the JWTVerifier in
+    own URL — never ``"agent-jwt"``. agent-jwt Bearer tokens always carry
+    ``iss="agent-jwt"`` (enforced by the JWTVerifier in
     ``auth.build_auth_provider``).
 
     A missing token (None) is treated as NON-interactive so the middleware
@@ -85,13 +80,13 @@ def is_interactive_token(token: AccessToken | None) -> bool:
     issuer = token.claims.get("iss")
     if issuer is None:
         return False
-    return bool(issuer != RH_AUTH_ISSUER)
+    return bool(issuer != AGENT_JWT_ISSUER)
 
 
 def required_scope_for(tool_name: str) -> str | None:
     """Return the scope required for ``tool_name``, or None if unmapped.
 
-    Unmapped tools are rejected for rh-auth callers by the enforcement
+    Unmapped tools are rejected for agent-jwt callers by the enforcement
     middleware (fail-closed). Interactive callers bypass the lookup entirely
     via ``is_interactive_token``.
     """
@@ -107,11 +102,11 @@ _REDACTED_CLIENT_ID = "invalid_sub"
 
 
 def safe_client_id(token: AccessToken) -> str:
-    """Return ``token.client_id``, redacted if the rh-auth ``sub`` is
-    shape-invalid (TECH-3928 pattern).
+    """Return ``token.client_id``, redacted if the agent-jwt ``sub`` is
+    shape-invalid.
 
     FastMCP's ``JWTVerifier`` pre-resolves ``AccessToken.client_id`` from
-    ``azp`` → ``sub`` → ``"unknown"``. For rh-auth tokens ``azp`` is never
+    ``azp`` → ``sub`` → ``"unknown"``. For agent-jwt tokens ``azp`` is never
     set, so ``client_id`` IS the raw ``sub`` — including the
     attacker-controlled payload of a forged token. Redacting shape-invalid
     subs keeps impersonation payloads out of the ``scope_denial`` metric
@@ -121,38 +116,38 @@ def safe_client_id(token: AccessToken) -> str:
     single emission point for ``auth_rejected`` — it covers every denial
     path (``missing_scope``, ``tool_not_enrolled``, ``missing_token``),
     including the enrollment paths that never reach ``scopes_for_token``.
-    Non-rh-auth (Okta) tokens pass through unchanged: their ``client_id``
+    Non-agent-jwt (Okta) tokens pass through unchanged: their ``client_id``
     is a registered app ID, not user input.
     """
-    if token.claims.get("iss") == RH_AUTH_ISSUER:
+    if token.claims.get("iss") == AGENT_JWT_ISSUER:
         if not token.claims.get("sub"):
-            log_auth_rejected(reason="sub_missing", issuer=RH_AUTH_ISSUER)
+            log_auth_rejected(reason="sub_missing", issuer=AGENT_JWT_ISSUER)
             return _REDACTED_CLIENT_ID
         try:
             validate_sub_shape(token.claims)
         except ToolError:
-            log_auth_rejected(reason="sub_shape", issuer=RH_AUTH_ISSUER)
+            log_auth_rejected(reason="sub_shape", issuer=AGENT_JWT_ISSUER)
             return _REDACTED_CLIENT_ID
     return token.client_id or "unknown"
 
 
 def scopes_for_token(token: AccessToken) -> list[str]:
-    """Return the rh-auth scope list from a verified token's ``claims``.
+    """Return the agent-jwt scope list from a verified token's ``claims``.
 
-    rh-auth tokens carry their capability set in a ``scopes`` LIST claim
-    (rh-auth-py's format), NOT the OAuth-standard ``scope`` string. FastMCP's
+    agent-jwt tokens carry their capability set in a ``scopes`` LIST claim
+    (agent-jwt's format), NOT the OAuth-standard ``scope`` string. FastMCP's
     ``JWTVerifier`` only maps ``scope``/``scp`` onto ``AccessToken.scopes``,
-    so ``.scopes`` is empty for rh-auth tokens — the raw ``scopes`` claim
+    so ``.scopes`` is empty for agent-jwt tokens — the raw ``scopes`` claim
     must be read instead. (Reading ``token.scopes`` here would deny every
-    rh-auth call as ``missing_scope``.)
+    agent-jwt call as ``missing_scope``.)
 
     Guards (fail closed with an empty list):
-    - non-rh-auth issuer → no rh-auth scopes, even with a ``scopes`` claim
+    - non-agent-jwt issuer → no agent-jwt scopes, even with a ``scopes`` claim
     - missing/empty ``sub`` → malformed mint or tampered payload
     - shape-invalid ``sub`` (email-shaped / whitespace) → impersonation
     - non-list ``scopes`` claim → never iterate a string into bogus scopes
     """
-    if token.claims.get("iss") != RH_AUTH_ISSUER:
+    if token.claims.get("iss") != AGENT_JWT_ISSUER:
         return []
     if not token.claims.get("sub"):
         return []

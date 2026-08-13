@@ -4,7 +4,7 @@ Every tool below follows the same shape:
 
 1. Resolve the caller's identity via ``get_access_token()`` — never from
    tool arguments. ``try_resolve_email`` is the single source of truth for
-   "who is calling" (rh-auth: raw ``sub`` claim; Okta: email/sub) and is
+   "who is calling" (agent-jwt: raw ``sub`` claim; Okta: email/sub) and is
    used here as the ``actor_sub``/``Agent.sub`` key uniformly, matching
    ``comms_whoami``'s existing identity resolution.
 2. Resolve that identity to a board ``Agent`` row via
@@ -26,7 +26,7 @@ Every tool below follows the same shape:
 
 Registration reminder (fail-closed ``TOOL_SCOPES``, see scopes.py): every
 tool added here MUST be enrolled in ``scopes.TOOL_SCOPES`` under its
-mounted name (``comms_<tool>``) in the same change, or rh-auth callers can
+mounted name (``comms_<tool>``) in the same change, or agent-jwt callers can
 never reach it.
 """
 
@@ -245,8 +245,8 @@ async def whoami(agent_key: str | None = None) -> dict[str, Any]:
     """Return the authenticated caller's identity, issuer, caller type, and scopes.
 
     Diagnostic tool: use it to verify that auth (Okta OIDC for humans,
-    rh-auth Bearer JWT for agents) and scope enforcement are wired
-    correctly. ``scopes`` is the rh-auth ``scopes`` claim for service
+    agent-jwt Bearer JWT for agents) and scope enforcement are wired
+    correctly. ``scopes`` is the agent-jwt ``scopes`` claim for service
     callers; empty for interactive Okta callers (who bypass scope checks).
 
     When ``agent_key`` is provided, returns the composed identity
@@ -287,7 +287,7 @@ async def register(
       ``needs_clarification``, ``note``, ``task_assign``, ``task_report``,
       ``task_complete``, ``task_decline``, ``task_cancel``.
       Each entry capped at 100 chars; list capped at 20 entries.
-    - ``agent_key``: stopgap (TECH-5113) for running multiple agents under
+    - ``agent_key``: stopgap for running multiple agents under
       one token. Appended to the token's verified sub
       (``"{base_sub}::{agent_key}"``) to produce a distinct board row.
       Omit if only one agent shares this token. A different ``agent_key``
@@ -296,19 +296,19 @@ async def register(
 
       The ``email`` claim fallback is gated on ``is_interactive_token``
       (``scopes.py``). For a token with no ``iss`` at all, that check and
-      ``identity``'s internal ``_is_rh_auth_token`` both land on "don't
+      ``identity``'s internal ``_is_agent_jwt_token`` both land on "don't
       trust the ``email`` claim" — but via different mechanisms, not a
       shared rule: ``is_interactive_token`` treats missing/``None`` ``iss``
       as simply "not confirmed interactive" (an unknown/deny outcome — it
       only decides whether to bypass scope checks, making no claim about
-      identity), whereas ``_is_rh_auth_token`` affirmatively treats
-      missing/``None`` ``iss`` as rh-auth-like (an assume-rh-auth outcome —
+      identity), whereas ``_is_agent_jwt_token`` affirmatively treats
+      missing/``None`` ``iss`` as agent-jwt-like (an assume-agent-jwt outcome —
       it feeds identity resolution, so it conservatively pins the caller's
       identity to ``sub`` and never trusts ``email``/``preferred_username``).
       Do not "harmonize" these two checks into one shared helper on the
-      assumption that they encode the same rule — an rh-auth (agent)
+      assumption that they encode the same rule — an agent-jwt (agent)
       token's extra claims are caller-supplied and unverified (the
-      ``rh-auth issue`` CLI accepts arbitrary ``--sub`` and extra claims),
+      JWT issuer CLI accepts arbitrary ``--sub`` and extra claims),
       so ``email`` must never be trusted as an ``owner_email`` fallback for
       those tokens, regardless of which check is used to detect them.
 

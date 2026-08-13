@@ -1,9 +1,9 @@
 """Pytest configuration — flat-layout imports + auth env defaults.
 
-Mirrors rh-mcp's conftest: the service is a flat-layout app (main.py,
-providers/, etc.), so the service root goes on sys.path, and the env vars
-required by ``auth.build_auth_provider()`` get dummy values so module-level
-FastMCP construction doesn't raise when tests import ``main``.
+The service is a flat-layout app (main.py, providers/, etc.), so the service
+root goes on sys.path, and the env vars required by
+``auth.build_auth_provider()`` get dummy values so module-level FastMCP
+construction doesn't raise when tests import ``main``.
 """
 
 import os
@@ -37,7 +37,7 @@ def _auth_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _setdefault(monkeypatch, "OKTA_CLIENT_SECRET", "test-client-secret")
     _setdefault(monkeypatch, "BASE_URL", "http://localhost:8080")
     _setdefault(monkeypatch, "MCP_JWT_SECRET", "test-jwt-secret-for-unit-tests-only")
-    _setdefault(monkeypatch, "RH_AUTH_SECRET", "test-rh-auth-secret-long-enough-for-hs256")
+    _setdefault(monkeypatch, "AGENT_JWT_SECRET", "test-agent-jwt-secret-long-enough-for-hs256")
 
 
 def _setdefault(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:

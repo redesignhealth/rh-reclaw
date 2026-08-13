@@ -13,7 +13,7 @@ from fastmcp.exceptions import ResourceError, ToolError
 _MOCK_OIDC_CONFIG = MagicMock()
 
 # Building the OIDCProxy normally fetches the Okta discovery document —
-# patch it out so tests never touch the network (rh-mcp test idiom).
+# patch it out so tests never touch the network.
 _OIDC_PATCH = patch(
     "fastmcp.server.auth.oidc_proxy.OIDCProxy.get_oidc_configuration",
     return_value=_MOCK_OIDC_CONFIG,
@@ -26,7 +26,7 @@ _ENV_PATCH = patch.dict(
         "OKTA_CLIENT_SECRET": "test-secret",
         "BASE_URL": "http://localhost:8080",
         "MCP_JWT_SECRET": "test-jwt-secret",
-        "RH_AUTH_SECRET": "test-rh-auth-secret-long-enough-for-hs256",
+        "AGENT_JWT_SECRET": "test-agent-jwt-secret-long-enough-for-hs256",
     },
 )
 
@@ -43,7 +43,7 @@ def _import_main() -> object:
 class TestServerComposition:
     def test_server_name(self) -> None:
         main = _import_main()
-        assert main.mcp.name == "reclaw-comms-mcp"
+        assert main.mcp.name == "agent-comms-mcp"
 
     def test_has_auth(self) -> None:
         main = _import_main()
@@ -70,7 +70,7 @@ class TestScopeRegistryParity:
     """The actual mounted tool names must resolve against the scope registry.
 
     If a tool's mounted name (``<namespace>_<tool>``) drifts from its
-    TOOL_SCOPES key, every rh-auth call to it is rejected fail-closed — a
+    TOOL_SCOPES key, every agent-jwt call to it is rejected fail-closed — a
     silent 403 no string-literal assertion in test_scopes.py can catch.
     """
 
@@ -88,7 +88,7 @@ class TestScopeRegistryParity:
         )
         unenrolled = mounted - set(TOOL_SCOPES)
         assert not unenrolled, (
-            f"Mounted tools missing from TOOL_SCOPES (rh-auth callers would "
+            f"Mounted tools missing from TOOL_SCOPES (agent-jwt callers would "
             f"be denied fail-closed): {sorted(unenrolled)}"
         )
 
@@ -113,9 +113,9 @@ class TestScopeEnforcementMiddleware:
         claims: dict[str, object] = {}
         if iss is not None:
             claims["iss"] = iss
-        if iss == "rh-auth":
+        if iss == "agent-jwt":
             claims["sub"] = sub
-        # rh-auth tokens carry scopes in the ``scopes`` LIST claim;
+        # agent-jwt tokens carry scopes in the ``scopes`` LIST claim;
         # ``token.scopes`` stays EMPTY to mirror production (JWTVerifier
         # maps only OAuth ``scope``/``scp`` claims).
         claims["scopes"] = scopes or []
@@ -139,22 +139,22 @@ class TestScopeEnforcementMiddleware:
 
         call_next.assert_awaited_once()
 
-    def test_rh_auth_token_with_matching_scope_passes(self) -> None:
+    def test_agent_jwt_token_with_matching_scope_passes(self) -> None:
         middleware = self._middleware()
         context = self._make_context("comms_whoami")
         call_next = AsyncMock(return_value=MagicMock())
-        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["comms:read"])
 
         with patch("main.get_access_token", return_value=bot_token):
             asyncio.run(middleware.on_call_tool(context, call_next))
 
         call_next.assert_awaited_once()
 
-    def test_rh_auth_token_missing_required_scope_is_rejected(self) -> None:
+    def test_agent_jwt_token_missing_required_scope_is_rejected(self) -> None:
         middleware = self._middleware()
         context = self._make_context("comms_whoami")  # requires comms:read
         call_next = AsyncMock()
-        bot_token = self._make_token(iss="rh-auth", scopes=["zoom:read"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["zoom:read"])
 
         with patch("main.get_access_token", return_value=bot_token):
             with pytest.raises(ToolError, match="requires elevated permissions"):
@@ -162,13 +162,13 @@ class TestScopeEnforcementMiddleware:
 
         call_next.assert_not_called()
 
-    def test_rh_auth_token_for_unenrolled_tool_is_rejected(self) -> None:
-        """Tools without a registry entry must fail closed for rh-auth callers."""
+    def test_agent_jwt_token_for_unenrolled_tool_is_rejected(self) -> None:
+        """Tools without a registry entry must fail closed for agent-jwt callers."""
         middleware = self._middleware()
         context = self._make_context("comms_send_message_not_yet_a_tool")
         call_next = AsyncMock()
         # Even a broadly-scoped token can't reach an unenrolled tool.
-        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read", "comms:write"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["comms:read", "comms:write"])
 
         with patch("main.get_access_token", return_value=bot_token):
             with pytest.raises(ToolError, match="requires elevated permissions"):
@@ -196,7 +196,7 @@ class TestScopeEnforcementMiddleware:
 
         cases = [
             # (tool_name, token) → missing_scope, tool_not_enrolled, missing_token
-            ("comms_whoami", self._make_token(iss="rh-auth", scopes=[])),
+            ("comms_whoami", self._make_token(iss="agent-jwt", scopes=[])),
             ("comms_whoami", None),
         ]
         for tool_name, token in cases:
@@ -217,7 +217,7 @@ class TestScopeEnforcementMiddleware:
     def test_denial_emits_structured_scope_denial_event(self) -> None:
         middleware = self._middleware()
         context = self._make_context("comms_whoami")
-        bot_token = self._make_token(iss="rh-auth", scopes=[], client_id="ea-agent-svc")
+        bot_token = self._make_token(iss="agent-jwt", scopes=[], client_id="ea-agent-svc")
 
         with patch("main.get_access_token", return_value=bot_token):
             with patch("main.log_scope_denial") as mock_denial:
@@ -234,7 +234,7 @@ class TestScopeEnforcementMiddleware:
     def test_unenrolled_denial_event_has_no_required_scope(self) -> None:
         middleware = self._middleware()
         context = self._make_context("not_a_real_tool")
-        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["comms:read"])
 
         with patch("main.get_access_token", return_value=bot_token):
             with patch("main.log_scope_denial") as mock_denial:
@@ -275,7 +275,7 @@ class TestReadResourceMiddleware:
         claims: dict[str, object] = {}
         if iss is not None:
             claims["iss"] = iss
-        if iss == "rh-auth":
+        if iss == "agent-jwt":
             claims["sub"] = sub
         claims["scopes"] = scopes or []
         token.claims = claims
@@ -310,12 +310,12 @@ class TestReadResourceMiddleware:
         call_next.assert_not_called()
 
     def test_unenrolled_resource_is_rejected_fail_closed(self) -> None:
-        """No resource is in ``RESOURCE_SCOPES`` today — every rh-auth read
+        """No resource is in ``RESOURCE_SCOPES`` today — every agent-jwt read
         must be denied by default, even with a broadly-scoped token."""
         middleware = self._middleware()
         context = self._make_context("resource://not-enrolled-anywhere")
         call_next = AsyncMock()
-        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read", "comms:write"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["comms:read", "comms:write"])
 
         with patch("main.get_access_token", return_value=bot_token):
             with pytest.raises(ResourceError, match="requires elevated permissions"):
@@ -329,7 +329,7 @@ class TestReadResourceMiddleware:
         middleware = self._middleware()
         context = self._make_context("resource://enrolled-resource")
         call_next = AsyncMock()
-        bot_token = self._make_token(iss="rh-auth", scopes=["comms:write"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["comms:write"])
 
         with patch("main.required_scope_for_resource", return_value="comms:read"):
             with patch("main.get_access_token", return_value=bot_token):
@@ -342,7 +342,7 @@ class TestReadResourceMiddleware:
         middleware = self._middleware()
         context = self._make_context("resource://enrolled-resource")
         call_next = AsyncMock(return_value=MagicMock())
-        bot_token = self._make_token(iss="rh-auth", scopes=["comms:read"])
+        bot_token = self._make_token(iss="agent-jwt", scopes=["comms:read"])
 
         with patch("main.required_scope_for_resource", return_value="comms:read"):
             with patch("main.get_access_token", return_value=bot_token):
@@ -353,7 +353,7 @@ class TestReadResourceMiddleware:
     def test_denial_emits_structured_scope_denial_event_with_uri_as_tool(self) -> None:
         middleware = self._middleware()
         context = self._make_context("resource://some-resource")
-        bot_token = self._make_token(iss="rh-auth", scopes=[], client_id="ea-agent-svc")
+        bot_token = self._make_token(iss="agent-jwt", scopes=[], client_id="ea-agent-svc")
 
         with patch("main.get_access_token", return_value=bot_token):
             with patch("main.log_scope_denial") as mock_denial:
@@ -407,18 +407,18 @@ class TestObservabilityMiddleware:
         assert kwargs["success"] is False
         assert kwargs["error_type"] == "ValueError"
 
-    def test_rh_auth_token_with_forged_email_does_not_poison_user_active(self) -> None:
-        """rh-auth tokens resolve via ``sub`` only — a forged ``email``
-        claim must never reach ``log_user_active`` (TECH-3927 pattern)."""
+    def test_agent_jwt_token_with_forged_email_does_not_poison_user_active(self) -> None:
+        """agent-jwt tokens resolve via ``sub`` only — a forged ``email``
+        claim must never reach ``log_user_active``."""
         middleware = self._middleware()
         context = self._make_context()
         call_next = AsyncMock(return_value=MagicMock())
 
         token = MagicMock()
         token.claims = {
-            "iss": "rh-auth",
+            "iss": "agent-jwt",
             "sub": "ea-agent-svc",
-            "email": "victim@redesignhealth.com",
+            "email": "victim@example.com",
         }
 
         with patch("main.log_tool_call"), patch("main.log_user_active") as mock_active:
@@ -439,7 +439,7 @@ class TestEndToEnd:
         okta_token = MagicMock()
         okta_token.claims = {
             "iss": "https://example.okta.com/oauth2/default",
-            "email": "dan.costanza@redesignhealth.com",
+            "email": "user@example.com",
         }
         okta_token.scopes = []
         okta_token.client_id = "0oa1234abc"
@@ -458,20 +458,20 @@ class TestEndToEnd:
             data = asyncio.run(_call())
 
         assert data == {
-            "identity": "dan.costanza@redesignhealth.com",
+            "identity": "user@example.com",
             "issuer": "https://example.okta.com/oauth2/default",
             "caller_type": "interactive",
             "scopes": [],
         }
 
-    def test_whoami_end_to_end_for_rh_auth_caller(self) -> None:
+    def test_whoami_end_to_end_for_agent_jwt_caller(self) -> None:
         from fastmcp import Client
 
         main = _import_main()
 
         bot_token = MagicMock()
         bot_token.claims = {
-            "iss": "rh-auth",
+            "iss": "agent-jwt",
             "sub": "ea-agent-svc",
             "scopes": ["comms:read"],
         }
@@ -493,7 +493,7 @@ class TestEndToEnd:
 
         assert data == {
             "identity": "ea-agent-svc",
-            "issuer": "rh-auth",
+            "issuer": "agent-jwt",
             "caller_type": "service",
             "scopes": ["comms:read"],
         }
@@ -504,7 +504,7 @@ class TestEndToEnd:
         main = _import_main()
 
         bot_token = MagicMock()
-        bot_token.claims = {"iss": "rh-auth", "sub": "ea-agent-svc", "scopes": []}
+        bot_token.claims = {"iss": "agent-jwt", "sub": "ea-agent-svc", "scopes": []}
         bot_token.scopes = []
         bot_token.client_id = "ea-agent-svc"
 

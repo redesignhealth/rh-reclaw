@@ -5,7 +5,7 @@ Revises: ef8394b37c8d
 Create Date: 2026-08-11 13:52:11.362735
 
 NOTE on in-place amendment: this revision was authored and iterated on
-entirely within this single unmerged PR (reclaw-comms-mcp PR #1) -- it does
+entirely within this single unmerged PR (agent-comms-mcp PR #1) -- it does
 not exist on `main`, and it has never been applied to any persistent or
 shared database (no deployed environment for this service exists yet; CI
 runs `alembic upgrade head` against a fresh, ephemeral Postgres service

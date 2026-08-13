@@ -1,25 +1,18 @@
-"""JWT identity resolution for reclaw-comms-mcp.
+"""JWT identity resolution for agent-comms-mcp.
 
-Self-contained copy of the fleet-shared ``mcp_identity`` module
-(rh-data-platform ``services/shared/mcp_identity.py``, TECH-3927/TECH-3928),
-trimmed to what this service uses. This repo lives outside the
-rh-data-platform monorepo, so it cannot take ``shared`` as a path
-dependency; if the shared module is ever published to the internal Gitea
-registry, replace this file with that dependency.
-
-Threat model (unchanged from the shared module):
+Threat model:
 
 - Okta OIDC tokens carry identity in ``email`` / ``preferred_username``;
   their ``sub`` is an opaque Okta id.
-- rh-auth Bearer JWTs carry identity in ``sub`` ONLY. The ``rh-auth issue``
+- agent-jwt Bearer JWTs carry identity in ``sub`` ONLY. The JWT issuer
   CLI accepts arbitrary ``--sub`` strings and arbitrary extra claims, so an
-  rh-auth token's ``email`` claim is untrusted by design. Three
+  agent-jwt token's ``email`` claim is untrusted by design. Three
   impersonation variants are closed here:
 
-  1. ``sub`` IS a victim's email (``--sub alice@redesignhealth.com``) —
+  1. ``sub`` IS a victim's email (``--sub alice@example.com``) —
      rejected by ``validate_sub_shape`` (no ``@`` allowed).
   2. Non-email ``sub`` + forged ``email`` claim — closed by gating the
-     email-claim path on ``iss != "rh-auth"``.
+     email-claim path on ``iss != "agent-jwt"``.
   3. Whitespace/empty ``sub`` + forged ``email`` claim — rejected by
      ``validate_sub_shape``.
 """
@@ -31,15 +24,15 @@ from typing import Any
 from fastmcp.exceptions import ToolError
 
 __all__ = [
-    "RH_AUTH_ISSUER",
+    "AGENT_JWT_ISSUER",
     "try_resolve_email",
     "validate_sub_shape",
 ]
 
-# Single source of truth for the rh-auth issuer string: used for
-# cryptographic verification (``JWTVerifier(issuer=RH_AUTH_ISSUER)`` in
+# Single source of truth for the agent-jwt issuer string: used for
+# cryptographic verification (``JWTVerifier(issuer=AGENT_JWT_ISSUER)`` in
 # auth.py) and for post-verification routing (scopes.py, this module).
-RH_AUTH_ISSUER = "rh-auth"
+AGENT_JWT_ISSUER = "agent-jwt"
 
 
 def validate_sub_shape(claims: dict[str, Any]) -> None:
@@ -60,12 +53,12 @@ def validate_sub_shape(claims: dict[str, Any]) -> None:
         raise ToolError("invalid token sub claim")
 
 
-def _is_rh_auth_token(claims: dict[str, Any]) -> bool:
-    """rh-auth tokens are identified by ``iss``, cryptographically verified
+def _is_agent_jwt_token(claims: dict[str, Any]) -> bool:
+    """agent-jwt tokens are identified by ``iss``, cryptographically verified
     upstream by the JWTVerifier before the token reaches this module.
 
     A missing/``None`` ``iss`` claim must NOT fall through to the "not
-    rh-auth" branch — that branch trusts the token's ``email`` /
+    agent-jwt" branch — that branch trusts the token's ``email`` /
     ``preferred_username`` claims (the Okta/interactive path), and an absent
     issuer must not be treated as safely-interactive by default. This
     mirrors the fail-closed ``iss is None`` guard in
@@ -76,13 +69,13 @@ def _is_rh_auth_token(claims: dict[str, Any]) -> bool:
     issuer = claims.get("iss")
     if issuer is None:
         return True
-    return bool(issuer == RH_AUTH_ISSUER)
+    return bool(issuer == AGENT_JWT_ISSUER)
 
 
 def try_resolve_email(token: Any) -> str | None:
     """Best-effort identity extraction for observability and whoami.
 
-    - rh-auth tokens (``iss == "rh-auth"``) resolve via ``sub`` only —
+    - agent-jwt tokens (``iss == "agent-jwt"``) resolve via ``sub`` only —
       their ``email``/``preferred_username`` claims are untrusted.
     - Other issuers resolve via ``email`` → ``preferred_username`` → ``sub``.
 
@@ -95,7 +88,7 @@ def try_resolve_email(token: Any) -> str | None:
         validate_sub_shape(claims)
     except ToolError:
         return None
-    if _is_rh_auth_token(claims):
+    if _is_agent_jwt_token(claims):
         sub = claims.get("sub")
         if sub is None:
             return None

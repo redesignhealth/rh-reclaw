@@ -1,8 +1,4 @@
-"""Okta OIDC + rh-auth JWT authentication for reclaw-comms-mcp.
-
-Adapted from rh-data-platform ``services/rh-mcp/auth.py`` (the reference
-implementation named in the RH tech guide, topics/04-auth-and-identity.md
-§MCP Server Auth).
+"""Okta OIDC + agent-jwt JWT authentication for agent-comms-mcp.
 
 Auth paths
 ----------
@@ -13,42 +9,29 @@ Interactive users (Claude Code, Claude Desktop, browser):
     to tools via ``get_access_token().claims``.
 
 Programmatic callers (agents, services, CI jobs):
-    rh-auth HS256 Bearer token issued by the Tech Team via ``rh-auth issue``.
-    FastMCP ``MultiAuth`` composes the Okta OIDC provider with a
-    ``JWTVerifier`` keyed to ``RH_AUTH_SECRET`` (injected from SSM
-    ``/general/{env}/rh-auth-secret`` at ECS task start). Both humans and
-    machines POST to the same ``/mcp`` endpoint.
+    agent-jwt HS256 Bearer token. FastMCP ``MultiAuth`` composes the Okta
+    OIDC provider with a ``JWTVerifier`` keyed to ``AGENT_JWT_SECRET``.
+    Both humans and machines POST to the same ``/mcp`` endpoint.
 
 Health check (``/health``):
     Unauthenticated — handled by FastMCP before auth middleware runs.
 
-Refresh-token rotation grace (``_ROTATION_*``, ported from rh-mcp): FastMCP
-rotates refresh tokens on every use (one-time use). A second concurrent
-connection presenting the just-consumed old token would otherwise fail hard
-and force a full Okta re-auth. We record a short-lived
-old-token-hash -> new-token mapping in the same EFS-backed store on every
-rotation; a subsequent "miss" checks this mapping first and transparently
-follows it before declaring a real miss.
+Refresh-token rotation grace (``_ROTATION_*``): FastMCP rotates refresh
+tokens on every use (one-time use). A second concurrent connection
+presenting the just-consumed old token would otherwise fail hard and force
+a full Okta re-auth. We record a short-lived old-token-hash -> new-token
+mapping in the same persistent store on every rotation; a subsequent "miss"
+checks this mapping first and transparently follows it before declaring a
+real miss.
 
-This shares its grace-window semantics, ``_ROTATION_*`` constants, and
-store layout with rh-mcp's version, but is NOT a verbatim copy: the hop
-counter here is deliberately NOT a parameter of the public
+The hop counter is deliberately NOT a parameter of the public
 ``load_refresh_token`` override (see that method's own docstring) to close
-a cap-reset weakness rh-mcp's public-``_hops`` design has. Consider
-porting this hardening back to rh-mcp.
-
-This machinery is now duplicated across at least this service and rh-mcp.
-Extraction into a shared ``rh_lib``-style base class is a reasonable idea
-once a third copy exists, but is not itself tracked by any ticket --
-revisit it as a follow-up if a third service needs it, don't assume it
-happens automatically. Not done here to avoid a cross-repo refactor as a
-side effect of a one-service bug fix.
+a cap-reset weakness in a more permissive design.
 
 Emitting ``refresh_token_miss`` / ``refresh_token_hop_cap_exceeded`` on
-paths that previously logged nothing means an undiscriminating
-``$.event = "auth_flow"`` CloudWatch filter now also counts failed refresh
-lookups as auth activity -- TECH-5155 tracks adding the dedicated metric
-filters this needs (see observability.py's own docstring for detail).
+paths that previously logged nothing means a broad ``$.event = "auth_flow"``
+log filter now also counts failed refresh lookups as auth activity — add
+dedicated metric filters as needed (see observability.py's docstring).
 """
 
 from __future__ import annotations
@@ -73,7 +56,7 @@ from key_value.aio.stores.filetree import (
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
-from identity import RH_AUTH_ISSUER
+from identity import AGENT_JWT_ISSUER
 from observability import log_auth_flow
 
 logger = logging.getLogger(__name__)
@@ -81,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Claims to extract from the Okta ID token into the FastMCP JWT.
 _UPSTREAM_CLAIM_KEYS = ["sub", "email", "preferred_username", "name"]
 
-_DEFAULT_TOKEN_STORAGE_PATH = "/data/fastmcp-tokens"  # EFS-backed on ECS
+_DEFAULT_TOKEN_STORAGE_PATH = "/data/fastmcp-tokens"
 
 _ROTATION_GRACE_SECONDS = 5 * 60
 _ROTATION_MAX_HOPS = 3
@@ -109,12 +92,12 @@ def require_env(name: str) -> str:
 
 
 class OktaOIDCProxy(OIDCProxy):
-    """OIDC proxy configured for Okta SSO (copied idiom from rh-mcp).
+    """OIDC proxy configured for Okta SSO.
 
     ``_extract_upstream_claims`` embeds the Okta id_token identity claims in
     the FastMCP JWT as a fallback for code paths that read from there; with
     ``verify_id_token=True`` the claims are also available directly. Emits
-    structured ``auth_flow`` events for CloudWatch Metric Filters.
+    structured ``auth_flow`` observability events.
     """
 
     def __init__(self, *, client_storage: AsyncKeyValue, **kwargs: Any) -> None:
@@ -259,9 +242,8 @@ class OktaOIDCProxy(OIDCProxy):
             # SECURITY: the stored value is the live successor refresh
             # token in plaintext, not a hash -- the hashed KEY only
             # prevents reverse-lookup of the just-consumed OLD token, it
-            # does not protect the new one. Accepted posture, at parity
-            # with rh-mcp (the source of this port): this collection lives
-            # in the same EFS-backed, task-role-scoped store as the primary
+            # does not protect the new one. Accepted posture: this collection
+            # lives in the same EFS-backed, task-role-scoped store as the primary
             # token store, which already holds live refresh tokens
             # unencrypted (see build_okta_provider's client_storage). Anyone
             # who can read one collection can read the other.
@@ -279,7 +261,7 @@ def _build_client_storage(storage_path: str) -> FileTreeStore:
 
     The stock ``FileTreeV1`` strategies hash any key or collection name
     containing filesystem-unsafe characters, so URL-style client IDs are
-    stored safely on the EFS-backed volume. The directory is created if
+    stored safely on the persistent volume. The directory is created if
     missing (the sanitization strategies require an existing path).
     """
     storage_root = Path(storage_path)
@@ -322,40 +304,39 @@ def build_okta_provider() -> OktaOIDCProxy:
         jwt_signing_key=require_env("MCP_JWT_SECRET"),
         client_storage=_build_client_storage(storage_path),
         verify_id_token=True,
-        # Matches rh-mcp (TECH-1943): FastMCP's CIMD redirect_uri validation
-        # rejects Claude Code's dynamic-port loopback callbacks.
+        # FastMCP's CIMD redirect_uri validation rejects Claude Code's
+        # dynamic-port loopback callbacks.
         enable_cimd=False,
     )
 
 
 def build_auth_provider() -> MultiAuth:
-    """Compose Okta OIDC + rh-auth JWT verification via FastMCP MultiAuth.
+    """Compose Okta OIDC + agent-jwt JWT verification via FastMCP MultiAuth.
 
     MultiAuth tries the Okta OIDCProxy first (interactive users), then the
-    JWTVerifier (programmatic rh-auth tokens). The two paths are fully
+    JWTVerifier (programmatic agent-jwt tokens). The two paths are fully
     independent.
 
     Required environment variables:
-        RH_AUTH_SECRET: Shared HS256 secret for rh-auth tokens, injected
-            from SSM ``/general/{env}/rh-auth-secret`` at ECS task start.
+        AGENT_JWT_SECRET: Shared HS256 secret for verifying agent-jwt tokens.
         (Plus everything required by ``build_okta_provider``.)
     """
     return MultiAuth(
         server=build_okta_provider(),
         verifiers=[
             JWTVerifier(
-                public_key=require_env("RH_AUTH_SECRET"),
+                public_key=require_env("AGENT_JWT_SECRET"),
                 algorithm="HS256",
-                issuer=RH_AUTH_ISSUER,
+                issuer=AGENT_JWT_ISSUER,
             ),
         ],
-        # CRITICAL (copied from rh-mcp): do NOT inherit the Okta provider's
+        # CRITICAL: do NOT inherit the Okta provider's
         # required_scopes (["openid", "email", "profile", "offline_access"]).
         # MultiAuth's bearer middleware enforces required_scopes against
-        # EVERY verified token — including rh-auth M2M JWTs, which never
-        # carry `openid`. Inheriting them silently rejects all rh-auth
+        # EVERY verified token — including agent-jwt M2M JWTs, which never
+        # carry `openid`. Inheriting them silently rejects all agent-jwt
         # tokens with `insufficient_scope` even after a valid signature.
-        # Authorization for rh-auth callers is handled per-tool by
+        # Authorization for agent-jwt callers is handled per-tool by
         # ScopeEnforcementMiddleware, so the provider-level gate must be
         # empty.
         required_scopes=[],

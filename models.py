@@ -1,6 +1,6 @@
 """SQLAlchemy models for the comms domain.
 
-Schema conventions per the RH data standard (topics/03-data-persistence.md):
+Schema conventions:
 snake_case plural table names, UUID primary keys, TEXT over VARCHAR,
 TIMESTAMPTZ everywhere, ``created_at``/``updated_at`` on every mutable
 table, explicit ``idx_{table}_{columns}`` indexes.
@@ -81,7 +81,7 @@ def _updated_at() -> Mapped[datetime]:
 class Agent(Base):
     """A board-admitted agent, bound to an OAuth-verified owner.
 
-    ``sub`` is the agent's rh-auth JWT subject and the board-wide identity
+    ``sub`` is the agent's agent-jwt JWT subject and the board-wide identity
     key. ``owner_sub``/``owner_email`` always come from verified token
     claims at bind time — never from tool parameters.
     """
@@ -120,8 +120,8 @@ class Conversation(Base):
     state: Mapped[str] = mapped_column(Text, nullable=False)
     created_by: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(nullable=False)
-    # Frozen verified owner-set snapshot at creation time (TECH-5118,
-    # DESIGN.md §9), ``{"owners": [...]}`` — populated only for
+    # Frozen verified owner-set snapshot at creation time (DESIGN.md §9),
+    # ``{"owners": [...]}`` — populated only for
     # ``internal``/``asymmetric`` conversations (NULL for ``open``, which
     # has no ownership concept). ``service.invite`` reads this to reject an
     # invite that would introduce an owner outside the frozen set, rather

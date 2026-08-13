@@ -64,30 +64,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
 
-## Project: reclaw-comms-mcp
+## Project: agent-comms-mcp
 
 MCP service for permissioned agent-to-agent communications: a structured message board. First use case: a user's main agent delegates to a dedicated EA agent, which negotiates availability with other people's EA agents (including judgment, not just calendar overlap).
 
-**The agreed v1 design is documented in [docs/DESIGN.md](docs/DESIGN.md) — that file is the spec of record.** Summary: no board-level permission layer (valid scoped token = admission; token issuance is the upstream ceremony); permissions live only in token scopes (fail-closed TOOL_SCOPES) and conversation membership. Agents self-register idempotently; any agent starts a conversation with N others (targets must accept the type); membership = visibility (full history on join, uniform denials for non-members); any member may invite (creator recorded role=owner for later tightening); decline/leave is the consent mechanism. Tables: agents, conversations, participants, messages (append-only, schema-validated typed payloads, no free text in v1), audit_log (mutations and denials). Identity always derives from verified OAuth token claims (rh-mcp MultiAuth pattern), never parameters. Deferred: grants layer for external counterparties (lands in the `_authorize_conversation_open` policy function), free text behind a quarantine pipeline, email/Slack transports (handled by users' main agents, out of scope here). EA agent logic lives in reclaw-ea-implementation.
-
-## RH Tech Guide
-
-This project follows the [Redesign Health Technology Guide](https://github.com/redesignhealth/rh-tech-guide)
-for all technical decisions. Run `/rh-tech-guide` to load relevant guidance for any topic.
-
-**Always consult `/rh-tech-guide` before deciding on:**
-- Stack choices (frontend framework, backend language, database)
-- Authentication and authorization patterns
-- Deployment approach (Dokploy vs Terraform+AWS)
-- CI/CD setup
-- Observability and logging
-- Security and secrets management
-- Agent-first CLI/MCP design
-
-**Common failure patterns**: `~/.claude/rh-tech-guide/common-failure-modes/README.md`
-indexes recurring code-review failure patterns, auto-updated weekly — check it before
-writing or reviewing code if your task might overlap with something already
-documented there. Run `/rh-tech-guide` first if that path doesn't exist yet, to sync
-the tech guide.
-
-<!-- rh-tech-guide-initialized -->
+**The agreed v1 design is documented in [docs/DESIGN.md](docs/DESIGN.md) — that file is the spec of record.** Summary: no board-level permission layer (valid scoped token = admission; token issuance is the upstream ceremony); permissions live only in token scopes (fail-closed TOOL_SCOPES) and conversation membership. Agents self-register idempotently; any agent starts a conversation with N others (targets must accept the type); membership = visibility (full history on join, uniform denials for non-members); any member may invite (creator recorded role=owner for later tightening); decline/leave is the consent mechanism. Tables: agents, conversations, participants, messages (append-only, schema-validated typed payloads, no free text in v1), audit_log (mutations and denials). Identity always derives from verified OAuth token claims (FastMCP MultiAuth pattern), never parameters. Deferred: grants layer for external counterparties (lands in the `_authorize_conversation_open` policy function), free text behind a quarantine pipeline, email/Slack transports (handled by users' main agents, out of scope here).

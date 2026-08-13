@@ -74,8 +74,8 @@ class TestExtractUpstreamClaims:
         id_token = _fake_id_token(
             {
                 "sub": "okta-sub-123",
-                "email": "person@redesignhealth.com",
-                "preferred_username": "person@redesignhealth.com",
+                "email": "person@example.com",
+                "preferred_username": "person@example.com",
                 "name": "Person Name",
                 "iat": 1700000000,
                 "exp": 1700003600,
@@ -86,8 +86,8 @@ class TestExtractUpstreamClaims:
 
         assert claims == {
             "sub": "okta-sub-123",
-            "email": "person@redesignhealth.com",
-            "preferred_username": "person@redesignhealth.com",
+            "email": "person@example.com",
+            "preferred_username": "person@example.com",
             "name": "Person Name",
         }
 
@@ -246,9 +246,9 @@ class TestAuthFlowEventEmission:
 
 
 class TestRefreshTokenRotationGrace:
-    """Ported from rh-mcp: a concurrent connection presenting a just-rotated
-    (one-time-use) refresh token must transparently follow it to its
-    successor within the grace window, rather than forcing a full re-auth.
+    """A concurrent connection presenting a just-rotated (one-time-use)
+    refresh token must transparently follow it to its successor within the
+    grace window, rather than forcing a full re-auth.
 
     TTL expiry itself (a rotation entry becoming unreadable after
     ``_ROTATION_GRACE_SECONDS``) is NOT covered here -- that guarantee is

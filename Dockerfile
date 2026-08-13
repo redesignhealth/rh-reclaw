@@ -26,11 +26,9 @@ FROM python:3.12-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142
 
 WORKDIR /app
 
-# UID/GID pinned (not left to adduser's next-free-system-id allocation) so
-# they're a stable target for the EFS access point's POSIX ownership
-# (infrastructure/environments/{dev,prod}/reclaw_comms.tf's
-# aws_efs_access_point.reclaw_comms) -- an unpinned uid could drift on a
-# future base-image change and silently break EFS write access again.
+# UID/GID pinned so they're stable across base-image rebuilds — an unpinned
+# uid can drift on a future base-image change and silently break volume
+# ownership (e.g. EFS access points with fixed POSIX ownership).
 RUN addgroup --system --gid 10001 app && adduser --system --uid 10001 --gid 10001 app
 
 COPY --from=builder --chown=app:app /app /app
@@ -38,8 +36,7 @@ COPY --chown=app:app entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # The venv is fully baked at build time; run its interpreter directly so
-# the container never re-contacts a package index at startup (the Tailscale
-# sidecar runs in userspace mode with no outbound DNS — rh-mcp TECH-3923).
+# the container never re-contacts a package index at startup.
 ENV PATH="/app/.venv/bin:$PATH"
 
 USER app

@@ -25,7 +25,7 @@ SERVICE_ROOT = Path(__file__).parent.parent
 # Same default as docker-compose.yml's `postgres` service — irrelevant to
 # this test's actual behavior (offline mode never connects), but Alembic's
 # config still expects DATABASE_URL to be set and well-formed at import time.
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/agent_comms"
 
 
 def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
@@ -39,19 +39,19 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     assert result.returncode == 0, result.stderr
     assert "ALTER TABLE agents ADD CONSTRAINT ck_agents_accepted_types_max" in result.stdout
     assert "CREATE INDEX IF NOT EXISTS idx_conversations_created_by_created_at" in result.stdout
-    # TECH-5118 phase 2: owner_snapshot column
+    # owner_snapshot column
     assert "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS owner_snapshot" in result.stdout
-    # TECH-5118 round 7 fix: backfill legacy scheduling.availability rows to open
+    # backfill legacy scheduling.availability rows to open
     assert (
         "UPDATE conversations SET type = 'open', updated_at = now() "
         "WHERE type = 'scheduling.availability'" in result.stdout
     )
-    # TECH-5118 phase 3: tasks table dropped via raw SQL (IF EXISTS guards)
+    # tasks table dropped via raw SQL (IF EXISTS guards)
     assert "DROP TABLE IF EXISTS public.tasks" in result.stdout
     assert "ALTER TABLE public.audit_log DROP COLUMN IF EXISTS task_id" in result.stdout
-    # TECH-5118 round 7 fix: pre-flight guard against dropping non-empty tasks rows
+    # pre-flight guard against dropping non-empty tasks rows
     assert "tasks table is not empty" in result.stdout
-    # TECH-5118 round 8 fix: upgrade()'s index drops are schema-qualified
+    # upgrade()'s index drops are schema-qualified
     # to match the guard. This is upgrade()-side coverage only -- alembic
     # --sql only emits forward DDL, so this offline test never runs
     # downgrade() at all. The live-DB _migrated_schema autouse fixture

@@ -46,7 +46,7 @@ from schemas import MESSAGE_TYPES
 # tests/test_schemas.py as a collected test, not a module-level assert here.
 
 SERVICE_ROOT = Path(__file__).parent.parent
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/agent_comms"
 
 _MOCK_OIDC_CONFIG = MagicMock()
 _OIDC_PATCH = patch(
@@ -61,7 +61,7 @@ _ENV_PATCH = patch.dict(
         "OKTA_CLIENT_SECRET": "test-secret",
         "BASE_URL": "http://localhost:8080",
         "MCP_JWT_SECRET": "test-jwt-secret",
-        "RH_AUTH_SECRET": "test-rh-auth-secret-long-enough-for-hs256",
+        "AGENT_JWT_SECRET": "test-agent-jwt-secret-long-enough-for-hs256",
     },
 )
 
@@ -164,9 +164,9 @@ def _token(
     owner_sub: str | None = None,
     owner_email: str | None = None,
 ) -> MagicMock:
-    """A minimal rh-auth-shaped ``AccessToken`` stand-in for ``sub``."""
+    """A minimal agent-jwt-shaped ``AccessToken`` stand-in for ``sub``."""
     claims: dict[str, Any] = {
-        "iss": "rh-auth",
+        "iss": "agent-jwt",
         "sub": sub,
         "scopes": scopes if scopes is not None else ["comms:read", "comms:write"],
     }
@@ -274,7 +274,7 @@ class TestRegister:
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         token = _token(
-            "agent-a", owner_sub="owner-a-human", owner_email="ownera@redesignhealth.com"
+            "agent-a", owner_sub="owner-a-human", owner_email="ownera@example.com"
         )
         result = await _call(
             main,
@@ -287,7 +287,7 @@ class TestRegister:
         assert result["display_name"] == "Agent A"
         assert result["accepted_types"] == ["availability_request"]
         assert result["status"] == "active"
-        assert result["owner_email"] == "ownera@redesignhealth.com"
+        assert result["owner_email"] == "ownera@example.com"
 
         whoami = await _call(main, test_session_factory, token, "comms_whoami")
         assert whoami["identity"] == "agent-a"
@@ -316,9 +316,9 @@ class TestRegister:
     async def test_register_with_agent_key_creates_distinct_row(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        """TECH-5113: two agents sharing one token's base identity (today's
-        reality for multiple EA-managed agents acting for the same human)
-        must not collapse into one board row — a distinct ``agent_key``
+        """Two agents sharing one token's base identity (today's reality for
+        multiple EA-managed agents acting for the same human) must not
+        collapse into one board row — a distinct ``agent_key``
         each is what keeps them apart."""
         token = _token("shared-human-sub", owner_sub="shared-human-sub")
         first = await _call(
@@ -413,11 +413,11 @@ class TestRegister:
         # No owner_sub/owner_email claims on the token — self-owned fallback.
         assert result["owner_email"] == "agent-self-owned"
 
-    async def test_register_rh_auth_forged_email_claim_not_trusted(
+    async def test_register_agent_jwt_forged_email_claim_not_trusted(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        """An rh-auth (agent) token's ``email`` claim is caller-supplied and
-        unverified (the ``rh-auth issue`` CLI accepts arbitrary extra
+        """An agent-jwt (agent) token's ``email`` claim is caller-supplied and
+        unverified (the JWT issuer CLI accepts arbitrary extra
         claims) — it must never be trusted as ``owner_email``, even when
         present. This is the negative case the existing "no email claim at
         all" tests don't cover: here the token DOES carry an ``email``
@@ -989,10 +989,9 @@ class TestMembershipTools:
 
 
 class TestTaskLifecycleToolLayer:
-    """End-to-end coverage for tasks-as-conversations (TECH-5118 phase 3,
-    supersedes TECH-5094's comms_add_task/comms_get_tasks/comms_update_task):
-    task_assign opens a conversation, task_report/task_complete/
-    task_decline/task_cancel drive it through comms_post_message."""
+    """End-to-end coverage for tasks-as-conversations: task_assign opens a
+    conversation, task_report/task_complete/task_decline/task_cancel drive
+    it through comms_post_message."""
 
     async def test_full_task_lifecycle(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]

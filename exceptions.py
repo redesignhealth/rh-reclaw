@@ -7,7 +7,7 @@ service/tools boundary:
 - ``AccessDeniedError``: the uniform "not authorized for this resource"
   denial (DESIGN.md §4/§8's anti-enumeration rule), covering both
   conversation-membership denials and task-admission denials
-  (``denied.not_same_owner``/``denied.ownership_unverified``, TECH-5094).
+  (``denied.not_same_owner``/``denied.ownership_unverified``).
   ``str()`` of every ``AccessDeniedError`` instance is the *same constant
   string*, regardless of cause — not a participant, invited-but-not-
   accepted, left/declined, an unknown/inactive target agent, a target
@@ -80,7 +80,7 @@ class AccessDeniedError(Exception):
 
 class InvalidConversationStateError(Exception):
     """A state-machine transition is not legal in the current state — either
-    a message type disallowed by the conversation's state, or (TECH-5099) a
+    a message type disallowed by the conversation's state, or a
     task-status transition attempted from a terminal status."""
 
 

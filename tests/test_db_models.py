@@ -33,7 +33,7 @@ from schemas import MAX_DISPLAY_NAME_LENGTH
 SERVICE_ROOT = Path(__file__).parent.parent
 
 # Same default as docker-compose.yml's `postgres` service.
-_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
+_DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/agent_comms"
 
 
 def _test_database_url() -> str:
@@ -263,11 +263,11 @@ class TestSchema:
         ):
             assert expected in cols, f"audit_log.{expected} missing"
         assert cols["detail"] == "jsonb"
-        assert "task_id" not in cols, "task_id should be dropped (TECH-5118 phase 3)"
+        assert "task_id" not in cols, "task_id should be dropped"
 
     async def test_tasks_table_dropped(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "tasks")
-        assert not cols, "tasks table should be dropped (TECH-5118 phase 3)"
+        assert not cols, "tasks table should be dropped"
 
     async def test_designed_indexes_exist(self, engine: AsyncEngine) -> None:
         participant_indexes = await _indexes(engine, "participants")

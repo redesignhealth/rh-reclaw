@@ -1,10 +1,8 @@
-"""reclaw-comms-mcp entrypoint.
+"""agent-comms-mcp entrypoint.
 
 MCP service for permissioned, structured agent-to-agent communications.
-Mounts the comms provider behind Okta OIDC (humans) + rh-auth JWT (agents)
+Mounts the comms provider behind Okta OIDC (humans) + agent-jwt JWT (agents)
 auth, with fail-closed per-tool scope enforcement.
-
-Adapted from rh-data-platform ``services/rh-mcp/main.py``.
 """
 
 from __future__ import annotations
@@ -25,7 +23,7 @@ from starlette.responses import PlainTextResponse
 
 from auth import build_auth_provider
 from db import database_url
-from identity import RH_AUTH_ISSUER, try_resolve_email
+from identity import AGENT_JWT_ISSUER, try_resolve_email
 from observability import (
     configure_logging,
     log_scope_denial,
@@ -54,7 +52,7 @@ _RESOURCE_DENIAL_MESSAGE = "insufficient_scope: resource '{uri}' requires elevat
 
 
 class ScopeEnforcementMiddleware(Middleware):
-    """Enforce rh-auth scopes on every tool dispatch (TECH-2752 pattern).
+    """Enforce agent-jwt scopes on every tool dispatch.
 
     Runs *inside* ``ObservabilityMiddleware``: middleware are registered in
     outer→inner order, and observability is registered first. ToolErrors
@@ -66,9 +64,9 @@ class ScopeEnforcementMiddleware(Middleware):
     Behavior:
       * Interactive callers (Okta OIDC) bypass the check — verified via
         ``is_interactive_token``.
-      * rh-auth Bearer callers must present a token whose ``scopes`` claim
+      * agent-jwt Bearer callers must present a token whose ``scopes`` claim
         contains the scope listed in ``scopes.TOOL_SCOPES`` for the tool.
-      * Any tool not present in ``TOOL_SCOPES`` is rejected for rh-auth
+      * Any tool not present in ``TOOL_SCOPES`` is rejected for agent-jwt
         callers (fail-closed). New tools must be enrolled in the same PR
         that introduces them.
       * Missing auth context (no token, non-interactive) is rejected —
@@ -96,10 +94,10 @@ class ScopeEnforcementMiddleware(Middleware):
 
         required = required_scope_for(tool_name)
         if required is None:
-            # Fail-closed: rh-auth caller invoking a tool with no scope mapping.
+            # Fail-closed: agent-jwt caller invoking a tool with no scope mapping.
             self._deny(tool_name, reason="tool_not_enrolled", client_id=safe_client_id(token))
 
-        # rh-auth tokens carry scopes in the ``scopes`` LIST claim, which
+        # agent-jwt tokens carry scopes in the ``scopes`` LIST claim, which
         # FastMCP's JWTVerifier does NOT map onto ``token.scopes`` — read the
         # raw claim via ``scopes_for_token`` (see scopes.py).
         if required not in scopes_for_token(token):
@@ -117,10 +115,10 @@ class ScopeEnforcementMiddleware(Middleware):
         context: MiddlewareContext[mt.ReadResourceRequestParams],
         call_next: CallNext[mt.ReadResourceRequestParams, Any],
     ) -> Any:
-        """Enforce rh-auth scopes on resource reads (mirrors the tool path).
+        """Enforce agent-jwt scopes on resource reads (mirrors the tool path).
 
         This service registers no resources today; the hook exists so any
-        future resource is fail-closed for rh-auth callers by default.
+        future resource is fail-closed for agent-jwt callers by default.
         """
         uri = str(context.message.uri)
         token = get_access_token()
@@ -186,8 +184,8 @@ class ObservabilityMiddleware(Middleware):
     """Emit a structured ``tool_call`` event for every tool dispatch.
 
     Records wall-clock duration, success/failure, and a privacy-safe user
-    identifier. Identity resolution is issuer-gated (rh-mcp TECH-3927
-    pattern): rh-auth tokens resolve strictly via ``try_resolve_email`` so
+    identifier. Identity resolution is issuer-gated: agent-jwt tokens resolve
+    strictly via ``try_resolve_email`` so
     forged email claims cannot poison ``log_user_active``; Okta tokens
     prefer the canonical ``upstream_claims.email`` threaded through the
     OIDCProxy, falling back to the shared resolver.
@@ -213,7 +211,7 @@ class ObservabilityMiddleware(Middleware):
             try:
                 token = get_access_token()
                 if token is not None:
-                    if token.claims.get("iss") == RH_AUTH_ISSUER:
+                    if token.claims.get("iss") == AGENT_JWT_ISSUER:
                         email = try_resolve_email(token)
                     else:
                         upstream: dict[str, Any] = token.claims.get("upstream_claims", {})
@@ -234,10 +232,10 @@ class ObservabilityMiddleware(Middleware):
 
 
 mcp: FastMCP[Any] = FastMCP(
-    "reclaw-comms-mcp",
+    "agent-comms-mcp",
     instructions=(
-        "Permissioned, structured agent-to-agent communications layer for "
-        "Redesign Health. Supports EA-style agents negotiating availability "
+        "Permissioned, structured agent-to-agent communications layer. "
+        "Supports EA-style agents negotiating availability "
         "and coordinating tasks across users via scoped, structured "
         "messages — no free text except the provisional 'note' type "
         "(boundary_safe=False; pre-quarantine pipeline, subject to change) "
@@ -293,9 +291,8 @@ if __name__ == "__main__":
     # is present and well-formed via db.database_url()'s require_env check.
     database_url()
 
-    # Default host matches rh-mcp: on ECS the Tailscale sidecar shares the
-    # task's network namespace, so the server binds loopback only. Local
-    # docker-compose overrides MCP_HOST=0.0.0.0 to reach the port mapping.
+    # Bind loopback by default; docker-compose overrides MCP_HOST=0.0.0.0
+    # to reach the port mapping from the host.
     mcp.run(
         transport="streamable-http",
         host=os.environ.get("MCP_HOST", "127.0.0.1"),

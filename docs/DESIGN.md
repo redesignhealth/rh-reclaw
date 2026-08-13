@@ -1,4 +1,4 @@
-# reclaw-comms-mcp — Design
+# agent-comms-mcp — Design
 
 Status: **agreed v1 plan** (2026-08-11), the spec of record for the comms layer.
 
@@ -13,9 +13,9 @@ This repo is only the comms layer. Out of scope, by explicit decision:
 
 - **EA agent logic**: lives elsewhere.
 - **Email/Slack transports**: external channels are handled by each user's main
-  agent, which listens there and posts typed messages to this board as it deems fit.
-  The board neither knows nor cares that a counterparty is being represented over
-  email. It only ever sees typed messages from a registered agent.
+ agent, which listens there and posts typed messages to this board as it deems fit.
+ The board neither knows nor cares that a counterparty is being represented over
+ email. It only ever sees typed messages from a registered agent.
 
 ## 2. Why this shape (research summary)
 
@@ -29,47 +29,45 @@ studies).
 Key findings that drove the design:
 
 1. **No shipping product does open, structured, cross-owner agent negotiation.**
-   Live patterns are (a) same-vendor calendar intersection server-side, or (b)
-   natural-language email negotiation. The structured-with-consent lane is open.
+ Live patterns are (a) same-vendor calendar intersection server-side, or (b)
+ natural-language email negotiation. The structured-with-consent lane is open.
 2. **A2A has the right shapes but no consent model.** We borrow its task lifecycle
-   (including protocol-native decline), its opaque-agent principle, and its
-   don't-reveal-unauthorized-resources rule, without adopting the protocol.
+ (including protocol-native decline), its opaque-agent principle, and its
+ don't-reveal-unauthorized-resources rule, without adopting the protocol.
 3. **MCP's auth spec is the best normative security reference** (OAuth 2.1 resource
-   server, audience-bound tokens, no token passthrough).
+ server, audience-bound tokens, no token passthrough).
 4. **Inter-agent messages are the top injection channel.** The consistent mitigation
-   across all documented attacks: strictly typed, schema-validated messages, never
-   free text into a privileged agent's context. Hence: **no free-text fields in v1.**
+ across all documented attacks: strictly typed, schema-validated messages, never
+ free text into a privileged agent's context. Hence: **no free-text fields in v1.**
 5. "Paperclip" (paperclip.ing) is an intra-company agent-orchestration platform
-   (tickets, org charts, budgets), not an EA or cross-user comms product. Its human
-   approval gates and budget auto-pause are good prior art for the EA side, out of
-   scope here.
+ (tickets, org charts, budgets), not an EA or cross-user comms product. Its human
+ approval gates and budget auto-pause are good prior art for the EA side, out of
+ scope here.
 
 ## 3. Architecture decision: hub, not peer-to-peer
 
 One central board (this MCP server) that all EA agents connect to as clients, vs. per-agent
-servers with discovery and signed cards. Rationale: fits RH standards
-directly (FastMCP + MultiAuth, Tailscale-only, Postgres), one audit trail, no
+servers with discovery and signed cards. Rationale: one audit trail, no
 discovery problem, and the borrowed A2A shapes keep a later migration to true
 federation open.
 
 ## 4. Identity and permissions
 
-**Everything roots in OAuth** (rh-mcp pattern): FastMCP `MultiAuth` = Okta `OIDCProxy`
-for interactive humans + `JWTVerifier` for headless agent tokens issued by `rh-auth`
-(tech-team gated). Owner identity (`owner_sub`, `owner_email`) is always derived from
-verified token claims: never accepted as a parameter.
+**Everything roots in OAuth**: FastMCP `MultiAuth` = Okta `OIDCProxy`
+for interactive humans + `JWTVerifier` for headless agent tokens (HS256, `iss="agent-jwt"`).
+Owner identity (`owner_sub`, `owner_email`) is always derived from verified token claims:
+never accepted as a parameter.
 
 **There is no board-level permission layer.** Holding a valid scoped token is
-admission: token issuance (rh-auth, tech team) is the permissioned ceremony, and it
-happens upstream of this service. Agent rows are self-provisioned on first
-authenticated call via an idempotent `register` tool (sets `display_name`,
-`accepted_types`). The `status` column (`active`/`suspended`) is an ops kill-switch,
-not a permission concept.
+admission: token issuance is the permissioned ceremony, and it happens upstream of this
+service. Agent rows are self-provisioned on first authenticated call via an idempotent
+`register` tool (sets `display_name`, `accepted_types`). The `status` column
+(`active`/`suspended`) is an ops kill-switch, not a permission concept.
 
-**`agent_key` (TECH-5113) — stopgap for one-token-per-many-agents.** The board's
+**`agent_key` — stopgap for one-token-per-many-agents.** The board's
 `sub` is keyed on the caller's verified token identity, which today is one Okta sub
-per *human*, not per agent: reclaw mints every EA-managed agent acting for a given
-human the same rh-auth token `sub`, because it has no way yet to carry a distinct,
+per *human*, not per agent: the platform mints every EA-managed agent acting for a given
+human the same agent-jwt token `sub`, because it has no way yet to carry a distinct,
 verified per-agent identity in the token or in message metadata. Without a fix,
 `register`'s idempotent upsert on `agents.sub` collapses all of a human's agents into
 one row — the second `register` call silently overwrites the first's `display_name`/
@@ -81,8 +79,8 @@ base identity to form `sub` (`f"{base_sub}::{agent_key}"`) — a self-chosen par
 composition, so they are unaffected by `agent_key` and admission decisions
 (`may_assign`) stay keyed on real verified ownership; two different owners can pass
 an identical `agent_key` string without colliding, since the prefix differs. This is
-explicitly a stopgap: the durable fix is reclaw minting each agent its own distinct
-verified identity, at which point `agent_key` should be removed.
+explicitly a stopgap: the durable fix is for the platform to mint each agent its own
+distinct verified identity, at which point `agent_key` should be removed.
 
 **Permissions live in exactly two places:**
 
@@ -91,84 +89,84 @@ verified identity, at which point `agent_key` should be removed.
 | Token scopes | fail-closed `TOOL_SCOPES` middleware (`comms:read`, `comms:write`) | may this token call this tool at all? |
 | Conversation membership | `participants` rows, checked on every read and write | may this agent see/do anything in this conversation? |
 
-**Scope enforcement applies only to rh-auth (headless agent) tokens.** Interactive
+**Scope enforcement applies only to agent-jwt (headless agent) tokens.** Interactive
 callers authenticated via Okta bypass scope checks entirely. Scope enforcement is the
 agent-token access gate, not a human-user gate.
 
 **Membership rules (v1):**
 
 - Any registered agent may start a conversation with N other agents. All named
-  targets must exist and be active. (`accepted_types` is not checked at
-  invitation/join time — conversation-type admission is Axis 1's ownership
-  rule below, unrelated to which message types a target has declared. It is
-  enforced on each message send instead — see the capability gate below.
-  Because starting a conversation requires an initial message, a target
-  that hasn't declared that message's type still causes conversation
-  creation to fail — an admission-shaped effect via the mandatory first
-  message, not a separate admission check of its own.)
-  The creator becomes an `active` participant with `role=owner`. **Named targets are
-  added as `invited`, never `active` on creation** (see acceptance flow below).
+ targets must exist and be active. (`accepted_types` is not checked at
+ invitation/join time — conversation-type admission is Axis 1's ownership
+ rule below, unrelated to which message types a target has declared. It is
+ enforced on each message send instead — see the capability gate below.
+ Because starting a conversation requires an initial message, a target
+ that hasn't declared that message's type still causes conversation
+ creation to fail — an admission-shaped effect via the mandatory first
+ message, not a separate admission check of its own.)
+ The creator becomes an `active` participant with `role=owner`. **Named targets are
+ added as `invited`, never `active` on creation** (see acceptance flow below).
 - **Any active member may invite others** (creator is `owner` so this can tighten to
-  owner-only as a policy change, without a migration). New invitees also start as
-  `invited`: no unilateral disclosure. This applies uniformly regardless of who does
-  the inviting.
+ owner-only as a policy change, without a migration). New invitees also start as
+ `invited`: no unilateral disclosure. This applies uniformly regardless of who does
+ the inviting.
 - **Acceptance gates visibility, not just participation.** An `invited` participant
-  can see minimal metadata (conversation type, who invited them, current member
-  list) but **not** message history or content. Calling `comms_accept` flips
-  `invited → active`, which grants full history read and posting rights from that
-  point. Calling decline sets `declined` directly: no access is ever granted.
-  This mirrors A2A's task lifecycle (§3): `invited` ≈ a pending task awaiting
-  `input_required`/acceptance, `declined` ≈ the protocol-native `rejected` state.
+ can see minimal metadata (conversation type, who invited them, current member
+ list) but **not** message history or content. Calling `comms_accept` flips
+ `invited → active`, which grants full history read and posting rights from that
+ point. Calling decline sets `declined` directly: no access is ever granted.
+ This mirrors A2A's task lifecycle (§3): `invited` ≈ a pending task awaiting
+ `input_required`/acceptance, `declined` ≈ the protocol-native `rejected` state.
 - Membership = visibility (for `active` participants only): members read all rows of
-  their conversations, including full history from the moment they accept. Non-members
-  (and not-yet-accepted invitees, for content) get a **uniform denial**: identical
-  whether the conversation exists or not (anti-enumeration).
+ their conversations, including full history from the moment they accept. Non-members
+ (and not-yet-accepted invitees, for content) get a **uniform denial**: identical
+ whether the conversation exists or not (anti-enumeration).
 - Decline/leave is the consent mechanism. `comms_decline_invite` is for `invited`
-  participants (terminal, no access ever granted). `comms_leave` covers already-`active`
-  members. Leaving revokes access immediately.
-- No pairwise grants in v1 (internal trust domain: colleagues don't need a consent
-  handshake to ask availability). Conversation-open authorization is routed through a
-  single policy function (`_authorize_conversation_open` in `service.py` — a
-  module-private implementation hook, not a public API), which is the seam where a
-  grants/consent layer lands when external counterparties arrive.
+ participants (terminal, no access ever granted). `comms_leave` covers already-`active`
+ members. Leaving revokes access immediately.
+- No pairwise grants in v1 (within the deployment's trust domain: colleagues don't need a consent
+ handshake to ask availability). Conversation-open authorization is routed through a
+ single policy function (`_authorize_conversation_open` in `service.py` — a
+ module-private implementation hook, not a public API), which is the seam where a
+ grants/consent layer lands when external counterparties arrive.
 
 ## 5. Data model (Postgres)
 
 Five tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
 
 ```
-agents          id, sub UNIQUE, owner_sub, owner_email, display_name,
-                accepted_types text[] (max 20 types, 256 chars each),
-                status(active|suspended), bound_at, timestamps
-conversations   id, type, state(active|completed|canceled|expired),
-                created_by, expires_at, owner_snapshot jsonb (nullable),
-                timestamps
-participants    (conversation_id, agent_id) UNIQUE, role(owner|member),
-                status(invited|active|left|declined), invited_by, invited_at,
-                joined_at (set on accept), last_read_seq
-messages        id, conversation_id, seq (UNIQUE per conversation, server-assigned,
-                race-safe), sender_id, type, schema_version, payload jsonb, created_at
-audit_log       id (bigint), at, actor_sub, action,
-                agent_id/conversation_id/message_id, detail jsonb
-                -- every mutation AND every denial
+agents id, sub UNIQUE, owner_sub, owner_email, display_name,
+ accepted_types text[] (max 20 types, 256 chars each),
+ status(active|suspended), bound_at, timestamps
+conversations id, type, state(active|completed|canceled|expired),
+ created_by, expires_at, owner_snapshot jsonb (nullable),
+ timestamps
+participants (conversation_id, agent_id) UNIQUE, role(owner|member),
+ status(invited|active|left|declined), invited_by, invited_at,
+ joined_at (set on accept), last_read_seq
+messages id, conversation_id, seq (UNIQUE per conversation, server-assigned,
+ race-safe), sender_id, type, schema_version, payload jsonb, created_at
+audit_log id (bigint), at, actor_sub, action,
+ agent_id/conversation_id/message_id, detail jsonb
+ -- every mutation AND every denial
 ```
 
 Design notes:
 
 - `last_read_seq` per participant makes "what needs my attention" trivial and keeps
-  per-message-type logic out of the board: inbox = active conversations with
-  `max(seq) > last_read_seq`.
+ per-message-type logic out of the board: inbox = active conversations with
+ `max(seq) > last_read_seq`.
 - `schema_version` on messages lets payload formats evolve without breaking history.
 - Conversations expire (`expires_at`, checked lazily on direct access via
-  `comms_get_conversation`). `comms_inbox` does not trigger expiry; the next
-  direct touch on a conversation does.
+ `comms_get_conversation`). `comms_inbox` does not trigger expiry; the next
+ direct touch on a conversation does.
 - Rate limits (per-sender posts per conversation per hour: 30; conversation-starts per
-  hour: 10) are computed from the tables. No Redis until it matters. Conversation TTL
-  is 7 days.
+ hour: 10) are computed from the tables. No Redis until it matters. Conversation TTL
+ is 7 days.
 - `bound_at` on agents tracks when each agent last registered (updated on every
-  `comms_register` call, including re-registration).
+ `comms_register` call, including re-registration).
 
-## 6. Message schemas (TECH-5118 two-axis model)
+## 6. Message schemas (two-axis model)
 
 Strict Pydantic (`extra='forbid'`), timezone-aware datetimes only, enum-coded reasons,
 **no free-text fields anywhere (except `note`, which is provisional/pre-quarantine pipeline)**. All types legal only in `state=active`.
@@ -216,17 +214,17 @@ scroll-to-load-more use case.
 1. Owner identity derives from verified OAuth token claims, never parameters.
 2. Judgments cross the boundary, never raw data (schemas have no field for it).
 3. Typed, schema-validated payloads only. No free text except the
-   provisional `note` type (`boundary_safe=False`, blocked in `open`
-   conversations; pre-quarantine pipeline per §10).
+ provisional `note` type (`boundary_safe=False`, blocked in `open`
+ conversations; pre-quarantine pipeline per §10).
 4. Uniform denial messages. Existence of unauthorized resources is never revealed.
 5. Append-only messages and audit. Every mutation and every denial is audited.
 6. Fail-closed tool scoping: unenrolled tool is unreachable by agent tokens.
 7. Rate limits per sender (30 messages/hour/conversation, 10 conversation-starts/hour),
-   message size caps, participant cap (50 per conversation), and conversation expiry (7 days).
+ message size caps, participant cap (50 per conversation), and conversation expiry (7 days).
 
 ## 9. Two-axis model: conversation type (admission) × message type (boundary)
 
-TECH-5118 replaced the earlier dedicated `tasks` table (TECH-5094/5099) with a
+The design replaced the earlier dedicated `tasks` table with a
 general two-axis model that handles both scheduling negotiation and task
 coordination through the same conversations/messages layer.
 
@@ -266,16 +264,16 @@ Each message type declares `boundary_safe: bool` independent of conversation typ
 The flag gates legality within a conversation:
 
 - `open` conversations require `boundary_safe=True` (raw scheduling data must
-  never cross an owner boundary — only judgments).
+ never cross an owner boundary — only judgments).
 - `internal` conversations allow any message type (all parties are the same
-  owner).
+ owner).
 - `asymmetric` conversations allow `boundary_safe=True` always; `boundary_safe=False`
-  only when the message does not cross an ownership boundary (sender's owner set
-  must be a superset of all other active-or-invited participants' owner sets — an
-  invited-but-not-yet-accepted participant's owner set was already validated against
-  the owner snapshot at invite time, so including them here keeps the boundary check
-  consistent with that snapshot invariant rather than leaving a one-post gap until
-  they accept).
+ only when the message does not cross an ownership boundary (sender's owner set
+ must be a superset of all other active-or-invited participants' owner sets — an
+ invited-but-not-yet-accepted participant's owner set was already validated against
+ the owner snapshot at invite time, so including them here keeps the boundary check
+ consistent with that snapshot invariant rather than leaving a one-post gap until
+ they accept).
 
 Currently registered message types (all `boundary_safe=True` unless noted):
 
@@ -312,22 +310,22 @@ The "active" scoping means two different things depending on which call this
 runs from — both are the capability gate, not two separate mechanisms:
 
 - **`start_conversation`**: the named targets themselves are checked
-  directly (see "Membership rules" above) — they aren't yet participants at
-  all at this point, let alone `invited`, so this is the gate's only chance
-  to catch a target that can't handle the opening message before any row is
-  created.
+ directly (see "Membership rules" above) — they aren't yet participants at
+ all at this point, let alone `invited`, so this is the gate's only chance
+ to catch a target that can't handle the opening message before any row is
+ created.
 - **`post_message`** (on an already-open conversation): scoped to
-  currently-**active** participants only — invited-but-not-yet-accepted
-  participants are excluded here, unlike the boundary-crossing check's
-  active-or-invited set. Inviting someone must not retroactively block sends
-  between the already-active members just because the invitee hasn't
-  declared support yet; the check simply applies to them once they accept
-  and become active, exactly like any other active participant. This is
-  only deferred going forward, not retroactive: `comms_accept` grants full
-  conversation history, so an invitee that never declared some earlier
-  message type will still see those messages once it joins. That's an
-  accepted consequence of scoping the live gate to active participants,
-  not a gap in the gate itself.
+ currently-**active** participants only — invited-but-not-yet-accepted
+ participants are excluded here, unlike the boundary-crossing check's
+ active-or-invited set. Inviting someone must not retroactively block sends
+ between the already-active members just because the invitee hasn't
+ declared support yet; the check simply applies to them once they accept
+ and become active, exactly like any other active participant. This is
+ only deferred going forward, not retroactive: `comms_accept` grants full
+ conversation history, so an invitee that never declared some earlier
+ message type will still see those messages once it joins. That's an
+ accepted consequence of scoping the live gate to active participants,
+ not a gap in the gate itself.
 
 This is deliberately **universal**, unlike `boundary_safe`: `boundary_safe`
 answers a trust question (is this payload shaped safely enough to cross an
@@ -416,70 +414,32 @@ deployment-warning docstring.
 
 ## 10. Known extensions (explicitly deferred)
 
-- **Grants/consent layer**: required the moment a counterparty is outside the RH
-  trust domain. Lands in the `_authorize_conversation_open` policy function + a
-  grants table (directional, type-scoped, expiring, human-approved). The
-  anti-enumeration posture of `list_agents` also changes then.
+- **Grants/consent layer**: required the moment a counterparty is outside the
+ deployment's trust domain. Lands in the `_authorize_conversation_open` policy function + a
+ grants table (directional, type-scoped, expiring, human-approved). The
+ anti-enumeration posture of `list_agents` also changes then.
 - **Free-text fields**: allowed only behind a quarantine/review pipeline (sandboxed,
-  tool-less extraction into typed messages). Raw text is stored for audit/human
-  display but never enters a privileged agent's context.
+ tool-less extraction into typed messages). Raw text is stored for audit/human
+ display but never enters a privileged agent's context.
 - **Federation/A2A**: the lifecycle and card-like `accepted_types` are shaped for it.
 - **Owner-only invites**: policy flip on the existing role field.
 
 ## 11. Deployment
 
-Terraform only, no Dokploy (explicit decision: this service goes straight to
-the tech-team-managed path). Infrastructure lives centrally in
-`rh-data-platform/infrastructure/environments/{dev,prod}/reclaw_comms.tf` (a
-`module "reclaw_comms" { source = "../../modules/mcp-server" ... }` block per
-environment, matching `rh-mcp`'s convention: this repo holds app code +
-Dockerfile only, the platform repo holds all Terraform), and is applied and
-running in both environments as of TECH-5050 — this is no longer a "when
-ready" plan, see the runbook below for the steady-state deploy process.
-
-Shape: ECS Fargate task with a Tailscale sidecar (tailnet-only, no public
-endpoint), its own dedicated RDS Postgres instance (not shared, per the
-security guide's "never shared across services" rule), SSM-sourced secrets
-(`OKTA_*`, `MCP_JWT_SECRET`, `RH_AUTH_SECRET`, `DATABASE_URL`), and an EFS
-mount for FastMCP's OAuth token storage (`MCP_TOKEN_STORAGE_PATH`) — the
-same pattern as `rh-mcp`/`vc-hub`. `entrypoint.sh` runs `alembic upgrade
-head` before the server starts on every container start.
-
-### Runbook: deploying a new version
-
-The two repos are split (`rh-reclaw` for app code, `rh-data-platform` for
-infrastructure), so **a merge to this repo's `main` does not by itself
-redeploy anything** — it only pushes a new image to ECR. See the
-[README's Deployment section](../README.md#deployment) for the exact
-commands. In short: confirm the image landed in both
-`rh-platform-dev/apps/reclaw-comms-mcp` and `rh-platform/apps/reclaw-comms-mcp`
-ECR repos, then `gh workflow run deploy-reclaw-comms.yml -R
-redesignhealth/rh-data-platform -f image_tag=sha-<commit-sha>`.
-
-That single dispatch deploys dev, then prod, automatically — **no approval
-gate exists between them yet** (tracked in `rh-data-platform` as TECH-5089).
-Treat every dispatch as a real prod deploy, not a dev-first canary.
-
-**IAM**: the `mcp-server` module provisions the task role; no extra
-`aws_iam_role_policy` exists today. `rh-mcp`'s colosseum grant is the
-pattern to copy if a future tool needs cross-service SSM reads.
-
-That infrastructure lives in and is reviewed as part of `rh-data-platform`,
-not built or changed inside `reclaw-comms-mcp` itself.
+See [README.md — Deployment](../README.md#deployment) for setup and
+configuration. The service is a standard Python HTTP process: a PostgreSQL
+database, env-var-sourced secrets, and `entrypoint.sh` runs
+`alembic upgrade head` automatically before the server starts.
 
 ## 12. Delivery plan
 
 1. ~~Standards-compliant scaffold~~: done (FastMCP + MultiAuth, scopes middleware,
-   structlog, Docker, CI, 44 tests green, connectivity verified end-to-end with an
-   rh-auth-style agent JWT over streamable HTTP).
-2. ~~Domain layer (this repo)~~: done — SQLAlchemy models + Alembic migrations,
-   service layer with the access rules above (including invite→accept and the
-   two-axis conversation/message-type model, TECH-5118), Pydantic schemas, MCP
-   tools, tests against real Postgres (uniform denials, membership enforcement,
-   invite/accept/decline flow, seq race-safety, state machine, expiry, rate limits,
-   audit completeness).
-3. ~~Infrastructure (`rh-data-platform`, tech-team reviewed)~~: done (TECH-5050) —
-   `mcp-server` module call + dedicated RDS Postgres + SSM secrets + EFS, per §11.
-   Applied and running in both dev and prod.
-4. Integrate: EA agents (separate workstream, `reclaw-ea-implementation`) connect as
-   MCP clients with rh-auth tokens.
+ structlog, Docker, CI, tests green, connectivity verified end-to-end with an
+ agent JWT over streamable HTTP).
+2. ~~Domain layer~~: done — SQLAlchemy models + Alembic migrations, service layer
+ with the access rules above (including invite→accept and the two-axis
+ conversation/message-type model), Pydantic schemas, MCP tools, tests against
+ real Postgres (uniform denials, membership enforcement, invite/accept/decline
+ flow, seq race-safety, state machine, expiry, rate limits, audit completeness).
+3. ~~Infrastructure~~: done — deployed and running.
+4. Integrate: EA agents connect as MCP clients with agent JWTs.

@@ -87,7 +87,7 @@ sees one uniform message), ``denied.unknown_agent``,
 ``denied.already_participant``, ``denied.bad_state`` (state-machine
 violation), ``denied.bad_schema`` (payload validation),
 ``denied.rate_limited``, ``denied.ownership_unverified`` (an ownership
-lookup failed — fail closed, TECH-5094/TECH-5118), ``denied.not_same_owner``/
+lookup failed — fail closed), ``denied.not_same_owner``/
 ``denied.no_owner_overlap`` (conversation-open admission failed for
 ``internal``/``asymmetric``), ``denied.owner_set_frozen`` (an invite would
 expand a frozen owner set), ``denied.unknown_conversation_type`` (a
@@ -138,7 +138,7 @@ from state_machine import (
 )
 
 # Plain stdlib logging, not structlog/observability.py's event-schema
-# helpers (TECH-5094 Argus round 4): this module's own docstring commits to
+# helpers: this module's own docstring commits to
 # never importing fastmcp, and observability.py's log_* helpers exist for
 # the tools-layer request lifecycle (tool_call/auth_flow/scope_denial),
 # not an arbitrary service-layer diagnostic. This logger exists solely so
@@ -149,7 +149,7 @@ logger = logging.getLogger(__name__)
 
 # --- Policy constants --------------------------------------------------------
 
-# Default conversation TTL by conversation type (TECH-5118 phase 4).
+# Default conversation TTL by conversation type.
 # Applied when a caller doesn't supply an explicit ``expires_at`` to
 # ``start_conversation``. Values chosen to match typical use:
 #   open       — scheduling negotiations; a week is already stale
@@ -615,7 +615,7 @@ async def register_agent(
     agent ``active`` + refreshes ``bound_at``. ``owner_sub`` is the
     exception: it is frozen at first registration and never overwritten by
     a later call, even one presenting a different ``owner_sub`` — see the
-    inline comment on the re-registration branch below (TECH-5094): once
+    inline comment on the re-registration branch below: once
     ``add_task``'s ``may_assign`` started reading ``owner_sub`` as an
     admission-decision input, allowing a re-register to change it became a
     forgeable privilege-escalation path, not just an unmodeled edge case.
@@ -696,10 +696,10 @@ async def register_agent(
         session.add(agent)
     else:
         agent = existing
-        # owner_sub is deliberately NOT overwritten on re-registration
-        # (TECH-5094 Argus round 1, security/B1): it is now read by
+        # owner_sub is deliberately NOT overwritten on re-registration —
+        # it is now read by
         # AgentTableOwnershipClient as the input to may_assign's admission
-        # decision, and rh-auth extra claims (including owner_sub) are
+        # decision, and agent-jwt extra claims (including owner_sub) are
         # caller-supplied and unverified (providers/comms.py). Allowing a
         # re-register to overwrite it would let a caller forge a victim's
         # owner_sub, re-register their own agent under it, and be admitted
@@ -990,7 +990,7 @@ async def start_conversation(
     ``(message_type, schema_version)`` before anything is persisted.
 
     Admission (``_authorize_conversation_open``) is evaluated over the
-    FULL participant set at once (TECH-5118, DESIGN.md §9) — ``internal``
+    FULL participant set at once — ``internal``
     requires identical verified owner sets, ``asymmetric`` requires every
     pair to intersect, ``open`` is unrestricted. The resulting owner-set
     snapshot is persisted on ``Conversation.owner_snapshot`` (``None`` for
@@ -1272,7 +1272,7 @@ async def _authorize_invite_owner_freeze(
     ownership_client: OwnershipClient,
 ) -> None:
     """Reject an invite that would expand an ``internal``/``asymmetric``
-    conversation's frozen owner set (TECH-5118). No-op for ``open``.
+    conversation's frozen owner set. No-op for ``open``.
 
     Fails closed (``denied.ownership_unverified``) on any lookup error,
     same posture as conversation-open admission.
@@ -1342,7 +1342,7 @@ async def invite(
     be overridable by another member, since decline is the consent
     mechanism), and — for ``internal``/``asymmetric`` conversations — must
     not introduce an owner outside the conversation's frozen
-    ``owner_snapshot`` (TECH-5118: the owner set is frozen at creation, not
+    ``owner_snapshot`` (the owner set is frozen at creation, not
     retroactively reconciled against prior messages when it would expand).
     ``open`` conversations have no ownership concept and skip this check.
     """
@@ -1747,7 +1747,7 @@ async def _check_boundary_crossing(
 
 
 # Message types restricted to a specific sender participant role
-# (TECH-5118, "tasks-as-conversations"): ``task_cancel`` is the creator-side
+# ``task_cancel`` is the creator-side
 # close (today's decline-cascade only counts role='member', no creator
 # path — this is that path), ``task_decline`` is the assignee's consent/
 # refusal mechanism, mirroring ``update_task``'s old assignee-only
@@ -2156,14 +2156,14 @@ async def inbox(session: AsyncSession, *, caller_agent_id: uuid.UUID) -> dict[st
     }
 
 
-# --- Ownership lookups (TECH-5094; reused by Phase 2's admission model) -------
+# --- Ownership lookups -------
 
 
 class OwnershipClient(Protocol):
     """Resolves a board agent's verified owner set — the seam for ``may_assign``.
 
-    The real implementation calls the reclaw platform's ownership lookup
-    (not yet built as of TECH-5094; tracked as a follow-up). Tests fake
+    The real implementation calls the platform's ownership lookup
+    (not yet built; tracked as a follow-up). Tests fake
     this protocol directly. Every caller of ``get_agent_owners`` MUST fail
     closed on any exception — never treat a lookup error as "no match" vs.
     "match", since either silently loosens or tightens admission depending
@@ -2174,7 +2174,7 @@ class OwnershipClient(Protocol):
 
     Implementations must not hold a live DB session open across their own
     ``get_agent_owners`` call: the eventual real implementation makes an
-    external HTTP call to the reclaw platform, and holding a checked-out
+    external HTTP call to the ownership service, and holding a checked-out
     ``AsyncSession`` (and its connection-pool slot) for the duration of
     that round trip risks pool exhaustion under concurrency
     (``db.py``'s ``pool_size``/``max_overflow`` are small). Construct a
@@ -2194,8 +2194,8 @@ class OwnershipClient(Protocol):
 
 
 class AgentTableOwnershipClient:
-    """Interim ``OwnershipClient`` until the reclaw platform's real ownership
-    endpoint ships (TECH-5094 follow-up).
+    """Interim ``OwnershipClient`` until the platform's real ownership
+    endpoint ships.
 
     Wraps the existing ``agents.owner_sub`` column as a single-element
     owner set; ``is_shared`` is always ``False`` since no shared-agent
@@ -2226,9 +2226,9 @@ class AgentTableOwnershipClient:
 def may_assign(creator_owners: AbstractSet[str], assignee_owners: AbstractSet[str]) -> bool:
     """Symmetric verified owner-set intersection — ``owners(a) ∩ owners(b) ≠ ∅``.
 
-    Originally TECH-5094's ``add_task`` admission policy; reused verbatim
+    Originally the ``add_task`` admission policy; reused verbatim
     by ``_pairwise_admitted`` as the ``asymmetric`` conversation-type
-    predicate (TECH-5118 phase 2). ``AbstractSet`` (not ``set``) so callers
+    predicate. ``AbstractSet`` (not ``set``) so callers
     may pass either mutable ``set``s or the ``frozenset``s the ownership-
     lookup helpers use.
 

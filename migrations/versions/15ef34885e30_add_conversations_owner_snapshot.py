@@ -4,14 +4,14 @@ Revision ID: 15ef34885e30
 Revises: 6d2a8e63e469
 Create Date: 2026-08-12 13:54:44.149046
 
-TECH-5118 phase 2: ``conversations.owner_snapshot`` records the verified
+Adds ``conversations.owner_snapshot``, which records the verified
 owner-set union at conversation-open time for ``internal``/``asymmetric``
 conversations (NULL for ``open``, which has no ownership concept) — see
 ``service._authorize_conversation_open``/``service.invite``'s owner-set-
 freeze check.
 
 Also backfills any pre-existing ``conversations.type = 'scheduling.availability'``
-rows to ``'open'`` (the TECH-5118 phase 1 rename). ``type`` has no DB-level
+rows to ``'open'`` (the rename). ``type`` has no DB-level
 CHECK constraint, so a row created under the pre-rename code (already
 merged/deployed per ``6d2a8e63e469``'s own note) would otherwise be silent
 dead weight that every ``internal``/``asymmetric``-only code path (boundary
@@ -20,13 +20,13 @@ for these rows post-backfill, exactly as it does for every other ``open``
 conversation, so no further data migration is needed.
 
 NOTE on in-place amendment: authored and iterated on entirely within this
-single unmerged PR (TECH-5118) -- it does not exist on `main`, and has
+single unmerged PR -- it does not exist on `main`, and has
 never been applied to any persistent or shared database. In-place
 amendment during code review is therefore safe. Once this PR merges, treat
 this file as frozen: any further schema change requires a NEW Alembic
 revision, never an edit to this one (mirrors 6d2a8e63e469's own note,
-which — unlike this one — IS already applied on `main`/dev, hence TECH-5118
-phase 3 dropping the `tasks` table via a new revision rather than editing
+which — unlike this one — IS already applied on `main`/dev, so
+phase 3 drops the `tasks` table via a new revision rather than editing
 6d2a8e63e469 in place).
 """
 
