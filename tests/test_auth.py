@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import itertools
 import json
 import os
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -274,6 +275,40 @@ class TestRefreshTokenRotationGrace:
 
         assert result is None
         mock_log_auth_flow.assert_called_once_with("refresh_token_miss")
+
+    async def test_load_refresh_token_resolves_chain_one_hop_under_the_cap(self) -> None:
+        """Boundary from the other side of test_load_refresh_token_caps_hop_chain:
+        a chain of exactly _ROTATION_MAX_HOPS - 1 hops must still resolve
+        successfully, not get caught by an off-by-one in the < vs <=
+        comparison against _ROTATION_MAX_HOPS."""
+        proxy = _build_proxy()
+        final_token = _refresh_token("token-final")
+
+        async def fake_super_lookup(_client: object, token: str) -> RefreshToken | None:
+            return final_token if token == "token-final" else None
+
+        with (
+            patch(
+                "fastmcp.server.auth.oidc_proxy.OIDCProxy.load_refresh_token",
+                AsyncMock(side_effect=fake_super_lookup),
+            ),
+            patch("auth.log_auth_flow") as mock_log_auth_flow,
+        ):
+            # token-0 -> token-1 -> ... -> token-final, exactly
+            # _ROTATION_MAX_HOPS - 1 hops (one under the cap).
+            chain = [f"token-{i}" for i in range(_ROTATION_MAX_HOPS - 1)] + ["token-final"]
+            for old, new in itertools.pairwise(chain):
+                await proxy._rotation_store.put(
+                    collection="mcp-refresh-token-rotations",
+                    key=hashlib.sha256(old.encode()).hexdigest(),
+                    value={"new_token": new},
+                    ttl=300,
+                )
+            result = await proxy.load_refresh_token(MagicMock(), "token-0")
+
+        assert result is final_token
+        expected_calls = [call("refresh_token_grace_redirect")] * (_ROTATION_MAX_HOPS - 1)
+        assert mock_log_auth_flow.call_args_list == expected_calls
 
     async def test_load_refresh_token_caps_hop_chain(self) -> None:
         """A chain longer than _ROTATION_MAX_HOPS must not be followed

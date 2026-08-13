@@ -6,7 +6,7 @@ implementation named in the RH tech guide, topics/04-auth-and-identity.md
 §MCP Server Auth). See that module's docstring for the full auth-path
 writeup; only the differences are called out here.
 
-KNOWN DIVERGENCE (not yet reconciled, no tracking ticket yet): reclaw-comms-mcp/
+KNOWN DIVERGENCE (not yet reconciled, tracked by TECH-5153): reclaw-comms-mcp/
 auth.py has since gained the refresh-token rotation-grace mechanism
 (``_ROTATION_*``) to fix forced Okta re-auths under concurrent connections
 sharing one cached refresh token. This service runs the identical FastMCP
@@ -16,8 +16,8 @@ currently has zero Terraform/ECR/IAM footprint (see
 docs/proposals/reclaw-ea-plugin-registry.md's Context section), so this is
 a latent gap, not an active production issue today. That proposal doc's
 §1 covers reconciling these two auth.py files' JWT-rejection routing, not
-this rotation-grace gap specifically -- port ``_ROTATION_*`` here (or file
-a dedicated ticket) before/if this service is ever deployed standalone,
+this rotation-grace gap specifically -- TECH-5153 tracks porting
+``_ROTATION_*`` here before/if this service is ever deployed standalone,
 independent of whether the plugin-registry merge happens first.
 
 Auth paths

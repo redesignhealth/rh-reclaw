@@ -41,19 +41,19 @@ This machinery is now duplicated across at least this service and rh-mcp
 (and reclaw-ea-mcp/auth.py, one directory over, does NOT have it yet
 despite running the identical FastMCP OIDCProxy + Okta app combination --
 same forced-re-auth exposure would apply there too, once that service is
-actually deployed; see its own docstring's KNOWN DIVERGENCE note).
-Extraction into a shared ``rh_lib``-style base class is a reasonable
-follow-up once a third copy exists; not done here to avoid a cross-repo
-refactor as a side effect of a one-service bug fix.
+actually deployed; tracked by TECH-5153, see its own docstring's KNOWN
+DIVERGENCE note). Extraction into a shared ``rh_lib``-style base class is
+a reasonable follow-up once a third copy exists; not done here to avoid a
+cross-repo refactor as a side effect of a one-service bug fix.
 
 Emitting ``refresh_token_miss`` / ``refresh_token_hop_cap_exceeded`` on
 paths that previously logged nothing means an undiscriminating
 ``$.event = "auth_flow"`` CloudWatch filter now also counts failed refresh
-lookups as auth activity -- worth explicit metric filters on each
-``auth_type`` value separately if either gets alerted on, not folded into
-one undifferentiated auth_flow count. (Metric filters live in
-rh-data-platform's Terraform, not this repo -- tracking that audit as a
-follow-up there, not blocking this fix on it.)
+lookups as auth activity -- each ``auth_type`` value needs its own metric
+filter before either is alerted on, not folded into one undifferentiated
+auth_flow count. (Metric filters live in rh-data-platform's Terraform, not
+this repo. No tracking ticket yet for that specific audit -- not blocking
+this fix on it, but the gap needs a real ticket of its own before long.)
 """
 
 from __future__ import annotations
@@ -214,12 +214,16 @@ class OktaOIDCProxy(OIDCProxy):
         """Recursive hop-following helper for ``load_refresh_token``.
 
         Double-underscore (name-mangled to ``_OktaOIDCProxy__follow_rotation_grace``)
-        rather than single: a single-underscore method is still an ordinary
-        overridable attribute, so a subclass overriding it and calling the
-        original with ``hops=0`` at every recursive step would defeat
-        ``_ROTATION_MAX_HOPS`` the same way the public ``_hops`` parameter
-        this replaced did. Name mangling makes that override target a
-        different, subclass-qualified name instead.
+        rather than single, mainly to avoid an accidental same-name collision
+        in a subclass -- NOT an access-control guarantee. Name mangling is
+        trivially bypassable (``self._OktaOIDCProxy__follow_rotation_grace(...,
+        hops=0)`` from a subclass, or simply overriding ``load_refresh_token``
+        itself), so it does not by itself defend against a malicious
+        subclass. The actual hardening that closed the original weakness is
+        that ``hops`` is not a parameter of the PUBLIC ``load_refresh_token``
+        override point FastMCP calls -- an ordinary caller (not a subclass
+        author deliberately reaching for the mangled name) has no way to
+        supply it at all.
         """
         entry = await self._rotation_store.get(
             collection=_ROTATION_COLLECTION, key=_hash_token(refresh_token)

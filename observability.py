@@ -6,7 +6,9 @@ CloudWatch. The event schema matches the MCP fleet's shared
 ``mcp_observability`` contract (rh-data-platform ``services/shared``) so
 CloudWatch Metric Filters and Logs Insights queries written for rh-mcp /
 rh-google-mcp (``$.event = "tool_call"``, ``$.event = "scope_denial"``, ...)
-work unchanged against this service.
+work unchanged against this service -- with one exception noted below
+(``refresh_token_hop_cap_exceeded``, a service-local addition not yet in
+the shared contract).
 
 Event schema
 ------------
@@ -20,8 +22,12 @@ auth_flow:
     {"event": "auth_flow", "service": "...",
      "auth_type": "new_auth|token_refresh|refresh_token_grace_redirect|
                    refresh_token_miss|refresh_token_hop_cap_exceeded"}
-    The last three values are emitted on paths that previously logged
-    nothing at all (rh-mcp's rotation-grace port, auth.py). A
+    The middle two values are ported from rh-mcp's rotation-grace
+    mechanism (auth.py); ``refresh_token_hop_cap_exceeded`` is this
+    service's own addition on top of that port (see auth.py) and does
+    NOT yet exist in rh-mcp or the shared ``mcp_observability`` contract
+    -- update both if/when this hardening is ported back. All three are
+    emitted on paths that previously logged nothing at all. A
     ``$.event = "auth_flow"`` filter that doesn't discriminate on
     ``auth_type`` now also counts failed refresh-token lookups as auth
     activity. ``refresh_token_miss`` and ``refresh_token_hop_cap_exceeded``
@@ -29,8 +35,10 @@ auth_flow:
     a genuine miss (token never issued or long expired) and a rotation
     chain exceeding ``_ROTATION_MAX_HOPS`` (token IS being actively rotated,
     just faster than the chain can be followed) are different operational
-    conditions and should get independent metric filters if either is
-    alerted on.
+    conditions and EACH REQUIRES its own CloudWatch metric filter before
+    either is alerted on -- not optional, since a burst of hop-cap events
+    specifically indicates rotation outpacing the grace chain, a signal
+    otherwise invisible outside a manual Logs Insights query.
 
 auth_rejected:
     {"event": "auth_rejected", "service": "...",
