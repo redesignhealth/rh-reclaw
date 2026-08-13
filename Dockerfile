@@ -13,7 +13,7 @@ RUN addgroup --system --gid 10001 app && adduser --system --uid 10001 --gid 1000
 # in the source repo). Enforced by process: wait ≥7 days after the PyPI release before
 # bumping the pin here. Migration continuity: the wheel's migrations/versions/ must match
 # this repo's (verified by unpacking the wheel and diffing filenames). See docs/RELEASING.md.
-# To upgrade: bump the version in pyproject.toml + this file, regenerate requirements.lock
+# To upgrade: bump the version in pyproject.toml, regenerate requirements.lock
 #   (see docs/RELEASING.md), verify migration continuity, then open a PR.
 COPY requirements.lock /app/requirements.lock
 RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
