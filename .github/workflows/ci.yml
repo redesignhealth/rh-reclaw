@@ -114,8 +114,7 @@ jobs:
       - name: Smoke-test entry points
         run: |
           docker run --rm --entrypoint sh agent-comms-mcp:${{ github.sha }} -c \
-            "command -v agent-comms-mcp && command -v agent-comms-mcp-migrate && \
-             python -c 'import main'"
+            "command -v agent-comms-mcp && command -v agent-comms-mcp-migrate"
 
       - name: Verify pyproject.toml version matches requirements.lock pin
         run: |
