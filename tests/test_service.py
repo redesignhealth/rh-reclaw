@@ -2291,6 +2291,9 @@ class TestInbox:
         await accept_invite(
             session, actor_sub=agent.sub, agent_id=agent.id, conversation_id=conversation.id
         )
+        # Safe to keep using the `conversation` object post-commit: this
+        # module's session fixture is built with expire_on_commit=False, so
+        # accept_invite()'s commit doesn't expire it out from under us.
         conversation.expires_at = datetime.now(UTC) - timedelta(seconds=1)
         await session.commit()
 

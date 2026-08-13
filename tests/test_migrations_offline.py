@@ -53,14 +53,16 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     assert "tasks table is not empty" in result.stdout
     # TECH-5118 round 8 fix: upgrade()'s index drops are schema-qualified
     # to match the guard. This is upgrade()-side coverage only -- alembic
-    # --sql only emits forward DDL, so downgrade()'s equivalent
-    # qualification has no offline-SQL coverage here. The live-DB
-    # _migrated_schema autouse fixture (defined identically in
-    # test_db_models.py, test_comms_tools.py, and test_service.py) only
-    # exercises downgrade() when a prior test module left the DB already at
-    # head -- on a fresh DB its "downgrade base" step is a no-op, since
-    # there's nothing to downgrade from, so even that path isn't a
-    # guaranteed round-trip through this specific downgrade().
+    # --sql only emits forward DDL, so this offline test never runs
+    # downgrade() at all. The live-DB _migrated_schema autouse fixture
+    # (defined identically in test_db_models.py, test_comms_tools.py, and
+    # test_service.py) does exercise downgrade() end-to-end when a prior
+    # test module left the DB already at head. What that live-DB path still
+    # doesn't cover: CI's search_path is public-first, so it can't
+    # distinguish a qualified FK referent from an unqualified one, and
+    # there's no schema-level assertion confirming the recreated `tasks`
+    # table actually lands in `public` rather than merely working by
+    # search_path coincidence.
     assert "DROP INDEX IF EXISTS public.idx_tasks_assignee_id_status" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_at_id" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_by_status" in result.stdout

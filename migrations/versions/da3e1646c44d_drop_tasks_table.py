@@ -101,12 +101,13 @@ def downgrade() -> None:
     # symmetric with upgrade()'s public.tasks qualification -- otherwise a
     # connection whose search_path isn't public-first could recreate them
     # in a different schema than upgrade() dropped them from. FK reference
-    # strings (["agents.id"]) are deliberately left unqualified, matching
-    # this repo's other migrations (e.g. ef8394b37c8d) -- qualifying only
-    # the FK target string doesn't change where the constraint itself is
-    # created (that's governed by the table's own schema), and an
-    # unqualified referent avoids autogenerate metadata/reflected-DB
-    # mismatches against the rest of the schema.
+    # strings (["agents.id"]) are deliberately left unqualified: this repo
+    # relies on a public-first search_path for referent resolution
+    # everywhere else (e.g. ef8394b37c8d's own FKs are unqualified), so
+    # qualifying just these two would be an inconsistent one-off rather
+    # than a real hardening -- the raw `REFERENCES public.tasks(id)` SQL
+    # below is qualified only because it's hand-written DDL text, not
+    # SQLAlchemy metadata resolved via search_path the same way.
     op.create_table(
         "tasks",
         sa.Column(
