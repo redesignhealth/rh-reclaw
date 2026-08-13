@@ -1661,6 +1661,10 @@ async def _enforce_message_type_accepted(
                 conversation_id=conversation_id,
                 detail={"message_type": message_type},
             )
+            # Explicit return, not relying solely on _deny's NoReturn
+            # contract -- a future refactor that weakens _deny must not
+            # silently let this loop keep iterating past a recorded denial.
+            return
 
 
 async def _check_boundary_crossing(

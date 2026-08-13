@@ -9,6 +9,8 @@ import pytest
 from pydantic import ValidationError
 
 from schemas import (
+    MAX_ACCEPTED_TYPES,
+    MESSAGE_TYPES,
     AvailabilityRequestV1,
     AvailabilityResponseV1,
     ConfirmV1,
@@ -34,6 +36,16 @@ _NAIVE = datetime(2026, 8, 11, 12, 0)
 
 def _iso(dt: datetime) -> str:
     return dt.isoformat()
+
+
+def test_message_types_fits_within_max_accepted_types() -> None:
+    """sorted(MESSAGE_TYPES) is used as _register's default accepted_types
+    in test_service.py/test_comms_tools.py -- if the registry ever grows
+    past MAX_ACCEPTED_TYPES, that default becomes invalid and either the
+    default must be sliced or MAX_ACCEPTED_TYPES raised. A collected test
+    (not a module-level assert, which silently vanishes under python -O)
+    catches that regardless of which test module runs first."""
+    assert len(MESSAGE_TYPES) <= MAX_ACCEPTED_TYPES
 
 
 class TestAvailabilityRequest:

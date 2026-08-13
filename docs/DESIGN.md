@@ -304,8 +304,9 @@ Independent of, and checked alongside, the `boundary_safe` crossing rule above:
 every other **active** participant/target must have `message_type` in their
 own `agents.accepted_types`, or the send is denied
 (`denied.message_type_not_accepted`, uniform `AccessDeniedError`, detail omits
-which recipient rejected it or their declared set — same anti-enumeration
-posture as `denied.boundary_crossing`).
+which recipient rejected it or their declared set — for consistency with
+`denied.boundary_crossing`'s denial shape, not because `accepted_types`
+itself is secret: it's already public via `comms_list_agents`).
 
 The "active" scoping means two different things depending on which call this
 runs from — both are the capability gate, not two separate mechanisms:
@@ -321,7 +322,12 @@ runs from — both are the capability gate, not two separate mechanisms:
   active-or-invited set. Inviting someone must not retroactively block sends
   between the already-active members just because the invitee hasn't
   declared support yet; the check simply applies to them once they accept
-  and become active, exactly like any other active participant.
+  and become active, exactly like any other active participant. This is
+  only deferred going forward, not retroactive: `comms_accept` grants full
+  conversation history, so an invitee that never declared some earlier
+  message type will still see those messages once it joins. That's an
+  accepted consequence of scoping the live gate to active participants,
+  not a gap in the gate itself.
 
 This is deliberately **universal**, unlike `boundary_safe`: `boundary_safe`
 answers a trust question (is this payload shaped safely enough to cross an
@@ -342,11 +348,22 @@ specific agent's deployment, not about an owner as a whole.
 **Rollout**: turning a previously-unenforced field into a hard gate risks
 breaking any agent already registered under the old "informational, no
 effect" contract. Migration `e1db7c2e6b70` backfills every pre-existing
-`agents` row's `accepted_types` to the full registered message-type set at
-deploy time — a one-time grandfather clause, not a permanent behavior.
-Agents registered after that migration runs are unaffected; their own
-declared set is enforced normally, including any later re-registration that
-deliberately narrows it.
+`agents` row's `accepted_types` to the full message-type set as of that
+migration's authoring time — a one-time grandfather clause, not a permanent
+behavior, and not dynamically resolved from the current schema (a type
+added later is not retroactively included). Agents registered after that
+migration runs are unaffected; their own declared set is enforced normally,
+including any later re-registration that deliberately narrows it.
+
+**Known consequence — lifecycle-coherence is not validated**: nothing
+prevents registering (or inviting) an agent whose `accepted_types` omits
+every consent/lifecycle message type relevant to a conversation it's
+active in (e.g. `confirm`, `decline`, `task_complete`, `task_cancel`). Such
+an agent can strand a conversation — every lifecycle-transitioning send to
+it is denied, and there's no forced-progress mechanism other than
+`comms_leave`, which is state-neutral. Callers (and higher-level tools like
+an EA agent) are responsible for choosing lifecycle-coherent declared sets;
+this gate does not enforce that for them.
 
 ### Per-type TTL policy
 

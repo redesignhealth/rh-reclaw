@@ -33,13 +33,24 @@ on this), and `schemas.MESSAGE_TYPES` reflects the CURRENT registry, not
 "whatever existed at this migration's authoring time" -- importing it would
 make this file's behavior depend on future changes to that module.
 
-DEPLOYMENT: the parent revision (`da3e1646c44d`)'s own stop-then-start
-deployment warning does NOT apply to this one. That warning is about
-dropping `audit_log.task_id`, which breaks old-container audit writes
-during a rolling-deploy drain window -- this revision only widens an
-existing `agents.accepted_types` column's VALUES, touching no column that
-any currently-running container (old or new) reads or writes differently
-because of it. Safe to ship as a normal rolling deploy.
+DEPLOYMENT: taken in isolation, this revision's own DDL/DML needs no
+stop-then-start -- it only widens an existing `agents.accepted_types`
+column's VALUES, touching no column that any currently-running container
+(old or new) reads or writes differently because of it. But
+`entrypoint.sh` runs `alembic upgrade head` atomically, so a deploy that
+carries this revision alongside its still-pending parent (`da3e1646c44d`,
+which DROPs `audit_log.task_id`) is governed by that parent's
+stop-then-start requirement for the combined run -- this note does not
+override that.
+
+Even under stop-then-start, there is a real window this migration cannot
+close on its own: any container still draining writes to
+`agents.accepted_types` via `service.register_agent`'s unconditional
+upsert right up until it stops. A re-registration that lands after this
+migration's UPDATE commits, from an old container still operating under
+the pre-enforcement "informational" contract, can re-narrow that row --
+which the new gate then enforces. This is precisely why stop-then-start
+matters here too, not merely for the parent revision's column drop.
 """
 
 from __future__ import annotations
@@ -54,29 +65,20 @@ down_revision: str | None = "da3e1646c44d"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-# Literal snapshot of schemas.MESSAGE_TYPES at authoring time -- see the
-# module docstring for why this isn't imported from schemas.py directly.
-_MESSAGE_TYPES_AT_AUTHORING_TIME = (
-    "availability_request",
-    "availability_response",
-    "confirm",
-    "counter_proposal",
-    "decline",
-    "needs_clarification",
-    "note",
-    "task_assign",
-    "task_cancel",
-    "task_complete",
-    "task_decline",
-    "task_report",
-)
-
 
 def upgrade() -> None:
+    # Literal snapshot of schemas.MESSAGE_TYPES at authoring time, written
+    # directly rather than assembled from a Python constant -- see the
+    # module docstring for why this isn't imported from schemas.py, and
+    # matching this migration chain's convention (e.g. 15ef34885e30) of
+    # frozen migrations containing plain SQL literals, not code that could
+    # silently change what a "frozen" file emits.
     op.execute(
-        "UPDATE agents SET accepted_types = ARRAY["
-        + ", ".join(f"'{t}'" for t in _MESSAGE_TYPES_AT_AUTHORING_TIME)
-        + "]::text[], updated_at = now()"
+        "UPDATE public.agents SET accepted_types = ARRAY["
+        "'availability_request', 'availability_response', 'confirm', "
+        "'counter_proposal', 'decline', 'needs_clarification', 'note', "
+        "'task_assign', 'task_cancel', 'task_complete', 'task_decline', "
+        "'task_report']::text[], updated_at = now()"
     )
 
 

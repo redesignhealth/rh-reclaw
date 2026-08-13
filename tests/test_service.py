@@ -44,7 +44,6 @@ from exceptions import (
 from models import Agent, AuditLog, Conversation, Participant
 from schemas import (
     MAX_ACCEPTED_TYPE_LENGTH,
-    MAX_ACCEPTED_TYPES,
     MAX_PAYLOAD_BYTES,
     MESSAGE_TYPES,
     PayloadValidationError,
@@ -65,11 +64,9 @@ from service import (
     register_agent,
 )
 
-assert len(MESSAGE_TYPES) <= MAX_ACCEPTED_TYPES, (
-    "sorted(MESSAGE_TYPES) is used as _register's default accepted_types below -- "
-    "update that default (e.g. slice to MAX_ACCEPTED_TYPES) or raise MAX_ACCEPTED_TYPES "
-    "if the registry grows past it"
-)
+# Coverage for MESSAGE_TYPES fitting within MAX_ACCEPTED_TYPES (a precondition
+# for sorted(MESSAGE_TYPES) as a default accepted_types below) lives in
+# tests/test_schemas.py as a collected test, not a module-level assert here.
 
 
 async def start_conversation(
@@ -2140,6 +2137,42 @@ class TestMessageTypeAcceptedCapability:
             payload=_counter_proposal_payload(),
         )
         assert message.type == "counter_proposal"
+
+    async def test_lifecycle_coherence_is_not_validated_a_narrow_agent_can_strand_a_conversation(
+        self, session: AsyncSession
+    ) -> None:
+        """Pins a documented (DESIGN.md §9 "Known consequence") design
+        gap, not a bug: nothing validates that a participant's
+        accepted_types includes any lifecycle/consent type, so an agent
+        registered with only "availability_request" can become active and
+        then have every confirm/decline sent to it denied -- the
+        conversation can never legally resolve via those types. Callers
+        are responsible for choosing lifecycle-coherent declared sets."""
+        initiator = await _register(session, "cap-strand-initiator")
+        narrow = await _register(
+            session, "cap-strand-narrow", accepted_types=["availability_request"]
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[narrow.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=narrow.sub, agent_id=narrow.id, conversation_id=conversation.id
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=initiator.sub,
+                sender_agent_id=initiator.id,
+                conversation_id=conversation.id,
+                message_type="confirm",
+                payload=_confirm_payload(),
+            )
+        assert exc_info.value.reason == "denied.message_type_not_accepted"
 
 
 class TestTaskLifecycleMessages:

@@ -39,13 +39,11 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from schemas import MAX_ACCEPTED_TYPES, MESSAGE_TYPES
+from schemas import MESSAGE_TYPES
 
-assert len(MESSAGE_TYPES) <= MAX_ACCEPTED_TYPES, (
-    "sorted(MESSAGE_TYPES) is used as _register's default accepted_types below -- "
-    "update that default (e.g. slice to MAX_ACCEPTED_TYPES) or raise MAX_ACCEPTED_TYPES "
-    "if the registry grows past it"
-)
+# Coverage for MESSAGE_TYPES fitting within MAX_ACCEPTED_TYPES (a precondition
+# for sorted(MESSAGE_TYPES) as a default accepted_types below) lives in
+# tests/test_schemas.py as a collected test, not a module-level assert here.
 
 SERVICE_ROOT = Path(__file__).parent.parent
 _DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"

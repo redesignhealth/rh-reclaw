@@ -72,7 +72,7 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     # per-message capability gate doesn't retroactively break an agent
     # registered under the old "informational, no effect" contract.
     assert (
-        "UPDATE agents SET accepted_types = ARRAY['availability_request', "
+        "UPDATE public.agents SET accepted_types = ARRAY['availability_request', "
         "'availability_response', 'confirm', 'counter_proposal', 'decline', "
         "'needs_clarification', 'note', 'task_assign', 'task_cancel', "
         "'task_complete', 'task_decline', 'task_report']::text[], "
