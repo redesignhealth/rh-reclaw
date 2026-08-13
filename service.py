@@ -101,7 +101,7 @@ from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, Protocol
 
-from sqlalchemy import func, literal, select, tuple_
+from sqlalchemy import func, literal, or_, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from exceptions import (
@@ -775,7 +775,23 @@ async def list_conversations(
     if conversation_type is not None:
         stmt = stmt.where(Conversation.type == conversation_type)
     if state is not None:
-        stmt = stmt.where(Conversation.state == state)
+        # Conversations past expires_at stay stored as "active" until the
+        # next lazy-expiry touch (_maybe_expire) — filtering on the raw
+        # column alone would return stale-expired rows for "active" and
+        # match almost nothing for "expired". Reconcile against
+        # expires_at directly rather than eagerly expiring every row this
+        # query would otherwise touch.
+        if state == "active":
+            stmt = stmt.where(Conversation.state == "active", Conversation.expires_at > _now())
+        elif state == "expired":
+            stmt = stmt.where(
+                or_(
+                    Conversation.state == "expired",
+                    (Conversation.state == "active") & (Conversation.expires_at <= _now()),
+                )
+            )
+        else:
+            stmt = stmt.where(Conversation.state == state)
 
     if cursor:
         # cursor = "<created_at_iso>|<id>"
@@ -794,19 +810,9 @@ async def list_conversations(
     has_more = len(rows) > limit
     rows = rows[:limit]
 
-    def _conv_summary(c: Conversation) -> dict[str, Any]:
-        return {
-            "id": str(c.id),
-            "type": c.type,
-            "state": c.state,
-            "created_by": str(c.created_by),
-            "expires_at": _iso(c.expires_at),
-            "created_at": _iso(c.created_at),
-        }
-
     next_cursor = f"{rows[-1].created_at.isoformat()}|{rows[-1].id}" if has_more and rows else None
     return {
-        "conversations": [_conv_summary(c) for c in rows],
+        "conversations": [_conversation_dict(c) for c in rows],
         "has_more": has_more,
         "next_cursor": next_cursor,
     }
@@ -1114,6 +1120,26 @@ async def start_conversation(
         message_id=message.id,
         detail={"seq": 1, "message_type": message_type},
     )
+
+    # A terminal type as the OPENING message must apply the same
+    # state-transition post_message applies for every later message --
+    # otherwise the conversation is left "active" forever while its only
+    # message is already terminal. "decline"'s cascade needs no handling
+    # here: at creation zero participants have declined yet, so it's
+    # always a no-op transition regardless.
+    if message_type in ("confirm", "task_complete", "task_decline", "task_cancel"):
+        new_state = resulting_conversation_state(message_type)
+        if new_state is not None:
+            conversation.state = new_state
+            _audit(
+                session,
+                actor_sub=actor_sub,
+                action="conversation.close",
+                agent_id=initiator.id,
+                conversation_id=conversation.id,
+                detail={"new_state": new_state, "via": message_type},
+            )
+
     await session.commit()
     return conversation
 
@@ -1619,10 +1645,13 @@ async def post_message(
     the same conversation serialize and every seq is gapless and race-safe.
 
     Boundary-crossing (DESIGN.md §9 Axis 2, ``_check_boundary_crossing``) is
-    checked right after state-machine legality and before payload
-    validation: an ``asymmetric`` conversation rejects a non-``boundary_safe``
-    message that would cross an ownership boundary for the sender, audited
-    as ``denied.boundary_crossing``.
+    checked right after payload validation (which must run first here --
+    ``is_boundary_safe`` itself raises ``PayloadValidationError`` for an
+    unregistered schema coordinate, and that has to go through
+    ``_deny_bad_schema``'s audit trail, not escape uncaught): an
+    ``asymmetric`` conversation rejects a non-``boundary_safe`` message
+    that would cross an ownership boundary for the sender, audited as
+    ``denied.boundary_crossing``.
 
     Side effects: ``confirm``/``task_complete`` transition the conversation
     to ``completed``; ``decline`` sets the sender's OWN participant status
@@ -1675,16 +1704,6 @@ async def post_message(
         sender_role=participant.role,
     )
 
-    await _check_boundary_crossing(
-        session,
-        actor_sub=actor_sub,
-        sender_agent_id=sender_agent_id,
-        conversation=conversation,
-        message_type=message_type,
-        schema_version=schema_version,
-        ownership_client=ownership_client,
-    )
-
     try:
         validated = validate_payload(message_type, schema_version, payload)
     except PayloadValidationError as exc:
@@ -1696,6 +1715,21 @@ async def post_message(
             message_type=message_type,
             exc=exc,
         )
+
+    # Validated above, not after: is_boundary_safe (inside
+    # _check_boundary_crossing) raises PayloadValidationError itself for an
+    # unregistered (message_type, schema_version) pair -- letting that
+    # escape uncaught here (rather than through _deny_bad_schema) would
+    # violate DESIGN.md §8's "every denial is audited" invariant.
+    await _check_boundary_crossing(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=sender_agent_id,
+        conversation=conversation,
+        message_type=message_type,
+        schema_version=schema_version,
+        ownership_client=ownership_client,
+    )
 
     next_seq = (
         await session.execute(

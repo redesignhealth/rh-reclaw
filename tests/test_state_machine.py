@@ -147,3 +147,10 @@ class TestIsBoundaryCrossingSafe:
 
     def test_asymmetric_disjoint_owners_crosses(self) -> None:
         assert is_boundary_crossing_safe("asymmetric", False, _A, _B) is False
+
+    def test_unrecognized_type_denied_even_when_boundary_safe(self) -> None:
+        # Default-deny for a type this function doesn't recognize (e.g. a
+        # legacy pre-rename row) -- must not fall through to asymmetric's
+        # more permissive handling.
+        assert is_boundary_crossing_safe("scheduling.availability", True, _EMPTY, _EMPTY) is False
+        assert is_boundary_crossing_safe("bogus", False, _A, _B) is False

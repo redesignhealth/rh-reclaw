@@ -10,6 +10,15 @@ conversations (NULL for ``open``, which has no ownership concept) — see
 ``service._authorize_conversation_open``/``service.invite``'s owner-set-
 freeze check.
 
+Also backfills any pre-existing ``conversations.type = 'scheduling.availability'``
+rows to ``'open'`` (the TECH-5118 phase 1 rename). ``type`` has no DB-level
+CHECK constraint, so a row created under the pre-rename code (already
+merged/deployed per ``6d2a8e63e469``'s own note) would otherwise be silent
+dead weight that every ``internal``/``asymmetric``-only code path (boundary
+crossing, invite-freeze) fails closed on — ``owner_snapshot`` stays NULL
+for these rows post-backfill, exactly as it does for every other ``open``
+conversation, so no further data migration is needed.
+
 NOTE on in-place amendment: authored and iterated on entirely within this
 single unmerged PR (TECH-5118) -- it does not exist on `main`, and has
 never been applied to any persistent or shared database. In-place
@@ -42,7 +51,12 @@ def upgrade() -> None:
         sa.Column("owner_snapshot", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
         if_not_exists=True,
     )
+    op.execute("UPDATE conversations SET type = 'open' WHERE type = 'scheduling.availability'")
 
 
 def downgrade() -> None:
+    # Not reversed: renaming 'open' back to 'scheduling.availability' would
+    # also catch rows that were genuinely created as 'open' post-rename, not
+    # just the backfilled legacy rows -- there is no way to distinguish them
+    # after the fact. Same lossy-downgrade posture as da3e1646c44d.
     op.drop_column("conversations", "owner_snapshot", if_exists=True)

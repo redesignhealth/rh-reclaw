@@ -19,6 +19,16 @@ never been applied to any persistent or shared database. In-place
 amendment during code review is therefore safe. Once this PR merges, treat
 this file as frozen: any further schema change requires a NEW Alembic
 revision, never an edit to this one.
+
+DEPLOYMENT WARNING: `entrypoint.sh` runs `alembic upgrade head` in the new
+container before the old container drains (no expand/contract split
+exists in this pipeline today). `ALTER TABLE audit_log DROP COLUMN
+task_id` here breaks every ORM audit-log INSERT from a still-running old
+container for the entire drain window (any `AuditLog` insert maps
+`task_id`, not just task-scoped ones). This PR must ship as a
+stop-then-start deploy, or during a confirmed-idle traffic window --
+standard rolling/blue-green deploy of this image is NOT safe for this
+specific revision.
 """
 
 from __future__ import annotations
@@ -46,6 +56,23 @@ def upgrade() -> None:
     # 6d2a8e63e469 was never applied (e.g. a fresh dev environment).
     op.execute("ALTER TABLE audit_log DROP CONSTRAINT IF EXISTS audit_log_task_id_fkey")
     op.execute("ALTER TABLE audit_log DROP COLUMN IF EXISTS task_id")
+    # Pre-flight guard: this drop is unconditional and the table's data is
+    # unrecoverable (see downgrade()'s warning) -- if the table exists at
+    # all, refuse to proceed unless it's already empty, rather than
+    # silently destroying any task rows a real deployment might still hold.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'tasks')
+                AND EXISTS (SELECT 1 FROM tasks LIMIT 1)
+            THEN
+                RAISE EXCEPTION
+                    'tasks table is not empty -- confirm zero rows before running this migration';
+            END IF;
+        END $$;
+        """
+    )
     op.execute("DROP TABLE IF EXISTS tasks")
 
 

@@ -1410,7 +1410,7 @@ class TestListConversationsTool:
             },
         )
         result = await _call(main, test_session_factory, creator_token, "comms_list_conversations")
-        ids = [c["id"] for c in result["conversations"]]
+        ids = [c["conversation_id"] for c in result["conversations"]]
         assert conv["conversation_id"] in ids
 
     async def test_filter_by_type_and_state(

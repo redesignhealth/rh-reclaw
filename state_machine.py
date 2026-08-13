@@ -121,6 +121,11 @@ def is_boundary_crossing_safe(
         return boundary_safe
     if conversation_type == "internal":
         return True
+    if conversation_type != "asymmetric":
+        # Default-deny for any unrecognized type (e.g. a pre-rename legacy
+        # row this process doesn't know about) rather than falling through
+        # to asymmetric's more permissive subset check.
+        return False
     if boundary_safe:
         return True
     return other_owners <= sender_owners

@@ -524,6 +524,25 @@ class TestStartConversation:
         )
         assert rows == []
 
+    async def test_terminal_initial_message_transitions_state(self, session: AsyncSession) -> None:
+        """A terminal type as the OPENING message must apply the same
+        state transition post_message applies for a later message --
+        otherwise the conversation is left "active" forever holding only
+        a terminal message."""
+        owner = await _register(session, "owner-terminal-initial")
+        target = await _register(session, "target-terminal-initial")
+
+        conversation = await start_conversation(
+            session,
+            actor_sub=owner.sub,
+            initiator_agent_id=owner.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message={"reason": "no_longer_needed"},
+            message_type="task_cancel",
+        )
+        assert conversation.state == "canceled"
+
 
 class _FakeOwnershipClient:
     """Test double for ``service.OwnershipClient`` — an in-memory owners map,
@@ -2257,7 +2276,7 @@ class TestListConversations:
             initial_message=_request_payload(),
         )
         result = await list_conversations(session, caller_agent_id=creator.id)
-        ids = [c["id"] for c in result["conversations"]]
+        ids = [c["conversation_id"] for c in result["conversations"]]
         assert str(conv.id) in ids
 
     async def test_invited_participant_sees_conversation(self, session: AsyncSession) -> None:
@@ -2272,7 +2291,7 @@ class TestListConversations:
             initial_message=_request_payload(),
         )
         result = await list_conversations(session, caller_agent_id=invited.id)
-        ids = [c["id"] for c in result["conversations"]]
+        ids = [c["conversation_id"] for c in result["conversations"]]
         assert str(conv.id) in ids
 
     async def test_filter_by_type(self, session: AsyncSession) -> None:
@@ -2289,7 +2308,7 @@ class TestListConversations:
         result = await list_conversations(
             session, caller_agent_id=creator.id, conversation_type="open"
         )
-        assert any(c["id"] == str(open_conv.id) for c in result["conversations"])
+        assert any(c["conversation_id"] == str(open_conv.id) for c in result["conversations"])
         # filtering by internal returns nothing (no internal conv created)
         result2 = await list_conversations(
             session, caller_agent_id=creator.id, conversation_type="internal"
@@ -2310,12 +2329,41 @@ class TestListConversations:
         result_active = await list_conversations(
             session, caller_agent_id=creator.id, state="active"
         )
-        assert any(c["id"] == str(conv.id) for c in result_active["conversations"])
+        assert any(c["conversation_id"] == str(conv.id) for c in result_active["conversations"])
 
         result_completed = await list_conversations(
             session, caller_agent_id=creator.id, state="completed"
         )
         assert result_completed["conversations"] == []
+
+    async def test_filter_by_state_reconciles_lazy_expiry(self, session: AsyncSession) -> None:
+        """A conversation past ``expires_at`` is still stored as ``state=
+        "active"`` until the next lazy-expiry touch -- ``state="active"``
+        must exclude it and ``state="expired"`` must include it, not just
+        match the raw (stale) column value."""
+        creator = await _register(session, "listconv-expiry-creator")
+        target = await _register(session, "listconv-expiry-target")
+        already_expired = datetime.now(UTC) - timedelta(seconds=1)
+        conv = await start_conversation(
+            session,
+            actor_sub=creator.sub,
+            initiator_agent_id=creator.id,
+            conversation_type="open",
+            target_agent_ids=[target.id],
+            initial_message=_request_payload(),
+            expires_at=already_expired,
+        )
+        assert conv.state == "active"  # stored value is stale, not yet flipped
+
+        result_active = await list_conversations(
+            session, caller_agent_id=creator.id, state="active"
+        )
+        assert not any(c["conversation_id"] == str(conv.id) for c in result_active["conversations"])
+
+        result_expired = await list_conversations(
+            session, caller_agent_id=creator.id, state="expired"
+        )
+        assert any(c["conversation_id"] == str(conv.id) for c in result_expired["conversations"])
 
     async def test_filter_by_role_owner(self, session: AsyncSession) -> None:
         creator = await _register(session, "listconv-role-owner")
@@ -2330,10 +2378,10 @@ class TestListConversations:
         )
         # creator is owner
         result = await list_conversations(session, caller_agent_id=creator.id, role="owner")
-        assert any(c["id"] == str(conv.id) for c in result["conversations"])
+        assert any(c["conversation_id"] == str(conv.id) for c in result["conversations"])
         # target is member (invited) — owner filter should exclude them
         result2 = await list_conversations(session, caller_agent_id=target.id, role="owner")
-        assert not any(c["id"] == str(conv.id) for c in result2["conversations"])
+        assert not any(c["conversation_id"] == str(conv.id) for c in result2["conversations"])
 
     async def test_does_not_leak_other_agents_conversations(self, session: AsyncSession) -> None:
         a = await _register(session, "listconv-a")
@@ -2374,5 +2422,5 @@ class TestListConversations:
         assert len(page2["conversations"]) == 1
         assert page2["has_more"] is False
 
-        all_ids = {c["id"] for c in page1["conversations"] + page2["conversations"]}
+        all_ids = {c["conversation_id"] for c in page1["conversations"] + page2["conversations"]}
         assert len(all_ids) == 3

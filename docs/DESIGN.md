@@ -319,6 +319,16 @@ The seam is already injected (`OwnershipClient` parameter on all functions that
 need it) — swapping `AgentTableOwnershipClient` for a real HTTP client is the
 only change needed when the platform endpoint ships.
 
+### Known gap: rolling-deploy safety of the `tasks`-table-drop migration
+
+`migrations/versions/da3e1646c44d_drop_tasks_table.py` drops `audit_log.task_id`.
+`entrypoint.sh` runs `alembic upgrade head` in the new container before the old
+container drains, so a standard rolling deploy of this image would break every
+audit-log write (not just task-scoped ones) from any still-running old container
+for the entire drain window. This PR must ship as a stop-then-start deploy, or
+during a confirmed-idle traffic window — see that migration file's own
+deployment-warning docstring.
+
 ## 10. Known extensions (explicitly deferred)
 
 - **Grants/consent layer**: required the moment a counterparty is outside the RH
