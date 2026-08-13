@@ -96,6 +96,11 @@ def downgrade() -> None:
     # represented as conversations with task_assign/etc messages) is
     # unrecoverable by reverting this migration. Downgrade is provided for
     # schema completeness only, not as a data-recovery path.
+    #
+    # Schema-qualified throughout, symmetric with upgrade()'s public.tasks
+    # qualification -- otherwise a connection whose search_path isn't
+    # public-first could recreate this table/indexes in a different schema
+    # than upgrade() dropped them from.
     op.create_table(
         "tasks",
         sa.Column(
@@ -142,12 +147,14 @@ def downgrade() -> None:
         sa.ForeignKeyConstraint(["assignee_id"], ["agents.id"], name="tasks_assignee_id_fkey"),
         sa.ForeignKeyConstraint(["created_by"], ["agents.id"], name="tasks_created_by_fkey"),
         sa.PrimaryKeyConstraint("id", name="tasks_pkey"),
+        schema="public",
     )
     op.create_index(
         "idx_tasks_created_by_status",
         "tasks",
         ["created_by", "status"],
         unique=False,
+        schema="public",
         if_not_exists=True,
     )
     op.create_index(
@@ -155,6 +162,7 @@ def downgrade() -> None:
         "tasks",
         [sa.literal_column("created_at DESC"), sa.literal_column("id DESC")],
         unique=False,
+        schema="public",
         if_not_exists=True,
     )
     op.create_index(
@@ -162,9 +170,18 @@ def downgrade() -> None:
         "tasks",
         ["assignee_id", "status"],
         unique=False,
+        schema="public",
         if_not_exists=True,
     )
-    op.execute("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS task_id UUID REFERENCES tasks(id)")
+    op.execute(
+        "ALTER TABLE public.audit_log ADD COLUMN IF NOT EXISTS task_id "
+        "UUID REFERENCES public.tasks(id)"
+    )
     op.create_index(
-        "idx_audit_log_task_id", "audit_log", ["task_id"], unique=False, if_not_exists=True
+        "idx_audit_log_task_id",
+        "audit_log",
+        ["task_id"],
+        unique=False,
+        schema="public",
+        if_not_exists=True,
     )

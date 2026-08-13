@@ -51,3 +51,8 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     assert "ALTER TABLE public.audit_log DROP COLUMN IF EXISTS task_id" in result.stdout
     # TECH-5118 round 7 fix: pre-flight guard against dropping non-empty tasks rows
     assert "tasks table is not empty" in result.stdout
+    # TECH-5118 round 8 fix: index drops schema-qualified to match the guard
+    assert "DROP INDEX IF EXISTS public.idx_tasks_assignee_id_status" in result.stdout
+    assert "DROP INDEX IF EXISTS public.idx_tasks_created_at_id" in result.stdout
+    assert "DROP INDEX IF EXISTS public.idx_tasks_created_by_status" in result.stdout
+    assert "DROP INDEX IF EXISTS public.idx_audit_log_task_id" in result.stdout

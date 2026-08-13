@@ -1581,18 +1581,23 @@ async def _enforce_boundary_crossing(
                 conversation_id=conversation_id,
                 detail={"message_type": message_type, "conversation_type": conversation_type},
             )
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.boundary_crossing",
-            agent_id=sender_agent_id,
-            conversation_id=conversation_id,
-            detail={
-                "message_type": message_type,
-                "sender_is_shared": len(sender_owners) > 1,
-                "other_owners_outside_sender": bool(other_owners - sender_owners),
-            },
-        )
+        else:
+            # Explicit else, not relying on _deny's NoReturn to make the
+            # two branches mutually exclusive -- a future refactor that
+            # weakens _deny's contract must not silently start emitting
+            # both audit rows for the same denial.
+            await _deny(
+                session,
+                actor_sub=actor_sub,
+                action="denied.boundary_crossing",
+                agent_id=sender_agent_id,
+                conversation_id=conversation_id,
+                detail={
+                    "message_type": message_type,
+                    "sender_is_shared": len(sender_owners) > 1,
+                    "other_owners_outside_sender": bool(other_owners - sender_owners),
+                },
+            )
 
 
 async def _check_boundary_crossing(
@@ -1960,10 +1965,16 @@ async def inbox(session: AsyncSession, *, caller_agent_id: uuid.UUID) -> dict[st
     (AXI convention, DESIGN.md §7).
 
     Read-only with no denial path for a valid ``caller_agent_id`` (no
-    audit rows) — lazy expiry is intentionally NOT applied here (it would
-    require touching every returned conversation individually); it is
-    applied on whichever read/write path next touches a given conversation
-    directly (``get_conversation``, ``post_message``, etc.).
+    audit rows) — the write-through mutation side of lazy expiry
+    (``_maybe_expire``, which flips and commits ``conversation.state``) is
+    intentionally NOT applied here (it would require touching every
+    returned conversation individually); that happens on whichever
+    read/write path next touches a given conversation directly
+    (``get_conversation``, ``post_message``, etc.). The read-only
+    *projection* side IS applied, though: ``_conversation_dict`` (used for
+    both ``unread`` and ``pending_invites`` below) still reports
+    ``"state": "expired"`` for a past-``expires_at`` row, since that's a
+    pure display computation with no DB write.
     """
     unread_rows = (
         await session.execute(

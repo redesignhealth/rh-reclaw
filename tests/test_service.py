@@ -903,6 +903,7 @@ class TestAcceptDeclineInvite:
         [
             ("task_cancel", {"reason": "no_longer_needed"}, "canceled"),
             ("task_complete", {}, "completed"),
+            ("confirm", _confirm_payload(), "completed"),
         ],
     )
     async def test_accept_denied_after_terminal_opening_message(
@@ -1719,11 +1720,40 @@ class TestPostMessageBoundaryCrossing:
                 conversation_id=conversation.id,
                 message_type="counter_proposal",
                 payload=_counter_proposal_payload(),
-                ownership_client=_FailingOwnershipClient(),
+                # A no-op client, not _FailingOwnershipClient: the
+                # unrecognized-type check short-circuits before any lookup
+                # is attempted (the lookup is gated on conversation_type
+                # == "asymmetric"), so a raising client here would never
+                # actually be invoked and this test would pass for the
+                # wrong reason.
+                ownership_client=_FakeOwnershipClient({}),
             )
         assert exc_info.value.reason == "denied.unknown_conversation_type"
         actions = await _audit_actions(session, conversation.id)
         assert "denied.unknown_conversation_type" in actions
+        assert "denied.boundary_crossing" not in actions
+
+    async def test_asymmetric_ownership_lookup_failure_fails_closed(
+        self, session: AsyncSession
+    ) -> None:
+        """The genuine exception path (not the soft-fail-to-empty-set one
+        covered elsewhere): a raising ownership_client on an asymmetric
+        conversation's non-boundary_safe message denies with
+        denied.ownership_unverified, distinct from denied.boundary_crossing."""
+        owner, _target, conversation, _client = await self._asymmetric_pair(
+            session, ["dan"], ["dan", "priya"]
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=owner.sub,
+                sender_agent_id=owner.id,
+                conversation_id=conversation.id,
+                message_type="note",
+                payload={"text": "hello"},
+                ownership_client=_FailingOwnershipClient(),
+            )
+        assert exc_info.value.reason == "denied.ownership_unverified"
 
 
 class TestTaskLifecycleMessages:
@@ -2210,6 +2240,28 @@ class TestInbox:
         assert len(result["pending_invites"]) == 1
         assert result["pending_invites"][0]["conversation_id"] == str(conversation.id)
         assert result["total_count"] == 1
+
+    async def test_pending_invite_reflects_expired_state(self, session: AsyncSession) -> None:
+        """inbox() reads _conversation_dict too -- a past-expiry
+        conversation must project state="expired" here exactly as it does
+        in list_conversations, not the stale raw column value."""
+        agent = await _register(session, "inbox-expired-1")
+        sender = await _register(session, "inbox-expired-sender-1")
+        already_expired = datetime.now(UTC) - timedelta(seconds=1)
+        conversation = await start_conversation(
+            session,
+            actor_sub=sender.sub,
+            initiator_agent_id=sender.id,
+            conversation_type="open",
+            target_agent_ids=[agent.id],
+            initial_message=_request_payload(),
+            expires_at=already_expired,
+        )
+
+        result = await inbox(session, caller_agent_id=agent.id)
+        assert len(result["pending_invites"]) == 1
+        assert result["pending_invites"][0]["conversation_id"] == str(conversation.id)
+        assert result["pending_invites"][0]["state"] == "expired"
 
     async def test_both_unread_and_pending_invite(self, session: AsyncSession) -> None:
         agent = await _register(session, "inbox-both-1")
