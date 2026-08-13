@@ -1019,6 +1019,35 @@ async def start_conversation(
             exc=exc,
         )
 
+    # DESIGN.md §9 Axis 2 and the sender-role restriction apply to the
+    # seq-1 message exactly like every later one. Checked here, before any
+    # row is created: ``_deny`` commits whatever is already staged on the
+    # session, so running these after ``session.add(conversation)`` would
+    # persist an orphaned conversation/participant pair with no message on
+    # a denial. The initiator's role in a freshly-opened conversation is
+    # always "owner", passed directly rather than queried; the target list
+    # is already in memory, so no conversation row is needed to know the
+    # "other side" for the boundary check either.
+    await _require_message_sender_role(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=initiator.id,
+        conversation_id=None,
+        message_type=message_type,
+        sender_role="owner",
+    )
+    await _enforce_boundary_crossing(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=initiator.id,
+        conversation_type=conversation_type,
+        conversation_id=None,
+        other_agent_ids=[t.id for t in targets],
+        message_type=message_type,
+        schema_version=schema_version,
+        ownership_client=ownership_client,
+    )
+
     now = _now()
     conversation = Conversation(
         type=conversation_type,
@@ -1052,27 +1081,6 @@ async def start_conversation(
             )
         )
     await session.flush()
-
-    # DESIGN.md §9 Axis 2 applies to the seq-1 message exactly like every
-    # later one — the initiator's role in a freshly-opened conversation is
-    # always "owner", so that's passed directly rather than re-queried.
-    await _require_message_sender_role(
-        session,
-        actor_sub=actor_sub,
-        sender_agent_id=initiator.id,
-        conversation_id=conversation.id,
-        message_type=message_type,
-        sender_role="owner",
-    )
-    await _check_boundary_crossing(
-        session,
-        actor_sub=actor_sub,
-        sender_agent_id=initiator.id,
-        conversation=conversation,
-        message_type=message_type,
-        schema_version=schema_version,
-        ownership_client=ownership_client,
-    )
 
     message = Message(
         conversation_id=conversation.id,
@@ -1413,6 +1421,90 @@ async def _all_non_owners_declined(session: AsyncSession, conversation_id: uuid.
     return bool(member_statuses) and all(status == "declined" for status in member_statuses)
 
 
+async def _enforce_boundary_crossing(
+    session: AsyncSession,
+    *,
+    actor_sub: str,
+    sender_agent_id: uuid.UUID,
+    conversation_type: str,
+    conversation_id: uuid.UUID | None,
+    other_agent_ids: list[uuid.UUID],
+    message_type: str,
+    schema_version: int,
+    ownership_client: OwnershipClient,
+) -> None:
+    """Enforce DESIGN.md §9 Axis 2's boundary-crossing rule for this message.
+
+    ``other_agent_ids`` is supplied by the caller rather than queried here —
+    ``_check_boundary_crossing`` (below) queries current participants for
+    ``post_message``; ``start_conversation`` already has its target list in
+    memory and calls this directly with no conversation row required to
+    exist yet.
+
+    Only ``asymmetric`` conversations posting a non-``boundary_safe``
+    message need an actual ownership lookup (``open``/``internal``, and any
+    ``boundary_safe`` message, are decided by
+    ``state_machine.is_boundary_crossing_safe`` from the conversation type
+    alone) — avoids the external ownership-client round trip on the common
+    path. Fails closed (``denied.ownership_unverified``) on any lookup
+    error, or on an empty owner set for the sender or any other participant
+    (an ownership_client that soft-fails to ``{"owners": []}`` instead of
+    raising must not silently admit a boundary crossing).
+    """
+    boundary_safe = is_boundary_safe(message_type, schema_version)
+    sender_owners: frozenset[str] = frozenset()
+    other_owners: frozenset[str] = frozenset()
+    if conversation_type == "asymmetric" and not boundary_safe:
+        try:
+            # Sequential, not asyncio.gather: AgentTableOwnershipClient's
+            # get_agent_owners shares this call's AsyncSession, which
+            # SQLAlchemy's AsyncSession does not support across concurrent
+            # coroutines.
+            sender_info = await ownership_client.get_agent_owners(sender_agent_id)
+            sender_owners = frozenset(sender_info.get("owners") or [])
+            other_owner_sets = []
+            for pid in other_agent_ids:
+                info = await ownership_client.get_agent_owners(pid)
+                other_owner_sets.append(frozenset(info.get("owners") or []))
+            other_owners = frozenset().union(*other_owner_sets) if other_owner_sets else frozenset()
+        except Exception as exc:
+            logger.warning(
+                "ownership lookup failed checking boundary crossing: %s",
+                type(exc).__name__,
+                exc_info=True,
+            )
+            await _deny(
+                session,
+                actor_sub=actor_sub,
+                action="denied.ownership_unverified",
+                agent_id=sender_agent_id,
+                conversation_id=conversation_id,
+                detail={"message_type": message_type},
+            )
+        if not sender_owners or any(not owners for owners in other_owner_sets):
+            await _deny(
+                session,
+                actor_sub=actor_sub,
+                action="denied.ownership_unverified",
+                agent_id=sender_agent_id,
+                conversation_id=conversation_id,
+                detail={"message_type": message_type},
+            )
+    if not is_boundary_crossing_safe(conversation_type, boundary_safe, sender_owners, other_owners):
+        await _deny(
+            session,
+            actor_sub=actor_sub,
+            action="denied.boundary_crossing",
+            agent_id=sender_agent_id,
+            conversation_id=conversation_id,
+            detail={
+                "message_type": message_type,
+                "sender_is_shared": len(sender_owners) > 1,
+                "other_owners_outside_sender": bool(other_owners - sender_owners),
+            },
+        )
+
+
 async def _check_boundary_crossing(
     session: AsyncSession,
     *,
@@ -1423,21 +1515,12 @@ async def _check_boundary_crossing(
     schema_version: int,
     ownership_client: OwnershipClient,
 ) -> None:
-    """Enforce DESIGN.md §9 Axis 2's boundary-crossing rule for this message.
-
-    Only ``asymmetric`` conversations posting a non-``boundary_safe``
-    message need an actual ownership lookup (``open``/``internal``, and any
-    ``boundary_safe`` message, are decided by
-    ``state_machine.is_boundary_crossing_safe`` from the conversation type
-    alone) — avoids the external ownership-client round trip on the common
-    path. Fails closed (``denied.ownership_unverified``) on any lookup
-    error.
-    """
-    boundary_safe = is_boundary_safe(message_type, schema_version)
-    sender_owners: frozenset[str] = frozenset()
-    other_owners: frozenset[str] = frozenset()
-    if conversation.type == "asymmetric" and not boundary_safe:
-        other_ids = (
+    """``_enforce_boundary_crossing`` for an existing conversation row —
+    queries current (``active``/``invited``) participants for the other
+    side rather than requiring the caller to already know them."""
+    other_ids: list[uuid.UUID] = []
+    if conversation.type == "asymmetric" and not is_boundary_safe(message_type, schema_version):
+        other_ids = list(
             (
                 await session.execute(
                     select(Participant.agent_id).where(
@@ -1450,44 +1533,17 @@ async def _check_boundary_crossing(
             .scalars()
             .all()
         )
-        try:
-            # Sequential, not asyncio.gather: AgentTableOwnershipClient's
-            # get_agent_owners shares this call's AsyncSession, which
-            # SQLAlchemy's AsyncSession does not support across concurrent
-            # coroutines.
-            sender_info = await ownership_client.get_agent_owners(sender_agent_id)
-            sender_owners = frozenset(sender_info.get("owners") or [])
-            other_owners = frozenset()
-            for pid in other_ids:
-                info = await ownership_client.get_agent_owners(pid)
-                other_owners = other_owners | frozenset(info.get("owners") or [])
-        except Exception as exc:
-            logger.warning(
-                "ownership lookup failed checking boundary crossing: %s",
-                type(exc).__name__,
-                exc_info=True,
-            )
-            await _deny(
-                session,
-                actor_sub=actor_sub,
-                action="denied.ownership_unverified",
-                agent_id=sender_agent_id,
-                conversation_id=conversation.id,
-                detail={"message_type": message_type},
-            )
-    if not is_boundary_crossing_safe(conversation.type, boundary_safe, sender_owners, other_owners):
-        await _deny(
-            session,
-            actor_sub=actor_sub,
-            action="denied.boundary_crossing",
-            agent_id=sender_agent_id,
-            conversation_id=conversation.id,
-            detail={
-                "message_type": message_type,
-                "sender_is_shared": len(sender_owners) > 1,
-                "other_owners_outside_sender": bool(other_owners - sender_owners),
-            },
-        )
+    await _enforce_boundary_crossing(
+        session,
+        actor_sub=actor_sub,
+        sender_agent_id=sender_agent_id,
+        conversation_type=conversation.type,
+        conversation_id=conversation.id,
+        other_agent_ids=other_ids,
+        message_type=message_type,
+        schema_version=schema_version,
+        ownership_client=ownership_client,
+    )
 
 
 # Message types restricted to a specific sender participant role
@@ -1508,7 +1564,7 @@ async def _require_message_sender_role(
     *,
     actor_sub: str,
     sender_agent_id: uuid.UUID,
-    conversation_id: uuid.UUID,
+    conversation_id: uuid.UUID | None,
     message_type: str,
     sender_role: str,
 ) -> None:

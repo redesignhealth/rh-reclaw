@@ -41,7 +41,7 @@ from exceptions import (
     RateLimitExceededError,
     UnknownConversationTypeError,
 )
-from models import Agent, AuditLog, Participant
+from models import Agent, AuditLog, Conversation, Participant
 from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
     CONVERSATION_TTL,
@@ -488,6 +488,15 @@ class TestStartConversation:
                 message_type="note",
             )
         assert exc_info.value.reason == "denied.boundary_crossing"
+        # The boundary check runs before any row is created -- a denial
+        # here must not leave an orphaned conversation/participant pair
+        # with no message (see _enforce_boundary_crossing's docstring).
+        rows = (
+            (await session.execute(select(Conversation).where(Conversation.created_by == owner.id)))
+            .scalars()
+            .all()
+        )
+        assert rows == []
 
     async def test_task_decline_as_initial_message_denied(self, session: AsyncSession) -> None:
         """``task_decline`` is member-role-restricted, but the initiator's
@@ -508,6 +517,12 @@ class TestStartConversation:
                 message_type="task_decline",
             )
         assert exc_info.value.reason == "denied.wrong_sender_role"
+        rows = (
+            (await session.execute(select(Conversation).where(Conversation.created_by == owner.id)))
+            .scalars()
+            .all()
+        )
+        assert rows == []
 
 
 class _FakeOwnershipClient:
@@ -684,6 +699,30 @@ class TestConversationOwnershipAdmission:
             .all()
         )
         assert "denied.ownership_unverified" in actions
+
+    async def test_empty_owner_set_soft_fail_denied(self, session: AsyncSession) -> None:
+        """An ownership_client that soft-fails to ``{"owners": []}`` instead
+        of raising must not admit two unverified agents to ``internal`` just
+        because two empty sets compare equal."""
+        owner = await _register(session, "int-owner-empty")
+        target = await _register(session, "int-target-empty")
+        client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": []},
+                target.id: {"is_shared": False, "owners": []},
+            }
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await start_conversation(
+                session,
+                actor_sub=owner.sub,
+                initiator_agent_id=owner.id,
+                conversation_type="internal",
+                target_agent_ids=[target.id],
+                initial_message=_request_payload(),
+                ownership_client=client,
+            )
+        assert exc_info.value.reason == "denied.ownership_unverified"
 
 
 # --- accept_invite / decline_invite -------------------------------------------
@@ -1417,6 +1456,31 @@ class TestPostMessageBoundaryCrossing:
         assert exc_info.value.reason == "denied.boundary_crossing"
         actions = await _audit_actions(session, conversation.id)
         assert "denied.boundary_crossing" in actions
+
+    async def test_empty_owner_set_soft_fail_denied(self, session: AsyncSession) -> None:
+        """A post-admission ownership_client that soft-fails to
+        ``{"owners": []}`` (rather than raising) must not let
+        ``frozenset() <= frozenset()`` silently pass the boundary check."""
+        owner, target, conversation, _client = await self._asymmetric_pair(
+            session, ["dan"], ["dan", "priya"]
+        )
+        soft_failing_client = _FakeOwnershipClient(
+            {
+                owner.id: {"is_shared": False, "owners": []},
+                target.id: {"is_shared": False, "owners": []},
+            }
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await post_message(
+                session,
+                actor_sub=owner.sub,
+                sender_agent_id=owner.id,
+                conversation_id=conversation.id,
+                message_type="note",
+                payload={"text": "hello"},
+                ownership_client=soft_failing_client,
+            )
+        assert exc_info.value.reason == "denied.ownership_unverified"
 
     async def test_note_from_shared_to_single_owner_does_not_cross(
         self, session: AsyncSession

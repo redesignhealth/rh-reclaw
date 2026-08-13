@@ -1468,3 +1468,26 @@ class TestListConversationsTool:
                 "comms_list_conversations",
                 {"cursor": "not-a-valid-cursor"},
             )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("role", "bogus"), ("type", "bogus"), ("state", "bogus")],
+    )
+    async def test_invalid_filter_value_maps_to_tool_error(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+        field: str,
+        value: str,
+    ) -> None:
+        await _register(main, test_session_factory, f"listconv-tool-bad-{field}")
+        token = _token(f"listconv-tool-bad-{field}")
+
+        with pytest.raises(ToolError, match=f"invalid_request: {field} must be one of"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_list_conversations",
+                {field: value},
+            )

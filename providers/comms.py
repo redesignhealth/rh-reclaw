@@ -565,17 +565,17 @@ async def list_conversations(
     response to get the next page. Both ``invited`` and ``active``
     participant statuses are included — declined and left are not.
     """
+    token = _require_token()
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
+
     if role is not None and role not in PARTICIPANT_ROLES:
         raise ToolError(f"invalid_request: role must be one of {sorted(PARTICIPANT_ROLES)}")
     if type is not None and type not in CONVERSATION_TYPES:
         raise ToolError(f"invalid_request: type must be one of {sorted(CONVERSATION_TYPES)}")
     if state is not None and state not in CONVERSATION_STATES:
         raise ToolError(f"invalid_request: state must be one of {sorted(CONVERSATION_STATES)}")
-
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
 
     async with get_session_factory()() as session:
         caller = await _resolve_caller_agent(session, sub)

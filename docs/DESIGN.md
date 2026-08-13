@@ -118,8 +118,8 @@ verified identity, at which point `agent_key` should be removed.
   revokes access immediately.
 - No pairwise grants in v1 (internal trust domain: colleagues don't need a consent
   handshake to ask availability). Conversation-open authorization is routed through a
-  single policy function (`may_open`), which is the seam where a grants/consent layer
-  lands when external counterparties arrive.
+  single policy function (`_authorize_conversation_open`), which is the seam where a
+  grants/consent layer lands when external counterparties arrive.
 
 ## 5. Data model (Postgres)
 
@@ -252,7 +252,11 @@ The flag gates legality within a conversation:
   owner).
 - `asymmetric` conversations allow `boundary_safe=True` always; `boundary_safe=False`
   only when the message does not cross an ownership boundary (sender's owner set
-  must be a superset of all other active participants' owner sets).
+  must be a superset of all other active-or-invited participants' owner sets — an
+  invited-but-not-yet-accepted participant's owner set was already validated against
+  the owner snapshot at invite time, so including them here keeps the boundary check
+  consistent with that snapshot invariant rather than leaving a one-post gap until
+  they accept).
 
 Currently registered message types (all `boundary_safe=True` unless noted):
 
@@ -317,9 +321,9 @@ only change needed when the platform endpoint ships.
 ## 10. Known extensions (explicitly deferred)
 
 - **Grants/consent layer**: required the moment a counterparty is outside the RH
-  trust domain. Lands in the `may_open` policy function + a grants table
-  (directional, type-scoped, expiring, human-approved). The anti-enumeration posture
-  of `list_agents` also changes then.
+  trust domain. Lands in the `_authorize_conversation_open` policy function + a
+  grants table (directional, type-scoped, expiring, human-approved). The
+  anti-enumeration posture of `list_agents` also changes then.
 - **Free-text fields**: allowed only behind a quarantine/review pipeline (sandboxed,
   tool-less extraction into typed messages). Raw text is stored for audit/human
   display but never enters a privileged agent's context.
