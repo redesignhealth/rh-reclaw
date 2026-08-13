@@ -31,15 +31,17 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-# reclaw-ea/ and reclaw-ea-mcp/ are sibling projects, each with their own
-# pyproject.toml, deps, and lint/type config -- neither is part of this
-# project and `uv sync --frozen` here never installs their dependencies
-# (scheduler-mcp, the local reclaw-ea path dependency, etc.), so scanning
-# them with this project's own tooling either double-lints them against the
-# wrong rules or fails outright on unresolved imports. See each sibling's
+# reclaw-ea/ is a sibling project with its own pyproject.toml, deps, and
+# lint/type config -- it's not part of this project (`uv sync --frozen`
+# here never installs its dependencies, e.g. the git-pinned scheduler-mcp),
+# so scanning it with this project's own tooling either double-lints it
+# against the wrong rules or fails outright on unresolved imports. See its
 # own README.md "Linting and type-checking" section for how to check it on
-# its own terms.
-exclude = ["reclaw-ea", "reclaw-ea-mcp"]
+# its own terms. reclaw-ea-mcp/ (the other former sibling) no longer
+# exists -- its providers/ea.py moved into this project's own providers/
+# (see docs/DESIGN.md §11a), which this project's own tooling now covers
+# directly.
+exclude = ["reclaw-ea"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
@@ -56,9 +58,9 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 strict = true
 python_version = "3.12"
 # "tests/" excludes this project's OWN test suite from strict mode;
-# "reclaw-ea/"/"reclaw-ea-mcp/" exclude the sibling projects entirely --
-# see the matching comment on [tool.ruff] above.
-exclude = ["tests/", "reclaw-ea/", "reclaw-ea-mcp/"]
+# "reclaw-ea/" excludes that sibling project entirely -- see the matching
+# comment on [tool.ruff] above.
+exclude = ["tests/", "reclaw-ea/"]
 
 [[tool.mypy.overrides]]
 module = ["key_value.*"]

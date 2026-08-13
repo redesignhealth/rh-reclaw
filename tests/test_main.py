@@ -520,3 +520,49 @@ class TestEndToEnd:
         ):
             with pytest.raises(ToolError, match="requires elevated permissions"):
                 asyncio.run(_call())
+
+
+def _import_main_with_providers(enabled_providers: str) -> object:
+    """Import a fresh ``main`` module with ``ENABLED_PROVIDERS`` set to
+    exactly ``enabled_providers`` (not merely defaulted/ambient)."""
+    sys.modules.pop("main", None)
+    with _OIDC_PATCH, _ENV_PATCH, patch.dict(os.environ, {"ENABLED_PROVIDERS": enabled_providers}):
+        import main
+
+        return main
+
+
+class TestEnabledProvidersMounting:
+    """main.py's mounted namespace set and merged scope dict must track
+    ENABLED_PROVIDERS exactly -- this is the actual integration point
+    providers/registry.py's own unit tests (test_registry.py) can't cover,
+    since those exercise the registry in isolation from main.py's own
+    merge/mount loop."""
+
+    def test_comms_only_mounts_exactly_comms_tools(self) -> None:
+        main = _import_main_with_providers("comms")
+        tools = asyncio.run(main.mcp.list_tools())  # type: ignore[attr-defined]
+        mounted = {t.name for t in tools}
+        assert mounted == set(main.TOOL_SCOPES)
+        assert all(name.startswith("comms_") for name in mounted)
+
+    def test_comms_and_ea_mounts_both_provider_tool_sets(self) -> None:
+        pytest.importorskip("reclaw_ea")
+        pytest.importorskip("scheduler_mcp")
+
+        main = _import_main_with_providers("comms,ea")
+        tools = asyncio.run(main.mcp.list_tools())  # type: ignore[attr-defined]
+        mounted = {t.name for t in tools}
+        assert mounted == set(main.TOOL_SCOPES)
+        assert any(name.startswith("comms_") for name in mounted)
+        assert any(name.startswith("ea_") for name in mounted)
+
+    def test_unset_reproduces_comms_only_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ENABLED_PROVIDERS", raising=False)
+        sys.modules.pop("main", None)
+        with _OIDC_PATCH, _ENV_PATCH:
+            import main
+
+        tools = asyncio.run(main.mcp.list_tools())  # type: ignore[attr-defined]
+        mounted = {t.name for t in tools}
+        assert all(name.startswith("comms_") for name in mounted)

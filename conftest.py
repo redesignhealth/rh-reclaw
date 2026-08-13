@@ -40,6 +40,34 @@ def _auth_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _setdefault(monkeypatch, "RH_AUTH_SECRET", "test-rh-auth-secret-long-enough-for-hs256")
 
 
+@pytest.fixture(autouse=True)
+def _reset_ea_provider_state() -> None:
+    """Reset providers.ea's process-global registries between tests.
+
+    ``_negotiators``/``_rule_store``/``_rules_seeded`` are module-level
+    (one multi-tenant service, per TECH-5065) -- without resetting them,
+    one test's owner identity would carry ledger/negotiation state into
+    the next test that happens to reuse the same identity string.
+
+    A no-op when the ea provider's extra dependencies (reclaw_ea,
+    scheduler_mcp) aren't installed -- a plain ``uv sync`` in this repo
+    never installs them (see ea-deps/ and scripts/install-ea-deps.sh), and
+    this fixture must not fail every test in the suite just because that
+    optional chain isn't present locally.
+    """
+    try:
+        import providers.ea as ea
+    except ImportError:
+        return
+    from reclaw_ea.fake_board import FakeBoard
+    from scheduler_mcp.rules import InMemoryRuleStore
+
+    ea._negotiators.clear()
+    ea._rules_seeded.clear()
+    ea._rule_store = InMemoryRuleStore()
+    ea._board = FakeBoard()
+
+
 def _setdefault(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
     """``monkeypatch.setenv`` equivalent of ``os.environ.setdefault``."""
     if name not in os.environ:

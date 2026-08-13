@@ -97,8 +97,12 @@ class TestExtractUpstreamClaims:
     async def test_missing_id_token_key_returns_none(self) -> None:
         proxy = _build_proxy()
 
-        assert await proxy._extract_upstream_claims({}) is None
-        assert await proxy._extract_upstream_claims({"access_token": "irrelevant"}) is None
+        with patch("auth.log_security_event") as mock_log:
+            assert await proxy._extract_upstream_claims({}) is None
+            assert await proxy._extract_upstream_claims({"access_token": "irrelevant"}) is None
+        # No id_token at all isn't a rejection -- there's nothing to reject,
+        # so this must not emit a spurious okta_id_token_rejected event.
+        mock_log.assert_not_called()
 
     async def test_empty_id_token_value_returns_none(self) -> None:
         proxy = _build_proxy()

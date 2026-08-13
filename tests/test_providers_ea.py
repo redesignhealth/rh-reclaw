@@ -7,16 +7,27 @@ Both owners' ``Negotiator``s share the same process-wide ``FakeBoard``
 (see providers/ea.py's module docstring) -- this is exactly what makes an
 internal same-process pilot pair work end-to-end today, ahead of
 TECH-5055's real board client.
+
+Requires the ea provider's extra dependencies (reclaw_ea, scheduler_mcp) --
+installed separately from this project's own uv.lock, see ea-deps/ and
+scripts/install-ea-deps.sh. Skipped entirely if they're not present (e.g. a
+plain `uv sync` with no install-ea-deps.sh run), rather than failing the
+whole suite for a dependency tree that's opt-in locally.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+pytest.importorskip("reclaw_ea")
+pytest.importorskip("scheduler_mcp")
+
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
@@ -25,13 +36,19 @@ _OIDC_PATCH = patch(
     "fastmcp.server.auth.oidc_proxy.OIDCProxy.get_oidc_configuration",
     return_value=_MOCK_OIDC_CONFIG,
 )
+# This service's registry-based main.py defaults ENABLED_PROVIDERS to
+# "comms" (see providers/registry.py) -- ea_* tools are only mounted when
+# "ea" is explicitly enabled. "comms,ea" (not bare "ea") matches the actual
+# dev config (docs/proposals/reclaw-ea-plugin-registry.md) and exercises
+# both providers mounted together, not ea in isolation.
+_ENABLED_PROVIDERS_PATCH = patch.dict(os.environ, {"ENABLED_PROVIDERS": "comms,ea"})
 
 _CONVERSATION_ERROR_MESSAGE = "conversation not found or not accessible"
 
 
 def _import_main() -> Any:
     sys.modules.pop("main", None)
-    with _OIDC_PATCH:
+    with _OIDC_PATCH, _ENABLED_PROVIDERS_PATCH:
         import main
 
         return main
@@ -133,15 +150,17 @@ class TestScopeToolRegistryParity:
     async def test_every_registered_ea_tool_has_a_scope_entry(self, main: Any) -> None:
         """Argus round 1 finding: a future tool that omits its TOOL_SCOPES
         entry is silently unreachable for M2M callers with no test-time
-        signal -- this asserts the two stay in lockstep."""
-        from scopes import TOOL_SCOPES
-
+        signal -- this asserts the two stay in lockstep. Checks against
+        main.TOOL_SCOPES (the merged dict of every enabled provider's own
+        TOOL_SCOPES, built in main.py), not a single provider's dict --
+        scopes.py itself only holds the generic, provider-agnostic
+        helpers now (see providers/comms.py and providers/ea.py)."""
         token = _token("alice-agent")
         with patch("main.get_access_token", return_value=token):
             async with Client(main.mcp) as client:
                 tools = await client.list_tools()
         registered = {tool.name for tool in tools}
-        assert registered == set(TOOL_SCOPES)
+        assert registered == set(main.TOOL_SCOPES)
 
 
 class TestCrossOwnerIsolation:

@@ -12,21 +12,29 @@ the comms layer.
 ## Layout
 
 ```
-main.py              # FastMCP server, observability + scope-enforcement middleware
-auth.py              # Okta OIDCProxy (humans) + rh-auth JWTVerifier (agents) via MultiAuth
-scopes.py            # TOOL_SCOPES catalog + fail-closed scope helpers
-identity.py          # Issuer-gated JWT identity resolution (anti-impersonation guards)
-observability.py     # structlog JSON events (tool_call, scope_denial, auth_flow, ...)
-providers/comms.py   # Comms provider sub-server — the MCP tools (see below)
-models.py            # SQLAlchemy 2.x async ORM models (agents, conversations,
-                      #   participants, messages, audit_log — DESIGN.md §5)
-db.py                # Async engine/session factory (DATABASE_URL, fail-fast)
-schemas.py           # Pydantic message-payload schemas (all registered message types)
-state_machine.py     # Conversation/participant state transitions (DESIGN.md §4, §6)
-service.py           # Domain/service layer: membership rules, uniform denials, audit
-exceptions.py        # Service-layer exception shapes (mapped to ToolError in providers/comms.py)
-migrations/          # Alembic migrations (async env.py); run `alembic upgrade head`
-tests/               # pytest suite (composition, scope fail-closed, domain logic, schema)
+main.py                 # FastMCP server: reads ENABLED_PROVIDERS, mounts each
+                         #   resolved provider, observability + scope-enforcement middleware
+auth.py                 # Okta OIDCProxy (humans) + rh-auth JWTVerifier (agents) via MultiAuth
+scopes.py               # Generic, provider-agnostic scope helpers (fail-closed lookups)
+identity.py             # Issuer-gated JWT identity resolution (anti-impersonation guards)
+observability.py        # structlog JSON events (tool_call, scope_denial, auth_flow, ...)
+providers/registry.py   # Plugin registry — ENABLED_PROVIDERS resolution, lazy per-provider loads
+providers/comms.py      # Comms provider sub-server — the MCP tools (see below); owns
+                         #   its own TOOL_SCOPES/RESOURCE_SCOPES
+providers/ea.py         # EA provider sub-server (dev-only today — see docs/DESIGN.md §11a);
+                         #   owns its own TOOL_SCOPES/RESOURCE_SCOPES
+models.py               # SQLAlchemy 2.x async ORM models (agents, conversations,
+                         #   participants, messages, audit_log — DESIGN.md §5)
+db.py                   # Async engine/session factory (DATABASE_URL, fail-fast)
+schemas.py              # Pydantic message-payload schemas (all registered message types)
+state_machine.py        # Conversation/participant state transitions (DESIGN.md §4, §6)
+service.py              # Domain/service layer: membership rules, uniform denials, audit
+exceptions.py           # Service-layer exception shapes (mapped to ToolError in providers/comms.py)
+migrations/             # Alembic migrations (async env.py); run `alembic upgrade head`
+ea-deps/                # Separate uv project locking ea's reclaw_ea/scheduler_mcp/rh-auth
+                         #   dependency chain in isolation — see docs/DESIGN.md §11a
+scripts/install-ea-deps.sh  # Installs ea-deps/'s packages into the main venv, additively
+tests/                  # pytest suite (composition, scope fail-closed, domain logic, schema)
 ```
 
 ## Domain layer
@@ -47,10 +55,12 @@ types gate boundary crossing via the `boundary_safe` flag — see
 
 ## MCP tool surface
 
-All tools below are mounted under the `comms` namespace (e.g. `whoami` in
-`providers/comms.py` is exposed as `comms_whoami`) and enrolled in the
-fail-closed `scopes.TOOL_SCOPES` registry. Source of truth:
-`providers/comms.py`.
+`main.py` mounts one namespace per entry in `ENABLED_PROVIDERS` (default
+`"comms"` — see `providers/registry.py`). Each provider owns its own
+`TOOL_SCOPES`/`RESOURCE_SCOPES` dict; `main.py` merges them at startup and
+enforces the merged set fail-closed for rh-auth callers.
+
+### `comms` (always enabled) — `providers/comms.py`
 
 | Tool | Scope | Purpose |
 |---|---|---|
@@ -67,6 +77,17 @@ fail-closed `scopes.TOOL_SCOPES` registry. Source of truth:
 | `comms_invite` | `comms:write` | Invite another board agent into an active conversation (as `invited`) |
 | `comms_leave` | `comms:write` | Leave a conversation the caller is currently `active` in |
 
+### `ea` (dev-only — see [docs/DESIGN.md §11a](docs/DESIGN.md)) — `providers/ea.py`
+
+| Tool | Scope | Purpose |
+|---|---|---|
+| `ea_whoami` | `ea:read` | Return the caller's identity, issuer, caller type, and scopes |
+| `ea_check_completion` | `ea:read` | Return the agreed slot for a conversation, or `None` |
+| `ea_negotiate` | `ea:write` | Open a negotiation with another owner's EA |
+| `ea_react_to_conversation` | `ea:run` | Process the counterparty's latest message; propose/confirm/decline |
+| `ea_request_booking` | `ea:write` | Request booking through the autonomy gate once a negotiation completes |
+| `ea_respond_to_approval` | `ea:write` | Resolve a pending booking-approval hold |
+
 The layout mirrors [rh-mcp](https://github.com/redesignhealth/rh-data-platform/tree/main/services/rh-mcp),
 the reference MCP implementation in the [RH tech guide](https://github.com/redesignhealth/rh-tech-guide).
 
@@ -82,13 +103,15 @@ Both humans and machines POST to the same `/mcp` endpoint; FastMCP
 - **Agents / services**: rh-auth HS256 Bearer JWT (issued by the Tech Team
   via `rh-auth issue --sub <agent> --scopes comms:read,...`), verified by a
   `JWTVerifier` keyed to `RH_AUTH_SECRET`. Every tool call is then gated by
-  the `TOOL_SCOPES` catalog in `scopes.py` — **fail-closed**: a tool without
+  the merged `TOOL_SCOPES` catalog (each enabled provider's own dict, see
+  `providers/comms.py`/`providers/ea.py`) — **fail-closed**: a tool without
   a registry entry rejects every rh-auth call, denial messages are uniform
   (anti-enumeration), and each denial emits a structured `scope_denial` log
   event.
 
-When adding a tool, enroll its mounted name (`comms_<tool>`) in
-`TOOL_SCOPES` in the same PR — `tests/test_main.py` fails otherwise.
+When adding a tool, enroll its mounted name (`<namespace>_<tool>`) in that
+provider's own `TOOL_SCOPES` in the same PR — `tests/test_main.py` fails
+otherwise.
 
 ## Local development
 
@@ -112,6 +135,11 @@ uv run python main.py        # http://127.0.0.1:8080/mcp
 
 # Or the full stack (server + Postgres) in Docker
 docker compose up --build
+
+# To also enable the ea provider locally (ENABLED_PROVIDERS=comms,ea):
+# requires the RH Tailscale tailnet (see docs/DESIGN.md §11a).
+bash scripts/install-ea-deps.sh .venv/bin/python
+ENABLED_PROVIDERS=comms,ea uv run python main.py
 ```
 
 Tests never touch the network: the Okta OIDC discovery call is patched out

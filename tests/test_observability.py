@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Iterator
 from unittest.mock import patch
 
+import pytest
 import structlog
 
 import observability
@@ -15,8 +18,10 @@ from observability import (
     log_auth_flow,
     log_auth_rejected,
     log_scope_denial,
+    log_security_event,
     log_tool_call,
     log_user_active,
+    obs_log,
 )
 
 
@@ -166,3 +171,107 @@ class TestFallbackLoggerPaths:
                 log_scope_denial(tool="comms_whoami", reason="missing_token", client_id="unknown")
         mock_warning.assert_called_once()
         assert mock_warning.call_args.kwargs.get("exc_info") is True
+
+    def test_log_security_event_fallback_does_not_raise(self) -> None:
+        with patch.object(observability.obs_log, "warning", side_effect=RuntimeError("boom")):
+            with patch.object(observability._fallback_logger, "warning") as mock_warning:
+                log_security_event("some_event", foo="bar")
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs.get("exc_info") is True
+
+
+class TestLogSecurityEvent:
+    def test_emits_structured_fields(self) -> None:
+        with patch.object(obs_log, "warning") as mock_warning:
+            log_security_event("okta_id_token_rejected", reason="alg_none", severity="critical")
+        mock_warning.assert_called_once_with(
+            "okta_id_token_rejected", reason="alg_none", severity="critical"
+        )
+
+    def test_severity_omitted_when_not_passed(self) -> None:
+        with patch.object(obs_log, "warning") as mock_warning:
+            log_security_event("some_event", foo="bar")
+        mock_warning.assert_called_once_with("some_event", foo="bar")
+
+
+@pytest.fixture
+def real_logging_pipeline(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Configures the REAL structlog/stdlib logging pipeline for a test,
+    and guarantees it's restored afterward regardless of what the test
+    does or raises.
+
+    Each teardown step gets its own ``finally`` so an exception in one
+    step can't skip the rest -- the exact leak this fixture exists to
+    prevent. Handlers removed here are also explicitly ``.close()``d:
+    ``logging.basicConfig``'s ``StreamHandler`` participates in the
+    stdlib ``_handlerList`` weak-ref registry, and dropping the reference
+    without closing it leaves a stale entry.
+
+    ``LOG_LEVEL`` is pinned to ``INFO`` so this fixture (and every test
+    using it) is hermetic regardless of the ambient env: ``obs_log``
+    events log at ``warning``, so a runner with ``LOG_LEVEL=ERROR`` would
+    otherwise filter them out and fail with an opaque empty-output message.
+    """
+    monkeypatch.setenv("LOG_LEVEL", "INFO")
+    root_logger = logging.getLogger()
+    prior_handlers = list(root_logger.handlers)
+    prior_level = root_logger.level
+    try:
+        yield
+    finally:
+        try:
+            structlog.reset_defaults()
+        finally:
+            try:
+                for handler in set(root_logger.handlers) - set(prior_handlers):
+                    root_logger.removeHandler(handler)
+                    handler.close()
+            finally:
+                root_logger.setLevel(prior_level)
+
+
+_NO_OUTPUT_MESSAGE = (
+    "configure_logging() produced no captured stdout -- capsys may not be "
+    "capturing structlog output; check test ordering and PrintLogger caching"
+)
+
+
+class TestRealLoggingPipeline:
+    """Exercises the REAL configured structlog/stdlib pipeline end to end,
+    not a mocked ``obs_log`` -- mocking would leave these behavioral claims
+    (ExceptionRenderer actually renders a traceback; severity/extra fields
+    actually reach the JSON output) with no regression protection: removing
+    ExceptionRenderer from the processor chain would leave a mock-based
+    test green."""
+
+    def test_exc_info_renders_a_real_traceback_through_the_full_pipeline(
+        self, real_logging_pipeline: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        configure_logging()
+        try:
+            raise ValueError("boom-for-traceback-test")
+        except ValueError:
+            log_security_event("test_exception_event", exc_info=True)
+
+        output = capsys.readouterr().out
+        assert output.strip(), _NO_OUTPUT_MESSAGE
+        record = json.loads(output.strip().splitlines()[-1])
+        assert record["event"] == "test_exception_event"
+        assert "exception" in record
+        assert "ValueError" in record["exception"]
+        assert "boom-for-traceback-test" in record["exception"]
+
+    def test_severity_field_appears_in_real_json_output(
+        self, real_logging_pipeline: None, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        configure_logging()
+        log_security_event("okta_id_token_rejected", reason="alg_none", severity="critical")
+
+        output = capsys.readouterr().out
+        assert output.strip(), _NO_OUTPUT_MESSAGE
+        record = json.loads(output.strip().splitlines()[-1])
+        assert record["event"] == "okta_id_token_rejected"
+        assert record["severity"] == "critical"
+        # The **fields passthrough (everything besides severity) also
+        # needs verifying against the real pipeline, not just a mock.
+        assert record["reason"] == "alg_none"

@@ -467,6 +467,48 @@ pattern to copy if a future tool needs cross-service SSM reads.
 That infrastructure lives in and is reviewed as part of `rh-data-platform`,
 not built or changed inside `reclaw-comms-mcp` itself.
 
+### 11a. The `ea` provider (plugin-host model)
+
+`main.py` reads `ENABLED_PROVIDERS` (default `"comms"`) and mounts every
+resolved provider from `providers/registry.py` on this same FastMCP process —
+one host, one auth setup, one deploy, multiple namespaces. See
+`docs/proposals/reclaw-ea-plugin-registry.md` for the full architecture
+rationale and `providers/registry.py`'s own docstring for the mechanics
+(fail-closed on an unknown/empty value, lazy per-provider imports).
+
+`ea` wraps `reclaw_ea.orchestrator.Negotiator` — per-owner scheduling
+negotiation, holds/booking discipline, and the autonomy gate, for the reclaw
+agent run-loop host (TECH-5084, not yet built). It's merged into this repo's
+code but **enabled in dev only** (`ENABLED_PROVIDERS=comms,ea`); prod stays
+`comms`-only, gated on:
+
+* **Board** (TECH-5055, in progress): `_board` is a single process-wide
+  `FakeBoard`, not a real `reclaw-comms-mcp` client — works for a
+  same-process internal pilot pair, not across processes/services.
+* **Persistence** (TECH-5083): in-memory `Ledger`/`ApprovalSurface`/
+  `OutcomeStore` per owner — state does not survive a restart.
+* **External-counterparty detection** (TECH-5069): `default_is_external` is
+  not wired to any real domain/org-membership resolution, so **every
+  counterparty is currently classified as internal** — the "an external
+  counterparty is always `ask_first`" autonomy-gate invariant is NOT YET
+  enforced for any actual external party.
+* **Run-loop host** (TECH-5084): no LLM-driven caller exists yet to actually
+  drive `ea`'s tools in production.
+
+`ea`'s dependency chain (`reclaw_ea`, `scheduler_mcp`, and transitively
+`rh-auth`) can't be added to this repo's own `pyproject.toml`/`uv.lock`:
+`rh-auth` is a private Gitea package with no reported upload dates and no
+Windows build, which makes the combined resolution unsatisfiable under this
+project's `exclude-newer`/multi-platform settings even after loosening them.
+`ea-deps/` is a separate, minimal uv project that resolves+locks that chain
+in isolation; `scripts/install-ea-deps.sh` installs it into the shared venv
+additively, on top of (never replacing) this project's own pinned packages.
+Building the image therefore also needs network access to the private Gitea
+index (`gitea.drum-mackarel.ts.net`), reachable only over the Redesign
+Health Tailscale tailnet — CI joins the tailnet via a dedicated OIDC role
+(`rh-reclaw-ci-secret-reader`) before building, mirroring the pattern
+already proven in `rh-scheduler-mcp`'s and `redesign-ai`'s own CI.
+
 ## 12. Delivery plan
 
 1. ~~Standards-compliant scaffold~~: done (FastMCP + MultiAuth, scopes middleware,
@@ -481,5 +523,8 @@ not built or changed inside `reclaw-comms-mcp` itself.
 3. ~~Infrastructure (`rh-data-platform`, tech-team reviewed)~~: done (TECH-5050) —
    `mcp-server` module call + dedicated RDS Postgres + SSM secrets + EFS, per §11.
    Applied and running in both dev and prod.
-4. Integrate: EA agents (separate workstream, `reclaw-ea-implementation`) connect as
-   MCP clients with rh-auth tokens.
+4. ~~Integrate: EA agents connect as MCP clients~~: superseded. `ea` (formerly
+   `reclaw-ea-mcp`, a separate service) is now a second provider mounted on this
+   same FastMCP process, alongside `comms` — see §11a. The plugin-registry
+   design proposal (`docs/proposals/reclaw-ea-plugin-registry.md`) has the full
+   rationale for why a second mounted provider beats a second ECS service.
