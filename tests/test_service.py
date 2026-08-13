@@ -42,7 +42,7 @@ from exceptions import (
     UnknownConversationTypeError,
 )
 from models import Agent, AuditLog, Conversation, Participant
-from schemas import MAX_PAYLOAD_BYTES, PayloadValidationError
+from schemas import MAX_ACCEPTED_TYPE_LENGTH, MAX_PAYLOAD_BYTES, PayloadValidationError
 from service import (
     CONVERSATION_TTL,
     MAX_CONVERSATION_STARTS_PER_HOUR,
@@ -396,24 +396,27 @@ class TestRegisterAgent:
     ) -> None:
         """Boundary test for the per-entry length cap (Argus round 3):
         A single oversized entry (101 chars) must be rejected outright."""
-        with pytest.raises(ValueError, match="accepted_types entry exceeds 100 characters"):
+        with pytest.raises(
+            ValueError,
+            match=f"accepted_types entry exceeds {MAX_ACCEPTED_TYPE_LENGTH} characters",
+        ):
             await _register(
                 session,
                 "agent-oversized-entry",
-                accepted_types=["x" * 101],
+                accepted_types=["x" * (MAX_ACCEPTED_TYPE_LENGTH + 1)],
             )
 
     async def test_accepted_type_entry_at_max_length_succeeds(
         self, session: AsyncSession
     ) -> None:
         """Boundary-value test (Argus round 3): an entry exactly at
-        MAX_ACCEPTED_TYPE_LENGTH (100 chars) must be accepted."""
+        MAX_ACCEPTED_TYPE_LENGTH must be accepted."""
         agent = await _register(
             session,
             "agent-at-cap",
-            accepted_types=["x" * 100],
+            accepted_types=["x" * MAX_ACCEPTED_TYPE_LENGTH],
         )
-        assert agent.accepted_types == ["x" * 100]
+        assert agent.accepted_types == ["x" * MAX_ACCEPTED_TYPE_LENGTH]
 
 
 # --- start_conversation --------------------------------------------------------
