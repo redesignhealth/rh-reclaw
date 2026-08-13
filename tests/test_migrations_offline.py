@@ -54,9 +54,13 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
     # TECH-5118 round 8 fix: upgrade()'s index drops are schema-qualified
     # to match the guard. This is upgrade()-side coverage only -- alembic
     # --sql only emits forward DDL, so downgrade()'s equivalent
-    # qualification (round 10/11 fixes) has no offline-SQL coverage here;
-    # it's exercised only by the live-DB _migrated_schema fixture
-    # (test_db_models.py) via upgrade/downgrade/upgrade round-trips.
+    # qualification has no offline-SQL coverage here. The live-DB
+    # _migrated_schema autouse fixture (defined identically in
+    # test_db_models.py, test_comms_tools.py, and test_service.py) only
+    # exercises downgrade() when a prior test module left the DB already at
+    # head -- on a fresh DB its "downgrade base" step is a no-op, since
+    # there's nothing to downgrade from, so even that path isn't a
+    # guaranteed round-trip through this specific downgrade().
     assert "DROP INDEX IF EXISTS public.idx_tasks_assignee_id_status" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_at_id" in result.stdout
     assert "DROP INDEX IF EXISTS public.idx_tasks_created_by_status" in result.stdout

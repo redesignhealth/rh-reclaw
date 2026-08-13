@@ -2269,10 +2269,17 @@ class TestInbox:
     async def test_unread_reflects_expired_state(self, session: AsyncSession) -> None:
         """Same reconciliation as above, but through the `unread` branch
         (accepted membership) rather than `pending_invites` -- both branches
-        go through _conversation_dict, but only one was previously covered."""
+        go through _conversation_dict, but only one was previously covered.
+
+        Expiry is pushed into the past AFTER accept_invite() returns, not
+        passed to start_conversation() up front: accept_invite() calls
+        _maybe_expire(), which would otherwise flip the stored column to
+        "expired" and commit it before inbox() ever runs, making this test
+        pass even if _conversation_dict's own reconciliation were deleted
+        (as test_service.py's test_pending_invite_reflects_expired_state
+        does not exercise, since accept_invite() is never called there)."""
         agent = await _register(session, "inbox-expired-2")
         sender = await _register(session, "inbox-expired-sender-2")
-        already_expired = datetime.now(UTC) - timedelta(seconds=1)
         conversation = await start_conversation(
             session,
             actor_sub=sender.sub,
@@ -2280,11 +2287,12 @@ class TestInbox:
             conversation_type="open",
             target_agent_ids=[agent.id],
             initial_message=_request_payload(),
-            expires_at=already_expired,
         )
         await accept_invite(
             session, actor_sub=agent.sub, agent_id=agent.id, conversation_id=conversation.id
         )
+        conversation.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+        await session.commit()
 
         result = await inbox(session, caller_agent_id=agent.id)
         assert len(result["unread"]) == 1

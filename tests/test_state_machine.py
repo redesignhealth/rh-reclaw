@@ -172,10 +172,14 @@ class TestIsBoundaryCrossingSafe:
                 "is_boundary_crossing_safe has no explicit branch for it"
             )
             # Also prove it's actually handled -- boundary_safe=True is
-            # legal for all three types (for "internal" unconditionally,
-            # since the type itself decides there, not the flag; for
-            # "open"/"asymmetric" specifically because boundary_safe=True is
-            # what each of their branches requires) -- not just membership
-            # in a hardcoded tuple this test could drift from the real
-            # function's own branches.
+            # sufficient for legality in all three types (for "internal"
+            # unconditionally, since the type itself decides there, not the
+            # flag; for "open" because its branch requires boundary_safe
+            # directly; for "asymmetric" via its own short-circuit, though
+            # with the _EMPTY owner sets used here the subset check would
+            # also pass boundary_safe=False -- test_asymmetric_boundary_safe_
+            # always_legal, with non-empty disjoint sets, is what actually
+            # pins the asymmetric short-circuit) -- not just membership in a
+            # hardcoded tuple this test could drift from the real function's
+            # own branches.
             assert is_boundary_crossing_safe(conversation_type, True, _EMPTY, _EMPTY) is True

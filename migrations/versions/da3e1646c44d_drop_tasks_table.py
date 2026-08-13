@@ -97,10 +97,16 @@ def downgrade() -> None:
     # unrecoverable by reverting this migration. Downgrade is provided for
     # schema completeness only, not as a data-recovery path.
     #
-    # Schema-qualified throughout, symmetric with upgrade()'s public.tasks
-    # qualification -- otherwise a connection whose search_path isn't
-    # public-first could recreate this table/indexes in a different schema
-    # than upgrade() dropped them from.
+    # The table and its indexes are schema-qualified (schema="public"),
+    # symmetric with upgrade()'s public.tasks qualification -- otherwise a
+    # connection whose search_path isn't public-first could recreate them
+    # in a different schema than upgrade() dropped them from. FK reference
+    # strings (["agents.id"]) are deliberately left unqualified, matching
+    # this repo's other migrations (e.g. ef8394b37c8d) -- qualifying only
+    # the FK target string doesn't change where the constraint itself is
+    # created (that's governed by the table's own schema), and an
+    # unqualified referent avoids autogenerate metadata/reflected-DB
+    # mismatches against the rest of the schema.
     op.create_table(
         "tasks",
         sa.Column(
@@ -144,10 +150,8 @@ def downgrade() -> None:
             name="ck_tasks_status",
         ),
         sa.CheckConstraint("created_by <> assignee_id", name="ck_tasks_distinct_parties"),
-        sa.ForeignKeyConstraint(
-            ["assignee_id"], ["public.agents.id"], name="tasks_assignee_id_fkey"
-        ),
-        sa.ForeignKeyConstraint(["created_by"], ["public.agents.id"], name="tasks_created_by_fkey"),
+        sa.ForeignKeyConstraint(["assignee_id"], ["agents.id"], name="tasks_assignee_id_fkey"),
+        sa.ForeignKeyConstraint(["created_by"], ["agents.id"], name="tasks_created_by_fkey"),
         sa.PrimaryKeyConstraint("id", name="tasks_pkey"),
         schema="public",
     )
