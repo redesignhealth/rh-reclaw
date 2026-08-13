@@ -98,10 +98,14 @@ agent-token access gate, not a human-user gate.
 **Membership rules (v1):**
 
 - Any registered agent may start a conversation with N other agents. All named
-  targets must exist and be active. (`accepted_types` is not consulted at
-  admission time — conversation-type admission is Axis 1's ownership rule
-  below, unrelated to which message types a target has declared. It is
-  enforced per-message, at send time — see the capability gate below.)
+  targets must exist and be active. (`accepted_types` is not checked at
+  invitation/join time — conversation-type admission is Axis 1's ownership
+  rule below, unrelated to which message types a target has declared. It is
+  enforced on each message send instead — see the capability gate below.
+  Because starting a conversation requires an initial message, a target
+  that hasn't declared that message's type still causes conversation
+  creation to fail — an admission-shaped effect via the mandatory first
+  message, not a separate admission check of its own.)
   The creator becomes an `active` participant with `role=owner`. **Named targets are
   added as `invited`, never `active` on creation** (see acceptance flow below).
 - **Any active member may invite others** (creator is `owner` so this can tighten to
@@ -297,11 +301,15 @@ before the state-machine transition.
 ### Capability gate: `accepted_types`
 
 Independent of, and checked alongside, the `boundary_safe` crossing rule above:
-every other active-or-invited participant/target must have `message_type` in
-their own `agents.accepted_types`, or the send is denied
-(`denied.message_type_not_accepted`, uniform `AccessDeniedError`, detail omits
-which recipient rejected it or their declared set — same anti-enumeration
-posture as `denied.boundary_crossing`).
+every other **active** participant/target (invited-but-not-yet-accepted
+participants are excluded here, unlike the boundary-crossing check's
+active-or-invited set — inviting someone must not retroactively block sends
+between the already-active members just because the invitee hasn't declared
+support yet; the check simply applies to them once they accept and become
+active) must have `message_type` in their own `agents.accepted_types`, or the
+send is denied (`denied.message_type_not_accepted`, uniform
+`AccessDeniedError`, detail omits which recipient rejected it or their
+declared set — same anti-enumeration posture as `denied.boundary_crossing`).
 
 This is deliberately **universal**, unlike `boundary_safe`: `boundary_safe`
 answers a trust question (is this payload shaped safely enough to cross an
@@ -318,6 +326,15 @@ their `accepted_types`, exactly as any other pair would.
 Checked per-recipient, not aggregated across the other side the way
 `boundary_safe`'s owner-set check is — `accepted_types` is a fact about one
 specific agent's deployment, not about an owner as a whole.
+
+**Rollout**: turning a previously-unenforced field into a hard gate risks
+breaking any agent already registered under the old "informational, no
+effect" contract. Migration `e1db7c2e6b70` backfills every pre-existing
+`agents` row's `accepted_types` to the full registered message-type set at
+deploy time — a one-time grandfather clause, not a permanent behavior.
+Agents registered after that migration runs are unaffected; their own
+declared set is enforced normally, including any later re-registration that
+deliberately narrows it.
 
 ### Per-type TTL policy
 

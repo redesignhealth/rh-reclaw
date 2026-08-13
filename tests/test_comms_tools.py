@@ -39,7 +39,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from schemas import MESSAGE_TYPES
+from schemas import MAX_ACCEPTED_TYPES, MESSAGE_TYPES
+
+assert len(MESSAGE_TYPES) <= MAX_ACCEPTED_TYPES, (
+    "sorted(MESSAGE_TYPES) is used as _register's default accepted_types below -- "
+    "update that default (e.g. slice to MAX_ACCEPTED_TYPES) or raise MAX_ACCEPTED_TYPES "
+    "if the registry grows past it"
+)
 
 SERVICE_ROOT = Path(__file__).parent.parent
 _DEFAULT_TEST_DATABASE_URL = "postgresql://postgres:postgres@localhost:55432/reclaw_comms"
@@ -1139,6 +1145,38 @@ class TestTaskLifecycleToolLayer:
                     "conversation_id": conversation_id,
                     "message_type": "task_decline",
                     "payload": {"reason": "unable_to_complete"},
+                },
+            )
+
+
+class TestMessageTypeAcceptedToolLayer:
+    """MCP-boundary counterpart to test_service.py's
+    TestMessageTypeAcceptedCapability -- confirms denied.message_type_not_accepted
+    collapses to the same uniform ToolError every other denial family does,
+    not a leaked reason string."""
+
+    async def test_denied_uniformly_at_tool_boundary(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(main, test_session_factory, "cap-tool-initiator")
+        target = await _register(
+            main, test_session_factory, "cap-tool-target", accepted_types=["confirm"]
+        )
+        initiator_token = _token("cap-tool-initiator")
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                initiator_token,
+                "comms_start_conversation",
+                {
+                    "conversation_type": "open",
+                    "target_agent_ids": [target["agent_id"]],
+                    "initial_message": _availability_request(),
+                    "message_type": "availability_request",
                 },
             )
 

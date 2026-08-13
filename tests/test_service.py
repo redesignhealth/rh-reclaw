@@ -65,6 +65,12 @@ from service import (
     register_agent,
 )
 
+assert len(MESSAGE_TYPES) <= MAX_ACCEPTED_TYPES, (
+    "sorted(MESSAGE_TYPES) is used as _register's default accepted_types below -- "
+    "update that default (e.g. slice to MAX_ACCEPTED_TYPES) or raise MAX_ACCEPTED_TYPES "
+    "if the registry grows past it"
+)
+
 
 async def start_conversation(
     session: AsyncSession, *, ownership_client: OwnershipClient | None = None, **kwargs: Any
@@ -1900,6 +1906,114 @@ class TestMessageTypeAcceptedCapability:
                 ownership_client=client,
             )
         assert exc_info.value.reason == "denied.message_type_not_accepted"
+        actions = await _audit_actions(session, conversation.id)
+        assert "denied.message_type_not_accepted" in actions
+
+    async def test_senders_own_accepted_types_is_not_consulted(self, session: AsyncSession) -> None:
+        """Only the RECIPIENT's accepted_types gates a send -- a sender
+        with a narrow declaration that doesn't include the type it's
+        sending must not be denied for its own lack of a declaration."""
+        initiator = await _register(session, "cap-sender-invariant-initiator")
+        # "confirm" deliberately absent -- other is about to SEND that type,
+        # and a sender's own accepted_types must not gate its own sends.
+        # "availability_request" is present so other can still receive the
+        # conversation-opening message below.
+        other = await _register(
+            session, "cap-sender-invariant-other", accepted_types=["availability_request"]
+        )
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[other.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=other.sub, agent_id=other.id, conversation_id=conversation.id
+        )
+        # other's own accepted_types does NOT include "confirm" -- but it's
+        # sending, not receiving, this message. initiator's broad default
+        # accepts it; other's own declaration is irrelevant to a message
+        # IT sends, only to messages sent TO it.
+        message = await post_message(
+            session,
+            actor_sub=other.sub,
+            sender_agent_id=other.id,
+            conversation_id=conversation.id,
+            message_type="confirm",
+            payload=_confirm_payload(),
+        )
+        assert message.type == "confirm"
+
+    async def test_multi_target_denied_when_any_target_has_not_declared_type(
+        self, session: AsyncSession
+    ) -> None:
+        """One non-accepting target among several is enough to deny the
+        whole send -- not an any-accepts-it-passes aggregation."""
+        initiator = await _register(session, "cap-multi-initiator")
+        accepting = await _register(
+            session, "cap-multi-accepting", accepted_types=["availability_request"]
+        )
+        non_accepting = await _register(
+            session, "cap-multi-non-accepting", accepted_types=["confirm"]
+        )
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await start_conversation(
+                session,
+                actor_sub=initiator.sub,
+                initiator_agent_id=initiator.id,
+                conversation_type="open",
+                target_agent_ids=[accepting.id, non_accepting.id],
+                initial_message=_request_payload(),
+                message_type="availability_request",
+            )
+        assert exc_info.value.reason == "denied.message_type_not_accepted"
+
+    async def test_invite_does_not_retroactively_block_existing_members(
+        self, session: AsyncSession
+    ) -> None:
+        """Regression: inviting a narrow-capability agent into an ongoing
+        conversation must not block the already-ACTIVE members from
+        continuing to exchange types the new invitee simply hasn't
+        accepted (and hasn't been asked to accept) yet -- the capability
+        gate only applies to a participant once they're active themselves."""
+        initiator = await _register(session, "cap-invite-initiator")
+        member = await _register(session, "cap-invite-member")
+        conversation = await start_conversation(
+            session,
+            actor_sub=initiator.sub,
+            initiator_agent_id=initiator.id,
+            conversation_type="open",
+            target_agent_ids=[member.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=member.sub, agent_id=member.id, conversation_id=conversation.id
+        )
+        narrow_invitee = await _register(
+            session, "cap-invite-narrow-invitee", accepted_types=["confirm"]
+        )
+        await invite(
+            session,
+            actor_sub=member.sub,
+            inviter_agent_id=member.id,
+            conversation_id=conversation.id,
+            target_agent_id=narrow_invitee.id,
+        )
+        # member and initiator keep exchanging counter_proposal (neither
+        # declares "confirm" as their ONLY type -- both have the
+        # permissive default) even though narrow_invitee, still merely
+        # invited, hasn't declared support for it.
+        message = await post_message(
+            session,
+            actor_sub=member.sub,
+            sender_agent_id=member.id,
+            conversation_id=conversation.id,
+            message_type="counter_proposal",
+            payload=_counter_proposal_payload(),
+        )
+        assert message.type == "counter_proposal"
 
     async def test_post_message_allowed_when_recipient_declared_type(
         self, session: AsyncSession

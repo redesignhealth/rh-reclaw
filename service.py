@@ -106,6 +106,7 @@ from __future__ import annotations
 import itertools
 import logging
 import uuid
+from collections.abc import Sequence
 from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime, timedelta
 from typing import Any, NoReturn, Protocol
@@ -1067,7 +1068,7 @@ async def start_conversation(
         actor_sub=actor_sub,
         sender_agent_id=initiator.id,
         conversation_id=None,
-        other_agent_ids=[t.id for t in targets],
+        other_agents=[(t.id, t.accepted_types) for t in targets],
         message_type=message_type,
     )
     await _enforce_boundary_crossing(
@@ -1618,7 +1619,7 @@ async def _enforce_message_type_accepted(
     actor_sub: str,
     sender_agent_id: uuid.UUID,
     conversation_id: uuid.UUID | None,
-    other_agent_ids: list[uuid.UUID],
+    other_agents: Sequence[tuple[uuid.UUID, list[str]]],
     message_type: str,
 ) -> None:
     """Enforce that every other participant/target has declared
@@ -1629,21 +1630,28 @@ async def _enforce_message_type_accepted(
     about that specific running agent, unrelated to who sent it — so
     unlike ``_enforce_boundary_crossing``, this check is universal and
     applies even to ``internal`` same-owner traffic. Checked per-recipient
-    (each of ``other_agent_ids`` individually), not aggregated, since
+    (each of ``other_agents`` individually), not aggregated, since
     ``accepted_types`` is a per-agent fact, not a per-owner one.
+
+    Takes already-resolved ``(agent_id, accepted_types)`` pairs rather than
+    IDs to look up itself: every caller already has this data from a query
+    that's fail-closed by construction (``_resolve_targets`` for
+    ``start_conversation``; the ``participants JOIN agents`` in
+    ``_check_boundary_crossing``, which can't miss a row given
+    ``participants.agent_id``'s FK to ``agents.id``) — so there is no
+    "agent ID present but its accepted_types row missing" case to guard
+    against here, and no second round-trip to fetch what the caller
+    already loaded.
+
+    Sorted by agent ID before iterating so which recipient's denial gets
+    audited is deterministic across runs, not an artifact of query-plan
+    ordering, when more than one recipient would reject.
 
     Detail intentionally omits which recipient rejected it or their
     ``accepted_types``, mirroring ``denied.boundary_crossing``'s posture of
     not leaking a target's declared state to the sender.
     """
-    if not other_agent_ids:
-        return
-    rows = (
-        (await session.execute(select(Agent.accepted_types).where(Agent.id.in_(other_agent_ids))))
-        .scalars()
-        .all()
-    )
-    for accepted in rows:
+    for _agent_id, accepted in sorted(other_agents, key=lambda pair: str(pair[0])):
         if message_type not in accepted:
             await _deny(
                 session,
@@ -1670,30 +1678,47 @@ async def _check_boundary_crossing(
     (``active``/``invited``) participants for the other side rather than
     requiring the caller to already know them.
 
-    Queried unconditionally (unlike the old asymmetric-and-unsafe-only
-    gating this replaced): ``_enforce_message_type_accepted`` needs the
-    other side's IDs on every send, not just the narrower cases
-    ``_enforce_boundary_crossing`` itself needs an ownership lookup for.
+    Single join query (participants + agents), not two separate
+    round-trips: covers both ``_enforce_boundary_crossing``'s
+    active-or-invited "other" set (queried unconditionally now, unlike the
+    old asymmetric-and-unsafe-only gating this replaced — boundary
+    crossing itself only needs an ownership lookup for the narrower case,
+    but ``_enforce_message_type_accepted`` needs participant data on every
+    send) and the capability gate's narrower active-only set below.
+
+    The capability gate deliberately excludes ``invited`` (not yet
+    accepted) participants, unlike the boundary-crossing set: an invite
+    must not retroactively block existing ACTIVE members from sending
+    message types they were already exchanging before the invite, just
+    because the new invitee hasn't declared support for them yet. Once an
+    invitee accepts and becomes ``active``, the very next send is checked
+    against them normally — this only defers the check, it doesn't skip
+    it forever. (Boundary-crossing's own "other" set has a different,
+    already-established reason to include ``invited``: keeping it
+    consistent with the owner-set-freeze snapshot taken at invite time --
+    see that function's own docstring.)
     """
-    other_ids = list(
-        (
-            await session.execute(
-                select(Participant.agent_id).where(
-                    Participant.conversation_id == conversation.id,
-                    Participant.agent_id != sender_agent_id,
-                    Participant.status.in_(("active", "invited")),
-                )
+    rows = (
+        await session.execute(
+            select(Participant.agent_id, Participant.status, Agent.accepted_types)
+            .join(Agent, Agent.id == Participant.agent_id)
+            .where(
+                Participant.conversation_id == conversation.id,
+                Participant.agent_id != sender_agent_id,
+                Participant.status.in_(("active", "invited")),
             )
         )
-        .scalars()
-        .all()
-    )
+    ).all()
+    other_ids = [agent_id for agent_id, _status, _accepted in rows]
+    capability_others = [
+        (agent_id, accepted) for agent_id, status, accepted in rows if status == "active"
+    ]
     await _enforce_message_type_accepted(
         session,
         actor_sub=actor_sub,
         sender_agent_id=sender_agent_id,
         conversation_id=conversation.id,
-        other_agent_ids=other_ids,
+        other_agents=capability_others,
         message_type=message_type,
     )
     await _enforce_boundary_crossing(
