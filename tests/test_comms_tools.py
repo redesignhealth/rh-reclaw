@@ -127,7 +127,7 @@ async def _clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     async with engine.begin() as conn:
         await conn.execute(
             text(
-                "TRUNCATE TABLE audit_log, tasks, messages, participants, conversations, agents "
+                "TRUNCATE TABLE audit_log, messages, participants, conversations, agents "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -216,7 +216,7 @@ async def _register(
         "comms_register",
         {
             "display_name": display_name or sub,
-            "accepted_types": accepted_types or ["scheduling.availability"],
+            "accepted_types": accepted_types or ["availability_request"],
         },
     )
     return result
@@ -272,11 +272,11 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Agent A", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "Agent A", "accepted_types": ["availability_request"]},
         )
         assert result["sub"] == "agent-a"
         assert result["display_name"] == "Agent A"
-        assert result["accepted_types"] == ["scheduling.availability"]
+        assert result["accepted_types"] == ["availability_request"]
         assert result["status"] == "active"
         assert result["owner_email"] == "ownera@redesignhealth.com"
 
@@ -292,14 +292,14 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "B v1", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "B v1", "accepted_types": ["availability_request"]},
         )
         second = await _call(
             main,
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "B v2", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "B v2", "accepted_types": ["availability_request"]},
         )
         assert first["agent_id"] == second["agent_id"]
         assert second["display_name"] == "B v2"
@@ -319,7 +319,7 @@ class TestRegister:
             "comms_register",
             {
                 "display_name": "Bond 007",
-                "accepted_types": ["scheduling.availability"],
+                "accepted_types": ["availability_request"],
                 "agent_key": "bond-007",
             },
         )
@@ -330,7 +330,7 @@ class TestRegister:
             "comms_register",
             {
                 "display_name": "Pepper Pots",
-                "accepted_types": ["scheduling.availability"],
+                "accepted_types": ["availability_request"],
                 "agent_key": "pepper-pots",
             },
         )
@@ -352,7 +352,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "No Key", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "No Key", "accepted_types": ["availability_request"]},
         )
         assert result["sub"] == "agent-no-key"
 
@@ -368,7 +368,7 @@ class TestRegister:
                 "comms_register",
                 {
                     "display_name": "Empty Key",
-                    "accepted_types": ["scheduling.availability"],
+                    "accepted_types": ["availability_request"],
                     "agent_key": "   ",
                 },
             )
@@ -385,7 +385,7 @@ class TestRegister:
                 "comms_register",
                 {
                     "display_name": "Oversized Key",
-                    "accepted_types": ["scheduling.availability"],
+                    "accepted_types": ["availability_request"],
                     "agent_key": "x" * 101,
                 },
             )
@@ -399,7 +399,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Self", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "Self", "accepted_types": ["availability_request"]},
         )
         # No owner_sub/owner_email claims on the token — self-owned fallback.
         assert result["owner_email"] == "agent-self-owned"
@@ -422,7 +422,7 @@ class TestRegister:
             test_session_factory,
             token,
             "comms_register",
-            {"display_name": "Forged", "accepted_types": ["scheduling.availability"]},
+            {"display_name": "Forged", "accepted_types": ["availability_request"]},
         )
         assert result["owner_email"] != "forged@attacker.com"
         assert result["owner_email"] == "agent-forged-email"
@@ -563,7 +563,7 @@ class TestFullNegotiationFlow:
             token_a,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [by_sub["agent-b"], by_sub["agent-c"]],
                 "initial_message": _availability_request(),
             },
@@ -687,7 +687,7 @@ class TestFullNegotiationFlow:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [invitee_id],
                 "initial_message": _availability_request(),
             },
@@ -767,7 +767,7 @@ class TestRateLimitAndSchemaErrors:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [target_id],
                 "initial_message": _availability_request(),
             },
@@ -780,7 +780,7 @@ class TestRateLimitAndSchemaErrors:
                 token_owner,
                 "comms_start_conversation",
                 {
-                    "conversation_type": "scheduling.availability",
+                    "conversation_type": "open",
                     "target_agent_ids": [target_id],
                     "initial_message": _availability_request(),
                 },
@@ -806,7 +806,7 @@ class TestRateLimitAndSchemaErrors:
                 token_owner,
                 "comms_start_conversation",
                 {
-                    "conversation_type": "scheduling.availability",
+                    "conversation_type": "open",
                     "target_agent_ids": [target_id],
                     # missing required fields (duration_min, modality, priority)
                     "initial_message": {"window": _availability_request()["window"]},
@@ -880,7 +880,7 @@ class TestRateLimitAndSchemaErrors:
                 token_owner,
                 "comms_start_conversation",
                 {
-                    "conversation_type": "scheduling.availability",
+                    "conversation_type": "open",
                     "target_agent_ids": too_many_ids,
                     "initial_message": _availability_request(),
                 },
@@ -911,7 +911,7 @@ class TestMembershipTools:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [ids["mem-b"]],
                 "initial_message": _availability_request(),
             },
@@ -979,280 +979,99 @@ class TestMembershipTools:
             )
 
 
-class TestTasks:
-    """End-to-end coverage for comms_add_task / comms_get_tasks (TECH-5094)."""
+class TestTaskLifecycleToolLayer:
+    """End-to-end coverage for tasks-as-conversations (TECH-5118 phase 3,
+    supersedes TECH-5094's comms_add_task/comms_get_tasks/comms_update_task):
+    task_assign opens a conversation, task_report/task_complete/
+    task_decline/task_cancel drive it through comms_post_message."""
 
-    async def test_same_owner_agents_can_task_each_other(
+    async def test_full_task_lifecycle(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        # Mirrors the real-world case this admission policy exists for: two
-        # of one person's agents (e.g. a Chief-of-Staff agent and an EA
-        # agent) share an owner_sub and should be admitted without any
-        # shared-agent machinery.
-        creator = await _register(
-            main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com"
+        await _register(
+            main, test_session_factory, "task-bond-007", owner_sub="owner-dan@example.com"
         )
         assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
+            main, test_session_factory, "task-pepper-potts", owner_sub="owner-dan@example.com"
         )
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
+        assigner_token = _token("task-bond-007", owner_sub="owner-dan@example.com")
+        assignee_token = _token("task-pepper-potts", owner_sub="owner-dan@example.com")
 
-        result = await _call(
+        started = await _call(
             main,
             test_session_factory,
-            token,
-            "comms_add_task",
+            assigner_token,
+            "comms_start_conversation",
             {
-                "assignee_agent_id": assignee["agent_id"],
-                "task": {"action": "report_status"},
+                "conversation_type": "internal",
+                "target_agent_ids": [assignee["agent_id"]],
+                "initial_message": {"action": "report_status"},
+                "message_type": "task_assign",
             },
         )
-
-        assert result["status"] == "open"
-        assert result["created_by"] == creator["agent_id"]
-        assert result["assignee_agent_id"] == assignee["agent_id"]
-        assert result["role"] == "created"
-        assert result["created_by_sub"] == "bond-007"
-        assert result["assignee_sub"] == "pepper-potts"
-        assert result["updated_at"] is not None
-
-        assignee_view = await _call(
-            main,
-            test_session_factory,
-            _token("pepper-potts", owner_sub="owner-dan@example.com"),
-            "comms_get_tasks",
-        )
-        assert assignee_view["tasks"][0]["role"] == "assigned"
-
-    async def test_different_owner_agents_uniformly_denied(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        other = await _register(
-            main, test_session_factory, "someone-elses-ea", owner_sub="owner-priya@example.com"
-        )
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
-
-        with pytest.raises(
-            ToolError, match=re.escape("access_denied: not authorized for this resource")
-        ):
-            await _call(
-                main,
-                test_session_factory,
-                token,
-                "comms_add_task",
-                {
-                    "assignee_agent_id": other["agent_id"],
-                    "task": {"action": "report_status"},
-                },
-            )
-
-    async def test_get_tasks_visible_only_to_creator_and_assignee(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
-        )
-        outsider = await _register(
-            main, test_session_factory, "outsider", owner_sub="owner-priya@example.com"
-        )
-        creator_token = _token("bond-007", owner_sub="owner-dan@example.com")
-        assignee_token = _token("pepper-potts", owner_sub="owner-dan@example.com")
-        outsider_token = _token("outsider", owner_sub="owner-priya@example.com")
+        assert started["type"] == "internal"
+        conversation_id = started["conversation_id"]
 
         await _call(
             main,
             test_session_factory,
-            creator_token,
-            "comms_add_task",
-            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+            assignee_token,
+            "comms_accept",
+            {"conversation_id": conversation_id},
         )
 
-        creator_view = await _call(main, test_session_factory, creator_token, "comms_get_tasks")
-        assert creator_view["total_count"] == 1
-        assert creator_view["tasks"][0]["role"] == "created"
-
-        assignee_view = await _call(main, test_session_factory, assignee_token, "comms_get_tasks")
-        assert assignee_view["total_count"] == 1
-        assert assignee_view["tasks"][0]["role"] == "assigned"
-
-        outsider_view = await _call(main, test_session_factory, outsider_token, "comms_get_tasks")
-        assert outsider_view == {
-            "tasks": [],
-            "total_count": 0,
-            "has_more": False,
-            "next_cursor": None,
-        }
-        assert outsider["agent_id"]  # registered, just not a party to the task
-
-    async def test_add_task_rejects_free_text_payload(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
-        )
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
-
-        with pytest.raises(ToolError):
-            await _call(
-                main,
-                test_session_factory,
-                token,
-                "comms_add_task",
-                {
-                    "assignee_agent_id": assignee["agent_id"],
-                    "task": {"action": "report_status", "notes": "call me back"},
-                },
-            )
-
-    async def test_get_tasks_cursor_pages_through_tool_layer(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
-        )
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
-
-        for _ in range(3):
-            await _call(
-                main,
-                test_session_factory,
-                token,
-                "comms_add_task",
-                {
-                    "assignee_agent_id": assignee["agent_id"],
-                    "task": {"action": "report_status"},
-                },
-            )
-
-        page1 = await _call(main, test_session_factory, token, "comms_get_tasks", {"limit": 2})
-        assert len(page1["tasks"]) == 2
-        assert page1["has_more"] is True
-        assert page1["next_cursor"] is not None
-
-        page2 = await _call(
-            main,
-            test_session_factory,
-            token,
-            "comms_get_tasks",
-            {"limit": 2, "cursor": page1["next_cursor"]},
-        )
-        assert len(page2["tasks"]) == 1
-        assert page2["has_more"] is False
-        assert page2["next_cursor"] is None
-
-        seen_ids = {t["task_id"] for t in page1["tasks"] + page2["tasks"]}
-        assert len(seen_ids) == 3
-
-    async def test_get_tasks_malformed_cursor_maps_to_tool_error(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
-
-        with pytest.raises(ToolError, match="invalid_request: the request could not be processed"):
-            await _call(
-                main,
-                test_session_factory,
-                token,
-                "comms_get_tasks",
-                {"cursor": "not-a-valid-cursor"},
-            )
-
-    async def test_update_task_end_to_end(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        assignee = await _register(
-            main, test_session_factory, "pepper-potts", owner_sub="owner-dan@example.com"
-        )
-        creator_token = _token("bond-007", owner_sub="owner-dan@example.com")
-        assignee_token = _token("pepper-potts", owner_sub="owner-dan@example.com")
-
-        added = await _call(
-            main,
-            test_session_factory,
-            creator_token,
-            "comms_add_task",
-            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
-        )
-
-        with pytest.raises(
-            ToolError, match=re.escape("access_denied: not authorized for this resource")
-        ):
-            await _call(
-                main,
-                test_session_factory,
-                creator_token,
-                "comms_update_task",
-                {"task_id": added["task_id"], "status": "declined"},
-            )
-
-        updated = await _call(
+        report = await _call(
             main,
             test_session_factory,
             assignee_token,
-            "comms_update_task",
-            {"task_id": added["task_id"], "status": "declined"},
+            "comms_post_message",
+            {
+                "conversation_id": conversation_id,
+                "message_type": "task_report",
+                "payload": {"status": "in_progress"},
+            },
         )
-        assert updated["status"] == "declined"
-
-        with pytest.raises(
-            ToolError,
-            match=re.escape("task cannot transition to 'done' while its status is 'declined'"),
-        ):
-            await _call(
-                main,
-                test_session_factory,
-                assignee_token,
-                "comms_update_task",
-                {"task_id": added["task_id"], "status": "done"},
-            )
-
-        # status='done' through the full tool stack too -- the above only
-        # exercised 'declined'.
-        added_2 = await _call(
+        assert report["type"] == "task_report"
+        mid_state = await _call(
             main,
             test_session_factory,
-            creator_token,
-            "comms_add_task",
-            {"assignee_agent_id": assignee["agent_id"], "task": {"action": "report_status"}},
+            assigner_token,
+            "comms_get_conversation",
+            {"conversation_id": conversation_id},
         )
-        done_result = await _call(
+        assert mid_state["conversation"]["state"] == "active"
+
+        completed = await _call(
             main,
             test_session_factory,
-            creator_token,
-            "comms_update_task",
-            {"task_id": added_2["task_id"], "status": "done"},
+            assigner_token,
+            "comms_post_message",
+            {
+                "conversation_id": conversation_id,
+                "message_type": "task_complete",
+                "payload": {},
+            },
         )
-        assert done_result["status"] == "done"
+        assert completed["type"] == "task_complete"
+        final_state = await _call(
+            main,
+            test_session_factory,
+            assigner_token,
+            "comms_get_conversation",
+            {"conversation_id": conversation_id},
+        )
+        assert final_state["conversation"]["state"] == "completed"
 
-    async def test_update_task_malformed_task_id_maps_to_tool_error(
+    async def test_different_owner_agents_denied_internal_admission(
         self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
-
-        with pytest.raises(ToolError):
-            await _call(
-                main,
-                test_session_factory,
-                token,
-                "comms_update_task",
-                {"task_id": "not-a-uuid", "status": "done"},
-            )
-
-    async def test_update_task_unknown_task_id_matches_non_party_denial_message(
-        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
-    ) -> None:
-        """Anti-enumeration at the MCP boundary: an unknown task_id must
-        produce the exact same ToolError text as a genuine non-party
-        denial (TECH-5099 Argus round 1)."""
-        await _register(main, test_session_factory, "bond-007", owner_sub="owner-dan@example.com")
-        token = _token("bond-007", owner_sub="owner-dan@example.com")
+        await _register(
+            main, test_session_factory, "task-bond-2", owner_sub="owner-dan@example.com"
+        )
+        other = await _register(
+            main, test_session_factory, "task-other-2", owner_sub="owner-priya@example.com"
+        )
+        token = _token("task-bond-2", owner_sub="owner-dan@example.com")
 
         with pytest.raises(
             ToolError, match=re.escape("access_denied: not authorized for this resource")
@@ -1261,8 +1080,61 @@ class TestTasks:
                 main,
                 test_session_factory,
                 token,
-                "comms_update_task",
-                {"task_id": str(uuid.uuid4()), "status": "done"},
+                "comms_start_conversation",
+                {
+                    "conversation_type": "internal",
+                    "target_agent_ids": [other["agent_id"]],
+                    "initial_message": {"action": "report_status"},
+                    "message_type": "task_assign",
+                },
+            )
+
+    async def test_task_decline_from_assigner_uniformly_denied(
+        self, main: Any, test_session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _register(
+            main, test_session_factory, "task-bond-3", owner_sub="owner-dan@example.com"
+        )
+        assignee = await _register(
+            main, test_session_factory, "task-pepper-3", owner_sub="owner-dan@example.com"
+        )
+        assigner_token = _token("task-bond-3", owner_sub="owner-dan@example.com")
+        assignee_token = _token("task-pepper-3", owner_sub="owner-dan@example.com")
+
+        started = await _call(
+            main,
+            test_session_factory,
+            assigner_token,
+            "comms_start_conversation",
+            {
+                "conversation_type": "internal",
+                "target_agent_ids": [assignee["agent_id"]],
+                "initial_message": {"action": "report_status"},
+                "message_type": "task_assign",
+            },
+        )
+        conversation_id = started["conversation_id"]
+        await _call(
+            main,
+            test_session_factory,
+            assignee_token,
+            "comms_accept",
+            {"conversation_id": conversation_id},
+        )
+
+        with pytest.raises(
+            ToolError, match=re.escape("access_denied: not authorized for this resource")
+        ):
+            await _call(
+                main,
+                test_session_factory,
+                assigner_token,
+                "comms_post_message",
+                {
+                    "conversation_id": conversation_id,
+                    "message_type": "task_decline",
+                    "payload": {"reason": "unable_to_complete"},
+                },
             )
 
 
@@ -1278,6 +1150,7 @@ class TestScopesUnaffected:
         expected = {
             "comms_register",
             "comms_list_agents",
+            "comms_list_conversations",
             "comms_start_conversation",
             "comms_post_message",
             "comms_get_conversation",
@@ -1286,9 +1159,6 @@ class TestScopesUnaffected:
             "comms_decline_invite",
             "comms_invite",
             "comms_leave",
-            "comms_add_task",
-            "comms_get_tasks",
-            "comms_update_task",
         }
         assert expected <= mounted
         assert expected <= set(TOOL_SCOPES)
@@ -1304,7 +1174,7 @@ class TestScopesUnaffected:
                 test_session_factory,
                 token,
                 "comms_register",
-                {"display_name": "x", "accepted_types": ["scheduling.availability"]},
+                {"display_name": "x", "accepted_types": ["availability_request"]},
             )
 
     async def test_unenrolled_tool_still_rejected(
@@ -1336,7 +1206,7 @@ class TestAvailabilityResponseNoneAvailable:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [target_id],
                 "initial_message": _availability_request(),
             },
@@ -1401,7 +1271,7 @@ class TestLazyExpiryEndToEnd:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": [target_id],
                 "initial_message": _availability_request(),
                 "expires_at": past,
@@ -1460,7 +1330,7 @@ class TestConcurrentPostMessageToolLayer:
             token_owner,
             "comms_start_conversation",
             {
-                "conversation_type": "scheduling.availability",
+                "conversation_type": "open",
                 "target_agent_ids": member_ids,
                 "initial_message": _availability_request(),
             },
@@ -1503,3 +1373,121 @@ class TestConcurrentPostMessageToolLayer:
 
         assert sorted(seqs) == [2, 3, 4, 5]
         assert len(set(seqs)) == len(seqs)
+
+
+class TestListConversationsTool:
+    async def test_empty_returns_structure(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-empty")
+        token = _token("listconv-tool-empty")
+        result = await _call(main, test_session_factory, token, "comms_list_conversations")
+        assert result["conversations"] == []
+        assert result["has_more"] is False
+        assert result["next_cursor"] is None
+
+    async def test_own_conversation_visible(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-creator")
+        target = await _register(main, test_session_factory, "listconv-tool-target")
+        creator_token = _token("listconv-tool-creator")
+        payload = _availability_request()
+        conv = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_start_conversation",
+            {
+                "conversation_type": "open",
+                "target_agent_ids": [target["agent_id"]],
+                "message_type": "availability_request",
+                "initial_message": payload,
+            },
+        )
+        result = await _call(main, test_session_factory, creator_token, "comms_list_conversations")
+        ids = [c["conversation_id"] for c in result["conversations"]]
+        assert conv["conversation_id"] in ids
+
+    async def test_filter_by_type_and_state(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-filter-c")
+        target = await _register(main, test_session_factory, "listconv-tool-filter-t")
+        creator_token = _token("listconv-tool-filter-c")
+        payload = _availability_request()
+        await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_start_conversation",
+            {
+                "conversation_type": "open",
+                "target_agent_ids": [target["agent_id"]],
+                "message_type": "availability_request",
+                "initial_message": payload,
+            },
+        )
+        result_open = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_list_conversations",
+            {"type": "open", "state": "active"},
+        )
+        assert len(result_open["conversations"]) == 1
+
+        result_internal = await _call(
+            main,
+            test_session_factory,
+            creator_token,
+            "comms_list_conversations",
+            {"type": "internal"},
+        )
+        assert result_internal["conversations"] == []
+
+    async def test_malformed_cursor_maps_to_tool_error(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        await _register(main, test_session_factory, "listconv-tool-bad-cursor")
+        token = _token("listconv-tool-bad-cursor")
+
+        with pytest.raises(ToolError, match="invalid_request: the request could not be processed"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_list_conversations",
+                {"cursor": "not-a-valid-cursor"},
+            )
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [("role", "bogus"), ("type", "bogus"), ("state", "bogus")],
+    )
+    async def test_invalid_filter_value_maps_to_tool_error(
+        self,
+        main: Any,
+        test_session_factory: async_sessionmaker[AsyncSession],
+        field: str,
+        value: str,
+    ) -> None:
+        await _register(main, test_session_factory, f"listconv-tool-bad-{field}")
+        token = _token(f"listconv-tool-bad-{field}")
+
+        with pytest.raises(ToolError, match=f"invalid_request: {field} must be one of"):
+            await _call(
+                main,
+                test_session_factory,
+                token,
+                "comms_list_conversations",
+                {field: value},
+            )

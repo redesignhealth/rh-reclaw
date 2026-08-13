@@ -134,7 +134,7 @@ class TestSchema:
 
     @pytest.mark.parametrize(
         "table",
-        ["agents", "conversations", "participants", "messages", "audit_log", "tasks"],
+        ["agents", "conversations", "participants", "messages", "audit_log"],
     )
     async def test_table_exists(self, engine: AsyncEngine, table: str) -> None:
         cols = await _columns(engine, table)
@@ -189,10 +189,12 @@ class TestSchema:
             "state",
             "created_by",
             "expires_at",
+            "owner_snapshot",
             "created_at",
             "updated_at",
         ):
             assert expected in cols, f"conversations.{expected} missing"
+        assert cols["owner_snapshot"] == "jsonb"
 
     async def test_participants_columns_and_invite_accept_model(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "participants")
@@ -257,37 +259,15 @@ class TestSchema:
             "agent_id",
             "conversation_id",
             "message_id",
-            "task_id",
             "detail",
         ):
             assert expected in cols, f"audit_log.{expected} missing"
         assert cols["detail"] == "jsonb"
+        assert "task_id" not in cols, "task_id should be dropped (TECH-5118 phase 3)"
 
-    async def test_tasks_columns_and_check_constraints(self, engine: AsyncEngine) -> None:
+    async def test_tasks_table_dropped(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "tasks")
-        for expected in (
-            "id",
-            "created_by",
-            "assignee_id",
-            "status",
-            "schema_version",
-            "payload",
-            "created_at",
-            "updated_at",
-        ):
-            assert expected in cols, f"tasks.{expected} missing"
-        assert cols["payload"] == "jsonb"
-
-        async with engine.connect() as conn:
-            result = await conn.execute(
-                text(
-                    "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
-                    "WHERE conrelid = 'tasks'::regclass AND contype = 'c'"
-                )
-            )
-            constraints = {row.conname: row.pg_get_constraintdef for row in result}
-        assert "open" in constraints["ck_tasks_status"]
-        assert "created_by" in constraints["ck_tasks_distinct_parties"]
+        assert not cols, "tasks table should be dropped (TECH-5118 phase 3)"
 
     async def test_designed_indexes_exist(self, engine: AsyncEngine) -> None:
         participant_indexes = await _indexes(engine, "participants")
@@ -300,27 +280,10 @@ class TestSchema:
         audit_indexes = await _indexes(engine, "audit_log")
         assert "idx_audit_log_conversation_id" in audit_indexes
         assert "idx_audit_log_at" in audit_indexes
-        assert "idx_audit_log_task_id" in audit_indexes
+        assert "idx_audit_log_task_id" not in audit_indexes
 
         message_indexes = await _indexes(engine, "messages")
         assert "idx_messages_conversation_id_sender_id_created_at" in message_indexes
-
-        task_indexes = await _indexes(engine, "tasks")
-        assert "idx_tasks_assignee_id_status" in task_indexes
-        assert "idx_tasks_created_by_status" in task_indexes
-        assert "idx_tasks_created_at_id" in task_indexes
-
-        async with engine.connect() as conn:
-            indexdef = (
-                await conn.execute(
-                    text(
-                        "SELECT indexdef FROM pg_indexes "
-                        "WHERE schemaname = 'public' AND indexname = 'idx_tasks_created_at_id'"
-                    )
-                )
-            ).scalar_one()
-        assert "created_at DESC" in indexdef
-        assert "id DESC" in indexdef
 
     async def test_messages_seq_unique_per_conversation(self, engine: AsyncEngine) -> None:
         async with engine.connect() as conn:

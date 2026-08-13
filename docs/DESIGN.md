@@ -93,7 +93,9 @@ verified identity, at which point `agent_key` should be removed.
 **Membership rules (v1):**
 
 - Any registered agent may start a conversation with N other agents. All named
-  targets must exist, be active, and list the conversation type in `accepted_types`.
+  targets must exist and be active. (`accepted_types` is informational in v1 — it
+  declares which message types an agent intends to handle but is not enforced
+  at admission time; enforcement is deferred to a future release.)
   The creator becomes an `active` participant with `role=owner`. **Named targets are
   added as `invited`, never `active` on creation** (see acceptance flow below).
 - **Any active member may invite others** (creator is `owner` so this can tighten to
@@ -116,26 +118,26 @@ verified identity, at which point `agent_key` should be removed.
   revokes access immediately.
 - No pairwise grants in v1 (internal trust domain: colleagues don't need a consent
   handshake to ask availability). Conversation-open authorization is routed through a
-  single policy function (`may_open`), which is the seam where a grants/consent layer
-  lands when external counterparties arrive.
+  single policy function (`_authorize_conversation_open` in `service.py` — a
+  module-private implementation hook, not a public API), which is the seam where a
+  grants/consent layer lands when external counterparties arrive.
 
 ## 5. Data model (Postgres)
 
-Six tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
+Five tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths in code.
 
 ```
 agents          id, sub UNIQUE, owner_sub, owner_email, display_name,
                 accepted_types text[], status(active|suspended), timestamps
 conversations   id, type, state(active|completed|canceled|expired),
-                created_by, expires_at, timestamps
+                created_by, expires_at, owner_snapshot jsonb (nullable),
+                timestamps
 participants    (conversation_id, agent_id) UNIQUE, role(owner|member),
                 status(invited|active|left|declined), invited_by, invited_at,
                 joined_at (set on accept), last_read_seq
 messages        id, conversation_id, seq (UNIQUE per conversation, server-assigned,
                 race-safe), sender_id, type, schema_version, payload jsonb, created_at
-tasks           id, created_by, assignee_id, status(open|done|declined),
-                schema_version, payload jsonb, timestamps   -- §9, mutable status
-audit_log       id, at, actor_sub, action, agent_id/conversation_id/message_id/task_id,
+audit_log       id, at, actor_sub, action, agent_id/conversation_id/message_id,
                 detail jsonb   -- every mutation AND every denial
 ```
 
@@ -149,25 +151,34 @@ Design notes:
 - Rate limits (per-sender posts per conversation per hour, and conversation-starts per
   hour) are computed from the tables. No Redis until it matters.
 
-## 6. Message schemas — `scheduling.availability` v1
+## 6. Message schemas (TECH-5118 two-axis model)
 
 Strict Pydantic (`extra='forbid'`), timezone-aware datetimes only, enum-coded reasons,
-**no free-text fields anywhere**. All types legal only in `state=active`.
+**no free-text fields anywhere (except `note`, which is provisional/pre-quarantine pipeline)**. All types legal only in `state=active`.
 
-| Type | Payload | Semantics |
-|---|---|---|
-| `availability_request` | window {start,end}, duration_min, modality(video\|phone\|in_person), priority, constraints[] (enum-coded) | opens the negotiation |
-| `availability_response` | slots[{start,end,preference 0..1}] max 10, or none_available+reason | **`preference` is the product**: judgment crosses the boundary, never calendar data. There is no field for raw calendar to travel in |
-| `counter_proposal` | same slots shape | iterate |
-| `confirm` | slot {start,end} | transitions conversation → `completed`. Booking itself is EA-side |
-| `decline` | reason (enum) | sets sender's participant status to `declined`. All non-owners declined → conversation `canceled` |
-| `needs_clarification` | about_seq | pause signal. A human/EA needs to weigh in |
+| Type | `boundary_safe` | Payload | Semantics |
+|---|---|---|---|
+| `availability_request` | True | window {start,end}, duration_min, modality(video\|phone\|in_person), priority, constraints[] (enum-coded) | opens scheduling negotiation |
+| `availability_response` | True | slots[{start,end,preference 0..1}] max 10, or none_available+reason | **`preference` is the product**: judgment crosses the boundary, never calendar data |
+| `counter_proposal` | True | same slots shape | iterate on slots |
+| `confirm` | True | slot {start,end} | transitions conversation → `completed`. Booking itself is EA-side |
+| `decline` | True | reason (enum) | sets sender's participant status to `declined`. All non-owners declined → conversation `canceled` |
+| `needs_clarification` | True | about_seq | pause signal. A human/EA needs to weigh in |
+| `task_assign` | True | action (enum), scheduling params | opens task-coordination; structured spec, no free text |
+| `task_report` | True | progress (enum), optional note_ref | non-terminal status update from assignee |
+| `task_complete` | True | _(minimal)_ | transitions conversation → `completed` |
+| `task_decline` | True | reason (enum) | member-only; transitions conversation → `canceled` |
+| `task_cancel` | True | reason (enum) | owner-only; transitions conversation → `canceled` |
+| `note` | **False** | text (string) | free-text note; pre-quarantine — provisional |
 
 ## 7. MCP tool surface
 
 All tools enrolled in the fail-closed `TOOL_SCOPES` catalog (registry-parity enforced
 by test). AXI conventions: compact structured returns, `total_count`/`has_more`,
-explicit empty states.
+explicit empty states. `comms_list_conversations` deliberately omits
+`total_count`: it would need a second `SELECT COUNT(*)` replaying the same
+filter predicates, and `has_more`/`next_cursor` are sufficient for its
+scroll-to-load-more use case.
 
 | Tool | Scope | Notes |
 |---|---|---|
@@ -178,87 +189,152 @@ explicit empty states.
 | `comms_post_message` | comms:write | typed, schema-validated, state-machine-checked |
 | `comms_get_conversation` | comms:read | combined read: conversation + participants + messages since seq. Advances caller's last_read_seq. For an `invited` (not yet accepted) caller, returns metadata only: no messages |
 | `comms_inbox` | comms:read | active conversations with unread messages, **plus pending invites awaiting accept/decline** |
+| `comms_list_conversations` | comms:read | paginated conversation list, filterable by `role`, `type`, and `state`; both `invited` and `active` participant statuses included |
 | `comms_accept` | comms:write | flips caller's participant status `invited → active`. Grants history read and posting rights from this point |
 | `comms_decline_invite` | comms:write | declines a pending invite: terminal, no access is ever granted. Requires caller to currently be `invited`. Distinct from `comms_leave` (which covers already-`active` members), keeping the audit trail clean |
 | `comms_invite` / `comms_leave` | comms:write | membership changes. `invite` adds a target as `invited` (not `active`). `leave` covers already-active members |
-| `comms_add_task` | comms:write | two-party `internal.coordination` task, either party of an admitted pair may call it (§9) |
-| `comms_get_tasks` | comms:read | paginated "visible to me" task list: caller is creator or assignee (§9) |
-| `comms_update_task` | comms:write | transitions a task `open → done`/`declined`; `declined` is assignee-only (§9) |
 
 ## 8. Security invariants
 
 1. Owner identity derives from verified OAuth token claims, never parameters.
 2. Judgments cross the boundary, never raw data (schemas have no field for it).
-3. Typed, schema-validated payloads only. No free text in v1.
+3. Typed, schema-validated payloads only. No free text except the
+   provisional `note` type (`boundary_safe=False`, blocked in `open`
+   conversations; pre-quarantine pipeline per §10).
 4. Uniform denial messages. Existence of unauthorized resources is never revealed.
 5. Append-only messages and audit. Every mutation and every denial is audited.
 6. Fail-closed tool scoping: unenrolled tool ⇒ unreachable by agent tokens.
 7. Rate limits per sender, message size caps, and conversation expiry.
 
-## 9. Task coordination — `internal.coordination` (`add_task` / `get_tasks`)
+## 9. Two-axis model: conversation type (admission) × message type (boundary)
 
-A scoped-down task-collaboration primitive for intra-owner coordination
-(Chief-of-Staff agent ↔ EA agent, bidirectional: assign work one way, report
-back the other) — TECH-5094. **Not** the `conversations`/`messages`-based
-design this section originally sketched (an `internal.coordination`
-conversation type folding task status out of a `task_assign` message
-stream); that shape was rejected because `messages` is append-only by
-invariant (§5) while a task's `status` mutates in place, and a task is
-intrinsically two-party, so `participants`' N-party invite/accept ceremony
-buys nothing. Delivered instead as a **dedicated `tasks` table** plus two
-tools, reusing everything else this layer already has (agent identity,
-audit log, the schema-validated-payload pipeline, uniform denial,
-fail-closed scoping).
+TECH-5118 replaced the earlier dedicated `tasks` table (TECH-5094/5099) with a
+general two-axis model that handles both scheduling negotiation and task
+coordination through the same conversations/messages layer.
 
-- **Storage**: `tasks(id, created_by, assignee_id, status(open|done|declined),
-  schema_version, payload jsonb, created_at, updated_at)`, both FKs into
-  `agents`. `audit_log` gains a nullable `task_id` FK, mirroring its existing
-  per-entity columns. Visibility is simply "caller is `created_by` or
-  `assignee_id`" — no participants-style membership row.
-- **Admission (`may_assign`)**: symmetric verified-owner-set intersection —
-  `owners(creator) ∩ owners(assignee) ≠ ∅` — resolved via an injected
-  `OwnershipClient.get_agent_owners(agent_id) -> {is_shared, owners}` seam,
-  **never** `agents.owner_sub`/`owner_email` directly (single-valued columns
-  a shared agent's row can't faithfully represent). Fails closed
-  (`denied.ownership_unverified`) on any lookup error. Degenerates to an
-  exact same-owner check today: the reclaw platform's real ownership
-  endpoint (with a shared-agent concept) doesn't exist yet, so the interim
-  `AgentTableOwnershipClient` just wraps `agents.owner_sub` as a
-  single-element owner set — correct for every agent registered today, and
-  the seam to swap once shared agents exist. No accept-before-visibility
-  gate: a task's entire content is the invite-equivalent (the typed spec),
-  and `status='declined'` is the assignee's consent mechanism.
-- **Payload (`TaskSpecV1`)**: registered at `(TASK_NAMESPACE="internal.coordination",
-  "task_spec", 1)` in the same `MESSAGE_SCHEMAS` registry `messages` uses —
-  one `validate_payload` path for the whole service. An `action` enum
-  (`gather_availability`, `schedule_meeting`, `reschedule_meeting`,
-  `cancel_meeting`, `confirm_slot`, `report_status`) plus structured
-  scheduling parameters (reusing `TimeWindow`/constraint/modality/priority);
-  no free-text field anywhere (§8 invariant 3). `internal.coordination` is
-  **not** added to `CONVERSATION_TYPES` — agents cannot `start_conversation`
-  of that "type"; the string exists only as this registry coordinate.
-- **Tools**: `comms_add_task` (`comms:write`, either party of an admitted
-  pair may call it — bidirectional, no reporting-lines concept),
-  `comms_get_tasks` (`comms:read`, keyset-paginated over
-  `(created_at DESC, id DESC)`, filterable by `role`(created|assigned|all) and
-  `status`), and `comms_update_task` (`comms:write`, TECH-5099: the
-  `open → done`/`declined` transition — either party may mark `done`;
-  `declined` is assignee-only, the consent/refusal mechanism; no
-  transition out of a terminal status). Denials, checked in this order:
-  `denied.unknown_agent` (caller's board agent is suspended),
-  `denied.not_party` (caller is neither creator nor assignee, or the task
-  doesn't exist — uniform), `denied.bad_state` (terminal-status
-  re-transition — fires for **every** party before the next check, so a
-  creator attempting `declined` on an already-`done` task gets this, not
-  `denied.not_assignee`), and `denied.not_assignee` (non-assignee
-  attempted `declined` on a still-`open` task).
+**Why tasks-as-conversations works (addressing the earlier objection)**
+
+The original §9 rejected this shape because "messages is append-only while a
+task's status mutates in place." That objection doesn't apply: task state lives
+on `conversations.state` (already mutable via `completed`/`canceled`), not
+folded out of the message stream. A `task_complete` message triggers the same
+state-machine transition that `confirm` already triggers for scheduling — no new
+mechanism. The append-only invariant on `messages` is untouched.
+
+### Axis 1: conversation type → admission policy
+
+| Type | Admission rule | Use case |
+|---|---|---|
+| `open` | any active agent (no ownership check) | scheduling negotiation across ownership boundaries |
+| `internal` | all participants share identical verified owner sets | same-owner multi-agent coordination (e.g. CoS ↔ EA) |
+| `asymmetric` | all pairwise owner-set intersections are non-empty | cross-owner task delegation where a shared agent bridges two users |
+
+Ownership is resolved via an injected `OwnershipClient` seam (never
+`agents.owner_sub` directly — a shared agent's row can't represent multiple
+owners). Fails closed (`denied.ownership_unverified`) on any lookup error. The
+interim `AgentTableOwnershipClient` wraps `agents.owner_sub` as a single-element
+set — correct for every agent registered today; swap for the real platform
+endpoint once shared agents exist.
+
+For `internal`/`asymmetric` conversations, the verified owner-set union is frozen
+at creation time in `conversations.owner_snapshot` (JSONB, nullable — `open` does
+not use it). Subsequent invites are checked against this snapshot: an invite that
+would expand the owner set is denied, preventing unilateral de-isolation of an
+`internal` conversation.
+
+### Axis 2: message type → schema + `boundary_safe`
+
+Each message type declares `boundary_safe: bool` independent of conversation type.
+The flag gates legality within a conversation:
+
+- `open` conversations require `boundary_safe=True` (raw scheduling data must
+  never cross an owner boundary — only judgments).
+- `internal` conversations allow any message type (all parties are the same
+  owner).
+- `asymmetric` conversations allow `boundary_safe=True` always; `boundary_safe=False`
+  only when the message does not cross an ownership boundary (sender's owner set
+  must be a superset of all other active-or-invited participants' owner sets — an
+  invited-but-not-yet-accepted participant's owner set was already validated against
+  the owner snapshot at invite time, so including them here keeps the boundary check
+  consistent with that snapshot invariant rather than leaving a one-post gap until
+  they accept).
+
+Currently registered message types (all `boundary_safe=True` unless noted):
+
+| Type | `boundary_safe` | Semantics |
+|---|---|---|
+| `availability_request` | True | opens scheduling negotiation |
+| `availability_response` | True | scored candidate slots (judgment, not calendar data) |
+| `counter_proposal` | True | iterate on slots |
+| `confirm` | True | transitions conversation → `completed` |
+| `decline` | True | sender's participant → `declined`; all non-owners declined → `canceled` |
+| `needs_clarification` | True | pause signal |
+| `task_assign` | True | opens a task-coordination conversation; structured spec (action enum + scheduling params) |
+| `task_report` | True | non-terminal status update from assignee |
+| `task_complete` | True | transitions conversation → `completed` |
+| `task_decline` | True | assignee-only; transitions conversation → `canceled` |
+| `task_cancel` | True | owner-only; transitions conversation → `canceled` |
+| `note` | **False** | free-text note (pre-quarantine pipeline; `internal` always; `asymmetric` only when no boundary crossed; blocked in `open`) |
+
+**Sender-role restrictions**: `task_cancel` is owner-only; `task_decline` is
+member-only (non-owner). These map directly to `participants.role` and are checked
+before the state-machine transition.
+
+### Per-type TTL policy
+
+Conversation expiry is enforced lazily on access (`expires_at`, checked in
+`get_conversation` and `post_message`). Default TTLs by conversation type:
+
+| Conversation type | Default TTL | Rationale |
+|---|---|---|
+| `open` | 7 days | Scheduling negotiations should resolve quickly; stale slots are noise |
+| `asymmetric` | 14 days | Task delegation across owners needs more runway than scheduling |
+| `internal` | 30 days | Same-owner coordination may span longer planning horizons |
+
+All three are overridable via the `expires_at` parameter at conversation creation.
+A completed or canceled conversation's `expires_at` is not retroactively cleared —
+it simply becomes irrelevant once the conversation is terminal.
+
+### Rate limits
+
+Task-type conversations (`task_assign` openers) consume from the same
+`MAX_CONVERSATION_STARTS_PER_HOUR = 10` bucket as scheduling negotiations. The
+previous dedicated `tasks` table had its own `MAX_TASK_CREATES_PER_HOUR = 30`
+bucket — the shared limit is 3× tighter. Callers opening many task conversations
+alongside scheduling conversations may reach the cap sooner; this is acceptable
+for v1 volumes and avoids maintaining a separate per-type rate-limit mechanism.
+
+### Known gap: `platform_get_agent_owners`
+
+The `internal`/`asymmetric` admission logic (and `note`'s boundary-crossing check)
+requires resolving each agent's verified owner set. In v1, the interim
+`AgentTableOwnershipClient` wraps `agents.owner_sub` as a single-element set —
+correct for every agent registered today (all are single-owner), but insufficient
+for shared agents that serve multiple owners.
+
+The real `platform_get_agent_owners` endpoint does not yet exist; no Linear ticket
+tracks it. Until it does, `asymmetric` conversations can be exercised end-to-end
+only in tests (with faked ownership), not in production against real agents.
+The seam is already injected (`OwnershipClient` parameter on all functions that
+need it) — swapping `AgentTableOwnershipClient` for a real HTTP client is the
+only change needed when the platform endpoint ships.
+
+### Known gap: rolling-deploy safety of the `tasks`-table-drop migration
+
+`migrations/versions/da3e1646c44d_drop_tasks_table.py` drops `audit_log.task_id`.
+`entrypoint.sh` runs `alembic upgrade head` in the new container before the old
+container drains, so a standard rolling deploy of this image would break every
+audit-log write (not just task-scoped ones) from any still-running old container
+for the entire drain window. This PR must ship as a stop-then-start deploy, or
+during a confirmed-idle traffic window — see that migration file's own
+deployment-warning docstring.
 
 ## 10. Known extensions (explicitly deferred)
 
 - **Grants/consent layer**: required the moment a counterparty is outside the RH
-  trust domain. Lands in the `may_open` policy function + a grants table
-  (directional, type-scoped, expiring, human-approved). The anti-enumeration posture
-  of `list_agents` also changes then.
+  trust domain. Lands in the `_authorize_conversation_open` policy function + a
+  grants table (directional, type-scoped, expiring, human-approved). The
+  anti-enumeration posture of `list_agents` also changes then.
 - **Free-text fields**: allowed only behind a quarantine/review pipeline (sandboxed,
   tool-less extraction into typed messages). Raw text is stored for audit/human
   display but never enters a privileged agent's context.

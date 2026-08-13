@@ -52,8 +52,13 @@ from exceptions import (
     UnknownConversationTypeError,
 )
 from identity import try_resolve_email
-from models import Agent
-from schemas import MAX_AGENT_KEY_LENGTH, MAX_PARTICIPANTS_PER_CONVERSATION, PayloadValidationError
+from models import CONVERSATION_STATES, PARTICIPANT_ROLES, Agent
+from schemas import (
+    CONVERSATION_TYPES,
+    MAX_AGENT_KEY_LENGTH,
+    MAX_PARTICIPANTS_PER_CONVERSATION,
+    PayloadValidationError,
+)
 from scopes import is_interactive_token, scopes_for_token
 
 comms_server: FastMCP[Any] = FastMCP("comms")
@@ -180,11 +185,9 @@ async def _map_service_errors() -> AsyncIterator[None]:
     an over-length field) and its message text can embed internal
     schema/config detail that IS not client-safe in the general case.
     Those are mapped to a single generic, non-leaking message instead of
-    being forwarded verbatim. A bare ``RuntimeError`` (TECH-5099:
-    ``service._task_with_subs``'s theoretical "task vanished after its
-    own transition committed" guard) gets the same generic treatment —
-    it signals an internal invariant violation, not anything the caller
-    did wrong, and its message can embed internal state detail.
+    being forwarded verbatim. A bare ``RuntimeError`` gets the same generic
+    treatment — it signals an internal invariant violation, not anything
+    the caller did wrong, and its message can embed internal state detail.
     """
     try:
         yield
@@ -414,6 +417,7 @@ async def start_conversation(
                 conversation_type=conversation_type,
                 target_agent_ids=target_uuids,
                 initial_message=initial_message,
+                ownership_client=service.AgentTableOwnershipClient(session),
                 message_type=message_type,
                 expires_at=expires_dt,
                 schema_version=schema_version,
@@ -464,6 +468,7 @@ async def post_message(
                 conversation_id=conv_id,
                 message_type=message_type,
                 payload=payload,
+                ownership_client=service.AgentTableOwnershipClient(session),
                 schema_version=schema_version,
             )
 
@@ -539,6 +544,54 @@ async def inbox(agent_key: str | None = None) -> dict[str, Any]:
 
 
 @comms_server.tool
+async def list_conversations(
+    role: str | None = None,
+    type: str | None = None,
+    state: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+    agent_key: str | None = None,
+) -> dict[str, Any]:
+    """Return a paginated list of conversations the caller participates in.
+
+    Optional filters (combinable):
+    - ``role``: ``"owner"`` or ``"member"`` (default: any role).
+    - ``type``: conversation type — ``"open"``, ``"internal"``, or
+      ``"asymmetric"`` (default: any type).
+    - ``state``: ``"active"``, ``"completed"``, ``"canceled"``, or
+      ``"expired"`` (default: any state).
+
+    Results are ordered newest-first. Pass ``next_cursor`` from a prior
+    response to get the next page. Both ``invited`` and ``active``
+    participant statuses are included — declined and left are not.
+    """
+    token = _require_token()
+    base_sub = _require_identity(token)
+    agent_key = _validate_agent_key(agent_key)
+    sub = _compose_sub(base_sub, agent_key)
+
+    if role is not None and role not in PARTICIPANT_ROLES:
+        raise ToolError(f"invalid_request: role must be one of {sorted(PARTICIPANT_ROLES)}")
+    if type is not None and type not in CONVERSATION_TYPES:
+        raise ToolError(f"invalid_request: type must be one of {sorted(CONVERSATION_TYPES)}")
+    if state is not None and state not in CONVERSATION_STATES:
+        raise ToolError(f"invalid_request: state must be one of {sorted(CONVERSATION_STATES)}")
+
+    async with get_session_factory()() as session:
+        caller = await _resolve_caller_agent(session, sub)
+        async with _map_service_errors():
+            return await service.list_conversations(
+                session,
+                caller_agent_id=caller.id,
+                role=role,
+                conversation_type=type,
+                state=state,
+                limit=limit,
+                cursor=cursor,
+            )
+
+
+@comms_server.tool
 async def accept(conversation_id: str, agent_key: str | None = None) -> dict[str, Any]:
     """Accept a pending invite: flips the caller's status ``invited`` → ``active``.
 
@@ -607,9 +660,10 @@ async def invite(
 
     Requires the caller to currently be an ``active`` participant (v1: any
     active member may invite, not just the owner). The target must be a
-    board-active agent accepting this conversation's type, and must not
-    already have a participant row in any status — uniform denial for
-    every failure mode.
+    board-active agent, must not already have a participant row in any
+    status, and — for ``internal``/``asymmetric`` conversations — must not
+    introduce an owner outside the conversation's frozen owner set —
+    uniform denial for every failure mode.
     """
     token = _require_token()
     base_sub = _require_identity(token)
@@ -627,6 +681,7 @@ async def invite(
                 inviter_agent_id=caller.id,
                 conversation_id=conv_id,
                 target_agent_id=target_id,
+                ownership_client=service.AgentTableOwnershipClient(session),
             )
 
     return {
@@ -662,118 +717,3 @@ async def leave(conversation_id: str, agent_key: str | None = None) -> dict[str,
             )
 
     return {"conversation_id": conversation_id, "agent_id": str(caller.id), "status": "left"}
-
-
-# --- Tasks (internal.coordination, TECH-5094) -----------------------------------
-
-
-@comms_server.tool
-async def add_task(
-    assignee_agent_id: str,
-    task: dict[str, Any],
-    schema_version: Literal[1] = 1,
-    agent_key: str | None = None,
-) -> dict[str, Any]:
-    """Create a task assigned from the caller to ``assignee_agent_id``.
-
-    Bidirectional: either party of an admitted pair may call this — a
-    Chief-of-Staff agent assigning work down, or an EA agent reporting
-    status back up (a ``report_status``-action task). Admission is gated
-    solely by the two agents' verified owner sets intersecting (never by
-    ``agents.owner_sub``/``owner_email`` directly) — uniform denial on
-    mismatch or on an ownership-lookup failure (fails closed).
-    ``assignee_agent_id`` is an agent id (UUID string, e.g. from
-    ``comms_list_agents``). ``task`` must validate against the
-    ``TaskSpecV1`` schema (no free text). ``schema_version`` is explicit
-    rather than an invisible default — only ``1`` exists today.
-    """
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
-    assignee_uuid = _parse_uuid("assignee_agent_id", assignee_agent_id)
-
-    async with get_session_factory()() as session:
-        caller = await _resolve_caller_agent(session, sub)
-        async with _map_service_errors():
-            # service.add_task returns the same canonical AXI shape
-            # comms_get_tasks does for this resource (TECH-5094 Argus round
-            # 1, api contract/S5) — one session, one service.py function
-            # call, per this file's module-level invariant.
-            return await service.add_task(
-                session,
-                actor_sub=sub,
-                creator_agent_id=caller.id,
-                assignee_agent_id=assignee_uuid,
-                task=task,
-                ownership_client=service.AgentTableOwnershipClient(session),
-                schema_version=schema_version,
-            )
-
-
-@comms_server.tool
-async def get_tasks(
-    role: Literal["assigned", "created", "all"] = "all",
-    status: Literal["open", "done", "declined"] | None = None,
-    limit: int = 50,
-    cursor: str | None = None,
-    agent_key: str | None = None,
-) -> dict[str, Any]:
-    """List tasks visible to the caller: where the caller is creator or assignee.
-
-    No other agent's tasks are ever visible or enumerable, including
-    same-owner siblings. ``role`` narrows to ``"created"``/``"assigned"``
-    (relative to the caller) or ``"all"`` (default). ``status`` optionally
-    narrows further. Pass the returned ``next_cursor`` back as ``cursor``
-    to page forward (keyset, newest first).
-    """
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
-
-    async with get_session_factory()() as session:
-        caller = await _resolve_caller_agent(session, sub)
-        async with _map_service_errors():
-            return await service.get_tasks(
-                session,
-                caller_agent_id=caller.id,
-                role=role,
-                status=status,
-                limit=limit,
-                cursor=cursor,
-            )
-
-
-@comms_server.tool
-async def update_task(
-    task_id: str, status: Literal["done", "declined"], agent_key: str | None = None
-) -> dict[str, Any]:
-    """Transition a task's status: ``done`` (either party) or ``declined``
-    (assignee only — the consent/refusal mechanism, terminal).
-
-    Only the task's creator or assignee may call this (uniform denial for
-    a non-party or an unknown ``task_id``). ``declined`` is further
-    restricted to the assignee — but that check applies only to a
-    still-``open`` task; any party attempting any transition on an
-    already-terminal task gets the specific "task cannot transition"
-    error, not the uniform denial. No transition out of a terminal status
-    (``done``/``declined``) is legal. ``status='open'`` is not a valid
-    target here — only ``comms_add_task`` ever writes ``open``.
-    """
-    token = _require_token()
-    base_sub = _require_identity(token)
-    agent_key = _validate_agent_key(agent_key)
-    sub = _compose_sub(base_sub, agent_key)
-    task_uuid = _parse_uuid("task_id", task_id)
-
-    async with get_session_factory()() as session:
-        caller = await _resolve_caller_agent(session, sub)
-        async with _map_service_errors():
-            return await service.update_task(
-                session,
-                actor_sub=sub,
-                caller_agent_id=caller.id,
-                task_id=task_uuid,
-                status=status,
-            )

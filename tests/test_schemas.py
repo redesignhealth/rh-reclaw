@@ -1,4 +1,4 @@
-"""Tests for the scheduling.availability v1 message schemas (schemas.py)."""
+"""Tests for the board's typed message schemas (schemas.py)."""
 
 from __future__ import annotations
 
@@ -9,16 +9,21 @@ import pytest
 from pydantic import ValidationError
 
 from schemas import (
-    TASK_NAMESPACE,
     AvailabilityRequestV1,
     AvailabilityResponseV1,
     ConfirmV1,
     CounterProposalV1,
     DeclineV1,
     NeedsClarificationV1,
+    NoteV1,
     PayloadValidationError,
-    TaskSpecV1,
+    TaskAssignV1,
+    TaskCancelV1,
+    TaskCompleteV1,
+    TaskDeclineV1,
+    TaskReportV1,
     get_schema,
+    is_boundary_safe,
     validate_payload,
 )
 
@@ -301,34 +306,37 @@ class TestNeedsClarification:
 
 class TestGetSchema:
     def test_returns_registered_class(self) -> None:
-        assert get_schema("scheduling.availability", "confirm", 1) is ConfirmV1
+        assert get_schema("confirm", 1) is ConfirmV1
 
     def test_unknown_message_type_raises(self) -> None:
         with pytest.raises(PayloadValidationError):
-            get_schema("scheduling.availability", "not_a_type", 1)
+            get_schema("not_a_type", 1)
 
     def test_unknown_schema_version_raises(self) -> None:
         with pytest.raises(PayloadValidationError):
-            get_schema("scheduling.availability", "confirm", 2)
+            get_schema("confirm", 2)
 
-    def test_unknown_conversation_type_raises(self) -> None:
+
+class TestIsBoundarySafe:
+    def test_scheduling_types_are_boundary_safe(self) -> None:
+        assert is_boundary_safe("confirm", 1) is True
+        assert is_boundary_safe("availability_request", 1) is True
+
+    def test_note_is_not_boundary_safe(self) -> None:
+        assert is_boundary_safe("note", 1) is False
+
+    def test_unknown_message_type_raises(self) -> None:
         with pytest.raises(PayloadValidationError):
-            get_schema("not.a.type", "confirm", 1)
+            is_boundary_safe("not_a_type", 1)
 
 
 class TestValidatePayload:
     def test_normalizes_valid_payload(self) -> None:
-        result = validate_payload(
-            "scheduling.availability",
-            "decline",
-            1,
-            {"reason": "expired"},
-        )
+        result = validate_payload("decline", 1, {"reason": "expired"})
         assert result == {"type": "decline", "reason": "expired"}
 
     def test_normalizes_datetimes_to_iso_strings(self) -> None:
         result = validate_payload(
-            "scheduling.availability",
             "confirm",
             1,
             {"slot": {"start": _iso(_NOW), "end": _iso(_LATER)}},
@@ -337,19 +345,32 @@ class TestValidatePayload:
 
     def test_raises_payload_validation_error_on_bad_data(self) -> None:
         with pytest.raises(PayloadValidationError):
-            validate_payload(
-                "scheduling.availability",
-                "decline",
-                1,
-                {"reason": "not_valid"},
-            )
+            validate_payload("decline", 1, {"reason": "not_valid"})
 
     def test_raises_payload_validation_error_on_unknown_schema(self) -> None:
         with pytest.raises(PayloadValidationError):
-            validate_payload("scheduling.availability", "unknown_type", 1, {})
+            validate_payload("unknown_type", 1, {})
 
 
-class TestTaskSpecV1:
+class TestNoteV1:
+    def test_accepts_valid_text(self) -> None:
+        model = NoteV1.model_validate({"text": "hello"})
+        assert model.type == "note"
+
+    def test_rejects_empty_text(self) -> None:
+        with pytest.raises(ValidationError):
+            NoteV1.model_validate({"text": ""})
+
+    def test_rejects_overlong_text(self) -> None:
+        with pytest.raises(ValidationError):
+            NoteV1.model_validate({"text": "x" * 4001})
+
+    def test_rejects_extra_field(self) -> None:
+        with pytest.raises(ValidationError):
+            NoteV1.model_validate({"text": "hi", "other": 1})
+
+
+class TestTaskAssignV1:
     def _valid(self, **overrides: object) -> dict[str, object]:
         payload: dict[str, object] = {
             "action": "gather_availability",
@@ -360,8 +381,8 @@ class TestTaskSpecV1:
         return payload
 
     def test_accepts_valid_gather_availability(self) -> None:
-        model = TaskSpecV1.model_validate(self._valid())
-        assert model.type == "task_spec"
+        model = TaskAssignV1.model_validate(self._valid())
+        assert model.type == "task_assign"
         assert model.priority == "normal"
         assert model.counterparty_agent_ids == []
 
@@ -370,52 +391,135 @@ class TestTaskSpecV1:
     )
     def test_scheduling_actions_require_window_and_duration(self, action: str) -> None:
         with pytest.raises(ValidationError, match="requires 'window' and 'duration_min'"):
-            TaskSpecV1.model_validate({"action": action})
+            TaskAssignV1.model_validate({"action": action})
 
     def test_confirm_slot_requires_window(self) -> None:
         with pytest.raises(ValidationError, match="requires 'window'"):
-            TaskSpecV1.model_validate({"action": "confirm_slot"})
+            TaskAssignV1.model_validate({"action": "confirm_slot"})
 
-        model = TaskSpecV1.model_validate(
+        model = TaskAssignV1.model_validate(
             {"action": "confirm_slot", "window": {"start": _iso(_NOW), "end": _iso(_LATER)}}
         )
         assert model.action == "confirm_slot"
 
     @pytest.mark.parametrize("action", ["cancel_meeting", "report_status"])
     def test_actions_with_no_required_fields(self, action: str) -> None:
-        model = TaskSpecV1.model_validate({"action": action})
+        model = TaskAssignV1.model_validate({"action": action})
         assert model.window is None
         assert model.duration_min is None
 
     def test_duplicate_constraints_rejected(self) -> None:
         with pytest.raises(ValidationError, match="duplicates"):
-            TaskSpecV1.model_validate(self._valid(constraints=["mornings_only", "mornings_only"]))
+            TaskAssignV1.model_validate(self._valid(constraints=["mornings_only", "mornings_only"]))
 
     def test_naive_datetime_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            TaskSpecV1.model_validate(
+            TaskAssignV1.model_validate(
                 self._valid(window={"start": _NAIVE.isoformat(), "end": _iso(_LATER)})
             )
 
     def test_extra_field_rejected_no_free_text(self) -> None:
         with pytest.raises(ValidationError):
-            TaskSpecV1.model_validate(self._valid(notes="please handle ASAP"))
+            TaskAssignV1.model_validate(self._valid(notes="please handle ASAP"))
 
     def test_counterparty_agent_ids_capped_at_ten(self) -> None:
         with pytest.raises(ValidationError):
-            TaskSpecV1.model_validate(
+            TaskAssignV1.model_validate(
                 self._valid(counterparty_agent_ids=[str(uuid.uuid4()) for _ in range(11)])
             )
 
     def test_duplicate_counterparty_agent_ids_rejected(self) -> None:
         dup = str(uuid.uuid4())
         with pytest.raises(ValidationError, match="duplicates"):
-            TaskSpecV1.model_validate(self._valid(counterparty_agent_ids=[dup, dup]))
+            TaskAssignV1.model_validate(self._valid(counterparty_agent_ids=[dup, dup]))
 
-    def test_registered_under_task_namespace(self) -> None:
-        assert get_schema(TASK_NAMESPACE, "task_spec", 1) is TaskSpecV1
+    def test_registered_in_schema_registry(self) -> None:
+        assert get_schema("task_assign", 1) is TaskAssignV1
 
-    def test_validate_payload_normalizes_task_spec(self) -> None:
-        result = validate_payload(TASK_NAMESPACE, "task_spec", 1, self._valid())
-        assert result["type"] == "task_spec"
+    def test_validate_payload_normalizes_task_assign(self) -> None:
+        result = validate_payload("task_assign", 1, self._valid())
+        assert result["type"] == "task_assign"
         assert isinstance(result["window"]["start"], str)
+
+    def test_boundary_safe(self) -> None:
+        assert is_boundary_safe("task_assign", 1) is True
+
+
+class TestTaskReportV1:
+    def test_accepts_in_progress(self) -> None:
+        model = TaskReportV1.model_validate({"status": "in_progress"})
+        assert model.type == "task_report"
+        assert model.about_seq is None
+
+    def test_accepts_blocked_with_about_seq(self) -> None:
+        model = TaskReportV1.model_validate({"status": "blocked", "about_seq": 1})
+        assert model.about_seq == 1
+
+    def test_rejects_bad_status(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskReportV1.model_validate({"status": "done"})
+
+    def test_rejects_non_positive_about_seq(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskReportV1.model_validate({"status": "in_progress", "about_seq": 0})
+
+    def test_rejects_extra_field(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskReportV1.model_validate({"status": "in_progress", "note": "almost done"})
+
+    def test_boundary_safe(self) -> None:
+        assert is_boundary_safe("task_report", 1) is True
+
+
+class TestTaskCompleteV1:
+    def test_accepts_no_fields(self) -> None:
+        model = TaskCompleteV1.model_validate({})
+        assert model.type == "task_complete"
+        assert model.about_seq is None
+
+    def test_accepts_about_seq(self) -> None:
+        model = TaskCompleteV1.model_validate({"about_seq": 1})
+        assert model.about_seq == 1
+
+    def test_rejects_extra_field(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskCompleteV1.model_validate({"summary": "all done"})
+
+    def test_boundary_safe(self) -> None:
+        assert is_boundary_safe("task_complete", 1) is True
+
+
+class TestTaskDeclineV1:
+    @pytest.mark.parametrize(
+        "reason", ["no_longer_needed", "unable_to_complete", "expired", "other"]
+    )
+    def test_accepts_each_reason(self, reason: str) -> None:
+        model = TaskDeclineV1.model_validate({"reason": reason})
+        assert model.type == "task_decline"
+
+    def test_rejects_bad_reason(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskDeclineV1.model_validate({"reason": "changed_my_mind"})
+
+    def test_rejects_missing_reason(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskDeclineV1.model_validate({})
+
+    def test_boundary_safe(self) -> None:
+        assert is_boundary_safe("task_decline", 1) is True
+
+
+class TestTaskCancelV1:
+    @pytest.mark.parametrize(
+        "reason", ["no_longer_needed", "unable_to_complete", "expired", "other"]
+    )
+    def test_accepts_each_reason(self, reason: str) -> None:
+        model = TaskCancelV1.model_validate({"reason": reason})
+        assert model.type == "task_cancel"
+
+    def test_rejects_missing_reason(self) -> None:
+        with pytest.raises(ValidationError):
+            TaskCancelV1.model_validate({})
+
+    def test_boundary_safe(self) -> None:
+        assert is_boundary_safe("task_cancel", 1) is True
