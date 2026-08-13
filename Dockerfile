@@ -7,7 +7,16 @@ WORKDIR /app
 # ownership (e.g. EFS access points with fixed POSIX ownership).
 RUN addgroup --system --gid 10001 app && adduser --system --uid 10001 --gid 10001 app
 
-RUN pip install --no-cache-dir agent-comms-mcp==0.1.1
+# agent-comms-mcp is published by this team from https://github.com/redesignhealth/agent-comms-mcp
+# requirements.lock pins every transitive dep with sha256 hashes (--require-hashes).
+# Supply-chain policy: pin only versions published >7 days ago (mirrors uv's exclude-newer
+# in the source repo). Enforced by process: wait ≥7 days after the PyPI release before
+# bumping the pin here. Migration continuity: the wheel's migrations/versions/ must match
+# this repo's (verified by unpacking the wheel and diffing filenames). See docs/RELEASING.md.
+# To upgrade: bump the version in pyproject.toml + this file, regenerate requirements.lock
+#   (see docs/RELEASING.md), verify migration continuity, then open a PR.
+COPY requirements.lock /app/requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /app/requirements.lock
 
 COPY --chown=app:app entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
