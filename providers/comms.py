@@ -293,8 +293,15 @@ async def register(
     - ``is_shared``: set ``True`` if this agent spans ownership boundaries
       (e.g. a shared bot that serves multiple users). Frozen at first
       registration — re-registering with a different value has no effect.
-      Shared senders are allowed to post non-``boundary_safe`` messages
-      in ``asymmetric`` conversations without an ownership-boundary check.
+      A shared agent is admitted into ``asymmetric`` conversations without
+      the usual pairwise ownership-overlap check, and its senders may post
+      non-``boundary_safe`` messages there without an ownership-boundary
+      check; neither bypass applies to ``internal`` conversations. Setting
+      ``is_shared=True`` on FIRST registration requires the caller's token
+      to carry the ``comms:admin`` scope (or be an interactive/Okta caller)
+      — it is an admission-decision input, so self-declaring it with only
+      the baseline ``comms:write`` scope would be a privilege escalation;
+      a caller without that scope gets ``denied.is_shared_requires_elevated_scope``.
     - ``agent_key``: stopgap for running multiple agents under
       one token. Appended to the token's verified sub
       (``"{base_sub}::{agent_key}"``) to produce a distinct board row.
@@ -345,6 +352,15 @@ async def register(
     agent_key = _validate_agent_key(agent_key)
     sub = _compose_sub(base_sub, agent_key)
 
+    # `is_shared=True` is an admission-decision input (DESIGN.md §9): it
+    # lets its holder bypass the pairwise ownership check for `asymmetric`
+    # conversations. Interactive (Okta) callers already bypass scope checks
+    # entirely elsewhere in this module, so they're trusted here too;
+    # non-interactive callers need the elevated `comms:admin` scope.
+    # `register_agent` enforces this only on first registration (a no-op
+    # for the frozen re-registration path either way).
+    is_shared_authorized = is_interactive_token(token) or "comms:admin" in scopes_for_token(token)
+
     async with get_session_factory()() as session, _map_service_errors():
         agent = await service.register_agent(
             session,
@@ -354,6 +370,7 @@ async def register(
             display_name=display_name,
             accepted_types=accepted_types,
             is_shared=is_shared,
+            is_shared_authorized=is_shared_authorized,
         )
 
     return {

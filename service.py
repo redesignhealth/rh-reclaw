@@ -487,22 +487,29 @@ async def _load_participant_for_read(
 
 async def _owner_sets_for(
     agents: list[Agent], ownership_client: OwnershipClient
-) -> dict[uuid.UUID, frozenset[str]]:
-    """Resolve each agent's verified owner set, one lookup at a time.
+) -> tuple[dict[uuid.UUID, frozenset[str]], dict[uuid.UUID, bool]]:
+    """Resolve each agent's verified owner set and ``is_shared`` flag, one
+    lookup at a time.
 
     Sequential, not concurrent (e.g. via ``asyncio.gather``):
     ``AgentTableOwnershipClient.get_agent_owners`` shares this call's
     ``AsyncSession``, which SQLAlchemy's ``AsyncSession`` does not support
     across concurrent coroutines.
 
+    Returns ``(owner_sets, is_shared_by_id)`` so callers needing an
+    individual participant's ``is_shared`` flag (e.g. the initiator) can
+    reuse this single pass instead of issuing a second lookup.
+
     Callers MUST fail closed on any exception raised here (see
     ``OwnershipClient``'s docstring) — this helper does not catch.
     """
     owner_sets: dict[uuid.UUID, frozenset[str]] = {}
+    is_shared_by_id: dict[uuid.UUID, bool] = {}
     for agent in agents:
         info = await ownership_client.get_agent_owners(agent.id)
         owner_sets[agent.id] = frozenset(info.get("owners") or [])
-    return owner_sets
+        is_shared_by_id[agent.id] = bool(info.get("is_shared"))
+    return owner_sets, is_shared_by_id
 
 
 def _pairwise_admitted(
@@ -600,6 +607,7 @@ async def register_agent(
     display_name: str,
     accepted_types: list[str],
     is_shared: bool = False,
+    is_shared_authorized: bool = True,
 ) -> Agent:
     """Idempotently create or re-bind the board ``Agent`` row for ``sub``.
 
@@ -609,6 +617,18 @@ async def register_agent(
     accepted as a parameter." This function performs NO token
     verification of its own; it persists exactly what it is given. Never
     call it with owner_sub/owner_email taken from untrusted tool arguments.
+
+    SECURITY: ``is_shared_authorized`` gates ``is_shared=True`` on FIRST
+    registration only (a re-registration can never change the already-frozen
+    ``is_shared`` value, so the gate is a no-op there). ``is_shared`` is an
+    admission-decision input — it lets its holder skip the pairwise
+    ownership-boundary check in ``_authorize_conversation_open`` and
+    ``_enforce_boundary_crossing`` — so self-declaring it at registration
+    with only the baseline write scope would be a privilege escalation.
+    Callers MUST compute this from the caller's own verified token (e.g. an
+    elevated ``comms:admin`` scope or platform-provisioning identity) and
+    pass ``False`` when that check fails; defaults to ``True`` so direct
+    service-layer callers (tests, trusted internal callers) are unaffected.
 
     Idempotent: calling again with the same ``sub`` updates
     ``display_name``/``accepted_types``/``owner_email`` in place (unique on
@@ -684,6 +704,18 @@ async def register_agent(
     existing = (await session.execute(select(Agent).where(Agent.sub == sub))).scalar_one_or_none()
     now = _now()
     created = existing is None
+    if created and is_shared and not is_shared_authorized:
+        # First-registration self-escalation: `is_shared` is frozen after
+        # this point (see the re-registration branch below), so this is the
+        # only moment a caller could ever mint a permanently privileged
+        # agent. Deny before the row is created — audited the same as every
+        # other fail-closed denial in this module.
+        await _deny(
+            session,
+            actor_sub=sub,
+            action="denied.is_shared_requires_elevated_scope",
+            detail={"display_name": display_name},
+        )
     if existing is None:
         agent = Agent(
             sub=sub,
@@ -922,8 +954,9 @@ async def _authorize_conversation_open(
     if conversation_type == "open":
         return None
     owner_sets: dict[uuid.UUID, frozenset[str]] = {}
+    is_shared_by_id: dict[uuid.UUID, bool] = {}
     try:
-        owner_sets = await _owner_sets_for(participants, ownership_client)
+        owner_sets, is_shared_by_id = await _owner_sets_for(participants, ownership_client)
     except Exception as exc:
         logger.warning(
             "ownership lookup failed opening a conversation: %s",
@@ -950,10 +983,13 @@ async def _authorize_conversation_open(
             agent_id=initiator.id,
             detail={"conversation_type": conversation_type},
         )
-    initiator_info = await ownership_client.get_agent_owners(initiator.id)
-    if not initiator_info.get("is_shared") and not _pairwise_admitted(
-        conversation_type, participants, owner_sets
-    ):
+    # The shared-initiator bypass only applies to `asymmetric` — the type
+    # `is_shared` exists to bridge (DESIGN.md §9). `internal` requires every
+    # participant to share one owner set BY CONSTRUCTION; letting a shared
+    # initiator skip that check would let it open an `internal` conversation
+    # across disjoint owners, defeating the type's invariant entirely.
+    shared_bypass = conversation_type == "asymmetric" and is_shared_by_id.get(initiator.id, False)
+    if not shared_bypass and not _pairwise_admitted(conversation_type, participants, owner_sets):
         await _deny(
             session,
             actor_sub=actor_sub,

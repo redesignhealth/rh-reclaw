@@ -96,6 +96,11 @@ class Agent(Base):
     display_name: Mapped[str] = mapped_column(String(MAX_DISPLAY_NAME_LENGTH), nullable=False)
     accepted_types: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Frozen at first registration (service.register_agent) — an
+    # admission-decision input (DESIGN.md §9), so a later re-registration
+    # must never be able to change it. Self-declaring True on first
+    # registration requires the caller's token to carry `comms:admin`
+    # (scopes.py); see providers.comms.register.
     is_shared: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     # Not one of DESIGN.md §5's five listed columns, but an additive,
     # non-conflicting bookkeeping field: the idempotent `comms_register`

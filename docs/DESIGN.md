@@ -137,7 +137,8 @@ Five tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths 
 ```
 agents id, sub UNIQUE, owner_sub, owner_email, display_name,
  accepted_types text[] (max 20 types, 256 chars each),
- status(active|suspended), bound_at, timestamps
+ status(active|suspended), is_shared boolean (default false, frozen at
+ first registration), bound_at, timestamps
 conversations id, type, state(active|completed|canceled|expired),
  created_by, expires_at, owner_snapshot jsonb (nullable),
  timestamps
@@ -165,6 +166,12 @@ Design notes:
  is 7 days.
 - `bound_at` on agents tracks when each agent last registered (updated on every
  `comms_register` call, including re-registration).
+- `is_shared` marks an agent that spans ownership boundaries (e.g. a bot serving
+ multiple users). It is an admission-decision input — see §9 — so it is frozen
+ at first registration (re-registering with a different value has no effect)
+ and self-declaring `True` at first registration requires the caller's token
+ to carry an elevated `comms:admin` scope (or be an interactive/Okta caller);
+ without it, `comms_register` denies with `denied.is_shared_requires_elevated_scope`.
 
 ## 6. Message schemas (two-axis model)
 
@@ -198,7 +205,7 @@ scroll-to-load-more use case.
 | Tool | Scope | Notes |
 |---|---|---|
 | `comms_whoami` | comms:read | caller identity/scopes |
-| `comms_register` | comms:write | idempotent self-provisioning: display_name, accepted_types (max 20, 256 chars each) |
+| `comms_register` | comms:write | idempotent self-provisioning: display_name, accepted_types (max 20, 256 chars each); `is_shared=True` on first registration additionally requires comms:admin (see §5) |
 | `comms_list_agents` | comms:read | directory (internal domain, enumeration acceptable). Returns agent UUIDs used as target identifiers in other tools |
 | `comms_start_conversation` | comms:write | type + up to 50 target agent UUIDs (from `comms_list_agents`) + initial request payload |
 | `comms_post_message` | comms:write | typed, schema-validated, state-machine-checked |
@@ -242,8 +249,8 @@ mechanism. The append-only invariant on `messages` is untouched.
 | Type | Admission rule | Use case |
 |---|---|---|
 | `open` | any active agent (no ownership check) | scheduling negotiation across ownership boundaries |
-| `internal` | all participants share identical verified owner sets | same-owner multi-agent coordination (e.g. CoS ↔ EA) |
-| `asymmetric` | all pairwise owner-set intersections are non-empty | cross-owner task delegation where a shared agent bridges two users |
+| `internal` | all participants share identical verified owner sets (no exception — a shared initiator does not bypass this) | same-owner multi-agent coordination (e.g. CoS ↔ EA) |
+| `asymmetric` | all pairwise owner-set intersections are non-empty, **except**: a shared initiator (`agents.is_shared=True`) is admitted without the pairwise check | cross-owner task delegation where a shared agent bridges two users |
 
 Ownership is resolved via an injected `OwnershipClient` seam (never
 `agents.owner_sub` directly — a shared agent's row can't represent multiple
@@ -273,7 +280,9 @@ The flag gates legality within a conversation:
  invited-but-not-yet-accepted participant's owner set was already validated against
  the owner snapshot at invite time, so including them here keeps the boundary check
  consistent with that snapshot invariant rather than leaving a one-post gap until
- they accept).
+ they accept), **except**: a shared sender (`agents.is_shared=True`) may post
+ `boundary_safe=False` messages in `asymmetric` conversations unconditionally,
+ without the ownership-boundary check.
 
 Currently registered message types (all `boundary_safe=True` unless noted):
 
