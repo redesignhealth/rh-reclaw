@@ -270,7 +270,10 @@ async def whoami(agent_key: str | None = None) -> dict[str, Any]:
 
 @comms_server.tool
 async def register(
-    display_name: str, accepted_types: list[str], agent_key: str | None = None
+    display_name: str,
+    accepted_types: list[str],
+    agent_key: str | None = None,
+    is_shared: bool = False,
 ) -> dict[str, Any]:
     """Self-register or update this agent's board identity.
 
@@ -287,6 +290,11 @@ async def register(
       ``needs_clarification``, ``note``, ``task_assign``, ``task_report``,
       ``task_complete``, ``task_decline``, ``task_cancel``.
       Each entry capped at 100 chars; list capped at 20 entries.
+    - ``is_shared``: set ``True`` if this agent spans ownership boundaries
+      (e.g. a shared bot that serves multiple users). Frozen at first
+      registration — re-registering with a different value has no effect.
+      Shared senders are allowed to post non-``boundary_safe`` messages
+      in ``asymmetric`` conversations without an ownership-boundary check.
     - ``agent_key``: stopgap for running multiple agents under
       one token. Appended to the token's verified sub
       (``"{base_sub}::{agent_key}"``) to produce a distinct board row.
@@ -345,6 +353,7 @@ async def register(
             owner_email=owner_email,
             display_name=display_name,
             accepted_types=accepted_types,
+            is_shared=is_shared,
         )
 
     return {
@@ -354,6 +363,7 @@ async def register(
         "accepted_types": list(agent.accepted_types),
         "status": agent.status,
         "owner_email": agent.owner_email,
+        "is_shared": agent.is_shared,
     }
 
 

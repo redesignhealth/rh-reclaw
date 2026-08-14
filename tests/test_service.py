@@ -413,6 +413,55 @@ class TestRegisterAgent:
                 accepted_types=["availability_request", "bogus"],
             )
 
+    async def test_is_shared_frozen_on_reregister(self, session: AsyncSession) -> None:
+        """``is_shared`` is frozen at first registration — re-registering with
+        a different value must not overwrite it (same freeze semantics as
+        ``owner_sub``: both are admission-decision inputs)."""
+        first = await _register(session, "shared-freeze", is_shared=False)
+        assert first.is_shared is False
+
+        second = await _register(session, "shared-freeze", is_shared=True)
+        assert second.id == first.id
+        assert second.is_shared is False
+
+    async def test_shared_sender_can_post_note_in_asymmetric(
+        self, session: AsyncSession
+    ) -> None:
+        """A sender registered with ``is_shared=True`` bypasses the
+        boundary-crossing check for ``note`` in an ``asymmetric``
+        conversation — exercises the real ``AgentTableOwnershipClient``
+        rather than a fake, verifying the full stack: migration column →
+        ORM model → service freeze → ownership client → enforce path."""
+        shared = await _register(
+            session, "shared-note-sender", owner_sub="shared-owner", is_shared=True
+        )
+        solo = await _register(
+            session, "solo-note-target", owner_sub="solo-owner", is_shared=False
+        )
+        # Admission: asymmetric requires ownership intersection. The
+        # AgentTableOwnershipClient will return is_shared=True for `shared`,
+        # which short-circuits the subset check in _enforce_boundary_crossing.
+        conversation = await start_conversation(
+            session,
+            actor_sub=shared.sub,
+            initiator_agent_id=shared.id,
+            conversation_type="asymmetric",
+            target_agent_ids=[solo.id],
+            initial_message=_request_payload(),
+        )
+        await accept_invite(
+            session, actor_sub=solo.sub, agent_id=solo.id, conversation_id=conversation.id
+        )
+        message = await post_message(
+            session,
+            actor_sub=shared.sub,
+            sender_agent_id=shared.id,
+            conversation_id=conversation.id,
+            message_type="note",
+            payload={"text": "hello from shared bot"},
+        )
+        assert message.type == "note"
+
 
 # --- start_conversation --------------------------------------------------------
 

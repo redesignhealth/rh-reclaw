@@ -599,6 +599,7 @@ async def register_agent(
     owner_email: str,
     display_name: str,
     accepted_types: list[str],
+    is_shared: bool = False,
 ) -> Agent:
     """Idempotently create or re-bind the board ``Agent`` row for ``sub``.
 
@@ -691,21 +692,19 @@ async def register_agent(
             display_name=display_name,
             accepted_types=normalized_types,
             status="active",
+            is_shared=is_shared,
             bound_at=now,
         )
         session.add(agent)
     else:
         agent = existing
-        # owner_sub is deliberately NOT overwritten on re-registration —
-        # it is now read by
-        # AgentTableOwnershipClient as the input to may_assign's admission
-        # decision, and agent-jwt extra claims (including owner_sub) are
-        # caller-supplied and unverified (providers/comms.py). Allowing a
-        # re-register to overwrite it would let a caller forge a victim's
-        # owner_sub, re-register their own agent under it, and be admitted
-        # into that victim's tasks. Freezing it at first registration closes
-        # that path; owner_email carries no admission-decision weight today
-        # so it is unaffected.
+        # owner_sub and is_shared are deliberately NOT overwritten on
+        # re-registration. owner_sub is read by AgentTableOwnershipClient
+        # as the input to may_assign's admission decision; allowing it to
+        # change would let a caller forge a victim's owner_sub. is_shared
+        # is frozen for the same reason: it's an admission-decision input
+        # (shared senders bypass the boundary-crossing check) and must not
+        # be escalatable post-registration.
         agent.owner_email = owner_email
         agent.display_name = display_name
         agent.accepted_types = normalized_types
@@ -951,7 +950,10 @@ async def _authorize_conversation_open(
             agent_id=initiator.id,
             detail={"conversation_type": conversation_type},
         )
-    if not _pairwise_admitted(conversation_type, participants, owner_sets):
+    initiator_info = await ownership_client.get_agent_owners(initiator.id)
+    if not initiator_info.get("is_shared") and not _pairwise_admitted(
+        conversation_type, participants, owner_sets
+    ):
         await _deny(
             session,
             actor_sub=actor_sub,
@@ -1551,6 +1553,8 @@ async def _enforce_boundary_crossing(
             # SQLAlchemy's AsyncSession does not support across concurrent
             # coroutines.
             sender_info = await ownership_client.get_agent_owners(sender_agent_id)
+            if sender_info.get("is_shared"):
+                return
             sender_owners = frozenset(sender_info.get("owners") or [])
             for pid in other_agent_ids:
                 info = await ownership_client.get_agent_owners(pid)
@@ -2197,20 +2201,10 @@ class AgentTableOwnershipClient:
     """Interim ``OwnershipClient`` until the platform's real ownership
     endpoint ships.
 
-    Wraps the existing ``agents.owner_sub`` column as a single-element
-    owner set; ``is_shared`` is always ``False`` since no shared-agent
-    concept exists in this schema yet. This is exactly correct for every
-    agent registered today: two agents bound to the same ``owner_sub``
-    (e.g. two agents belonging to one person) intersect via ``may_assign``
-    precisely as they should, and unrelated agents correctly do not. Swap
-    this for a real platform-backed client the moment shared agents exist
-    — the ``OwnershipClient`` protocol is the seam, not this class.
-
-    Safe to use as an authorization input specifically because
-    ``register_agent`` freezes ``owner_sub`` at first registration and
-    never overwrites it on re-registration (see that function) — reading
-    it here would otherwise let a caller forge a victim's ``owner_sub``
-    via a re-register call.
+    Wraps the existing ``agents`` columns: ``owner_sub`` as a
+    single-element owner set, and ``is_shared`` from the DB (frozen at
+    first registration). Safe to use as an authorization input because
+    both columns are frozen at first registration — see ``register_agent``.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -2220,7 +2214,7 @@ class AgentTableOwnershipClient:
         agent = await _find_agent_by_id(self._session, agent_id)
         if agent is None:
             raise LookupError(f"unknown agent {agent_id}")
-        return {"is_shared": False, "owners": [agent.owner_sub]}
+        return {"is_shared": agent.is_shared, "owners": [agent.owner_sub]}
 
 
 def may_assign(creator_owners: AbstractSet[str], assignee_owners: AbstractSet[str]) -> bool:

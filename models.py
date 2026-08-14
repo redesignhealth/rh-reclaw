@@ -96,6 +96,7 @@ class Agent(Base):
     display_name: Mapped[str] = mapped_column(String(MAX_DISPLAY_NAME_LENGTH), nullable=False)
     accepted_types: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    is_shared: Mapped[bool] = mapped_column(nullable=False, server_default=text("false"))
     # Not one of DESIGN.md §5's five listed columns, but an additive,
     # non-conflicting bookkeeping field: the idempotent `comms_register`
     # tool (§4) re-binds an existing agent row on every call, and needs a
