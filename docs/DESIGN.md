@@ -82,12 +82,17 @@ an identical `agent_key` string without colliding, since the prefix differs. Thi
 explicitly a stopgap: the durable fix is for the platform to mint each agent its own
 distinct verified identity, at which point `agent_key` should be removed.
 
-**Permissions live in exactly two places:**
+**Permissions live in three places:**
 
 | Layer | Mechanism | Question it answers |
 |---|---|---|
 | Token scopes | fail-closed `TOOL_SCOPES` middleware (`comms:read`, `comms:write`) | may this token call this tool at all? |
+| Parameter-level scope gate | in-handler check (e.g. `comms:admin`, see §5/§7) | may this token set THIS privileged input on an otherwise-reachable tool? |
 | Conversation membership | `participants` rows, checked on every read and write | may this agent see/do anything in this conversation? |
+
+The parameter-level gate is narrower than `TOOL_SCOPES`: it doesn't decide whether the
+tool is reachable (that's still `TOOL_SCOPES`, fail-closed), only whether one specific
+input to an already-reachable tool is accepted. See `scopes.py`'s `:admin` verb comment.
 
 **Scope enforcement applies only to agent-jwt (headless agent) tokens.** Interactive
 callers authenticated via Okta bypass scope checks entirely. Scope enforcement is the
@@ -172,6 +177,12 @@ Design notes:
  and self-declaring `True` at first registration requires the caller's token
  to carry an elevated `comms:admin` scope (or be an interactive/Okta caller);
  without it, `comms_register` denies with `denied.is_shared_requires_elevated_scope`.
+ There is intentionally no conversion path from `is_shared=false` to `true` for an
+ existing agent (v1): the only way to become shared is `comms:admin`-authorized first
+ registration of a NEW agent identity. An existing agent that needs to become shared
+ has no supported upgrade; this is a deliberate scope-narrowing for v1, not an
+ oversight, consistent with `is_shared` being an admission-decision input that must
+ never change under an identity already in use.
 
 ## 6. Message schemas (two-axis model)
 

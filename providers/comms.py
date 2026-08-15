@@ -301,7 +301,10 @@ async def register(
       to carry the ``comms:admin`` scope (or be an interactive/Okta caller)
       — it is an admission-decision input, so self-declaring it with only
       the baseline ``comms:write`` scope would be a privilege escalation;
-      a caller without that scope gets ``denied.is_shared_requires_elevated_scope``.
+      a caller without that scope gets the standard anti-enumeration
+      ``access_denied`` error (the specific reason,
+      ``denied.is_shared_requires_elevated_scope``, is recorded only in the
+      audit log — never returned to the caller).
     - ``agent_key``: stopgap for running multiple agents under
       one token. Appended to the token's verified sub
       (``"{base_sub}::{agent_key}"``) to produce a distinct board row.

@@ -197,6 +197,14 @@ async def _register(session: AsyncSession, sub: str, **overrides: Any) -> Agent:
         # capability gate (TestMessageTypeAccepted) don't need to opt in
         # per-type; those tests narrow this explicitly via overrides.
         "accepted_types": sorted(MESSAGE_TYPES),
+        # register_agent's own default is False (fail-closed) so a future
+        # caller that omits the kwarg doesn't silently grant shared-agent
+        # privileges (Argus round 2). This test helper is the one place
+        # that convenience default belongs instead -- most service-layer
+        # tests here call `_register(..., is_shared=True)` directly and
+        # aren't testing the scope gate itself (that's TestRegisterAgent's
+        # dedicated denial test), so they need this to keep working.
+        "is_shared_authorized": True,
     }
     kwargs.update(overrides)
     return await register_agent(session, **kwargs)
@@ -435,6 +443,39 @@ class TestRegisterAgent:
         second = await _register(session, "shared-freeze-downgrade", is_shared=False)
         assert second.id == first.id
         assert second.is_shared is True
+
+    async def test_is_shared_true_denied_without_authorization(self, session: AsyncSession) -> None:
+        """First registration with ``is_shared=True`` and
+        ``is_shared_authorized=False`` (the fail-closed default) is denied
+        with the specific audited reason, and no ``Agent`` row is created."""
+        with pytest.raises(AccessDeniedError) as exc_info:
+            await register_agent(
+                session,
+                sub="shared-unauthorized",
+                owner_sub="owner-shared-unauthorized",
+                owner_email="shared-unauthorized@example.com",
+                display_name="Shared Unauthorized",
+                accepted_types=sorted(MESSAGE_TYPES),
+                is_shared=True,
+                is_shared_authorized=False,
+            )
+        assert exc_info.value.reason == "denied.is_shared_requires_elevated_scope"
+
+        no_row = (
+            await session.execute(select(Agent).where(Agent.sub == "shared-unauthorized"))
+        ).scalar_one_or_none()
+        assert no_row is None
+
+        actions = (
+            (
+                await session.execute(
+                    select(AuditLog.action).where(AuditLog.actor_sub == "shared-unauthorized")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert "denied.is_shared_requires_elevated_scope" in actions
 
     async def test_shared_sender_can_post_note_in_asymmetric(self, session: AsyncSession) -> None:
         """A sender registered with ``is_shared=True`` bypasses the

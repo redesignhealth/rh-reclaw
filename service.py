@@ -607,7 +607,7 @@ async def register_agent(
     display_name: str,
     accepted_types: list[str],
     is_shared: bool = False,
-    is_shared_authorized: bool = True,
+    is_shared_authorized: bool = False,
 ) -> Agent:
     """Idempotently create or re-bind the board ``Agent`` row for ``sub``.
 
@@ -627,8 +627,12 @@ async def register_agent(
     with only the baseline write scope would be a privilege escalation.
     Callers MUST compute this from the caller's own verified token (e.g. an
     elevated ``comms:admin`` scope or platform-provisioning identity) and
-    pass ``False`` when that check fails; defaults to ``True`` so direct
-    service-layer callers (tests, trusted internal callers) are unaffected.
+    pass ``True`` only when that check passes. Defaults to ``False``
+    (fail-closed): an admission-decision-input gate must never silently
+    grant its privilege to a caller that forgets the kwarg. Direct
+    service-layer callers that need the convenience of a permissive
+    default (e.g. tests) should set it in their own helper, not rely on
+    this signature's default.
 
     Idempotent: calling again with the same ``sub`` updates
     ``display_name``/``accepted_types``/``owner_email`` in place (unique on
@@ -716,6 +720,7 @@ async def register_agent(
             action="denied.is_shared_requires_elevated_scope",
             detail={"display_name": display_name},
         )
+        raise AssertionError("_deny is NoReturn; unreachable")  # defense in depth (Argus round 2)
     if existing is None:
         agent = Agent(
             sub=sub,
