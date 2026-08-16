@@ -145,7 +145,33 @@ jobs:
           if wheel_migrations != repo_migrations:
               print(f"Migration mismatch!\nWheel: {wheel_migrations}\nRepo:  {repo_migrations}", file=sys.stderr)
               sys.exit(1)
-          print(f"Migration continuity OK: {len(wheel_migrations)} files match")
+          # Filename equality only confirms the *set* matches -- also byte-diff
+          # the migrations this bump introduces, so an in-place-amended body or
+          # a corrected down_revision doesn't slip through unnoticed. Scoped to
+          # just these three (not every repo migration) because older,
+          # already-merged migration files are allowed to diverge from the
+          # wheel for reasons unrelated to this bump (e.g. idempotency
+          # hardening from a prior PR's own review) -- update this list on the
+          # next version bump to name whatever migrations *that* bump adds.
+          NEW_MIGRATIONS_THIS_BUMP = [
+              "a1b2c3d4e5f6_add_is_shared_to_agents.py",
+              "2cc5185360c7_add_agents_schema_version_range.py",
+              "bb1ea7d2a0cf_partial_index_for_case_insensitive_.py",
+          ]
+          mismatched = []
+          with zipfile.ZipFile(os.path.join(wheel_dir, wheel_file)) as z:
+              wheel_bytes_by_name = {
+                  n.split('/')[-1]: z.read(n) for n in z.namelist()
+                  if 'migrations/versions/' in n and n.endswith('.py')
+              }
+          for name in NEW_MIGRATIONS_THIS_BUMP:
+              with open(os.path.join('migrations/versions', name), 'rb') as f:
+                  if f.read() != wheel_bytes_by_name[name]:
+                      mismatched.append(name)
+          if mismatched:
+              print(f"Migration content mismatch (byte-for-byte diff from wheel): {mismatched}", file=sys.stderr)
+              sys.exit(1)
+          print(f"Migration continuity OK: {len(wheel_migrations)} files match (filenames + content for this bump's new files)")
           EOF
 
       - name: Configure AWS credentials (dev ECR push)

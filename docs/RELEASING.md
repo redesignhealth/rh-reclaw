@@ -5,10 +5,7 @@ source live at [redesignhealth/agent-comms-mcp](https://github.com/redesignhealt
 
 ## Steps to bump the version
 
-1. **Wait ≥7 days** after the PyPI release (supply-chain policy: mirrors
-   `[tool.uv] exclude-newer = "7 days"` in the source repo).
-
-2. **Verify migration continuity.** Unpack the new wheel and diff the migration
+1. **Verify migration continuity.** Unpack the new wheel and diff the migration
    filenames against this repo's `migrations/versions/`:
    ```sh
    pip download agent-comms-mcp==X.Y.Z --dest /tmp/acm-dl --no-deps
@@ -16,19 +13,29 @@ source live at [redesignhealth/agent-comms-mcp](https://github.com/redesignhealt
    diff <(ls /tmp/acm-inspect/migrations/versions/) <(ls migrations/versions/)
    ```
    The diff must be empty. If the wheel adds new migration files that are not yet
-   in this repo, add them here too before proceeding.
+   in this repo, add them here too before proceeding. A filename diff only
+   confirms the *set* of migrations matches -- also diff each new file's full
+   content against the unpacked wheel (`diff /tmp/acm-inspect/migrations/versions/<f> migrations/versions/<f>`)
+   to catch an amended migration body or a corrected `down_revision` that a
+   filename-only comparison would miss.
 
-3. **Bump the version** in `pyproject.toml`:
+   This diff is against the target version's *final* wheel state, not an
+   incremental version-by-version comparison, so it's safe to skip
+   intermediate versions (e.g. bumping straight from 0.1.1 to 0.1.5): whatever
+   migrations exist in the 0.1.5 wheel are exactly the ones this repo needs,
+   regardless of how many releases were skipped to get there.
+
+2. **Bump the version** in `pyproject.toml`:
    ```toml
    version = "X.Y.Z"
    ```
 
-4. **Regenerate `uv.lock`**:
+3. **Regenerate `uv.lock`**:
    ```sh
    uv lock
    ```
 
-5. **Regenerate `requirements.lock`** from the workspace root:
+4. **Regenerate `requirements.lock`** from the workspace root:
    ```sh
    WHEEL_HASH1=sha256:<sdist-hash-from-pypi>
    WHEEL_HASH2=sha256:<wheel-hash-from-pypi>
@@ -50,7 +57,7 @@ source live at [redesignhealth/agent-comms-mcp](https://github.com/redesignhealt
    # For the sdist hash, check the PyPI JSON API or the release page directly
    ```
 
-6. **Open a PR** with the changes to `pyproject.toml`, `uv.lock`, and
+5. **Open a PR** with the changes to `pyproject.toml`, `uv.lock`, and
    `requirements.lock`. CI will:
    - Verify `requirements.lock` pin matches `pyproject.toml` version
    - Smoke-test both entry points (`agent-comms-mcp`, `agent-comms-mcp-migrate`)
