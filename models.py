@@ -33,6 +33,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    column,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP, UUID
@@ -87,7 +88,25 @@ class Agent(Base):
     """
 
     __tablename__ = "agents"
-    __table_args__ = (CheckConstraint(f"status IN {AGENT_STATUSES!r}", name="ck_agents_status"),)
+    __table_args__ = (
+        CheckConstraint(f"status IN {AGENT_STATUSES!r}", name="ck_agents_status"),
+        # Added by migration 2cc5185360c7 (agent-comms-mcp 0.1.5). Declared
+        # here too so autogenerate doesn't see it as DB-only and propose a
+        # spurious DROP CONSTRAINT.
+        CheckConstraint(
+            "min_schema_version >= 1 AND min_schema_version <= max_schema_version",
+            name="ck_agents_schema_version_range",
+        ),
+        # Added by migration bb1ea7d2a0cf (agent-comms-mcp 0.1.5): partial
+        # index backing the case-insensitive active-agent email lookup.
+        # Declared here too, same reason as the check constraint above.
+        Index(
+            "idx_agents_lower_owner_email_active",
+            text("lower(owner_email)"),
+            column("bound_at").desc().nullslast(),
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     sub: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
@@ -201,6 +220,9 @@ class Message(Base):
             "sender_id",
             "created_at",
         ),
+        # Added by migration 2cc5185360c7 (agent-comms-mcp 0.1.5). Declared
+        # here too, same reason as Agent's new constraint/index above.
+        Index("idx_messages_sender_id_created_at", "sender_id", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = _uuid_pk()

@@ -187,6 +187,22 @@ class TestSchema:
         assert constraint_def is not None, "ck_agents_accepted_types_max constraint missing"
         assert "cardinality" in constraint_def
 
+    async def test_agents_schema_version_range_check_constraint(self, engine: AsyncEngine) -> None:
+        # DB-level backstop (migrations/versions/2cc5185360c7...) enforcing
+        # min_schema_version <= max_schema_version.
+        async with engine.connect() as conn:
+            result = await conn.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conrelid = 'agents'::regclass "
+                    "AND conname = 'ck_agents_schema_version_range'"
+                )
+            )
+            constraint_def = result.scalar_one_or_none()
+        assert constraint_def is not None, "ck_agents_schema_version_range constraint missing"
+        assert "min_schema_version" in constraint_def
+        assert "max_schema_version" in constraint_def
+
     async def test_conversations_columns(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "conversations")
         for expected in (
@@ -290,6 +306,10 @@ class TestSchema:
 
         message_indexes = await _indexes(engine, "messages")
         assert "idx_messages_conversation_id_sender_id_created_at" in message_indexes
+        assert "idx_messages_sender_id_created_at" in message_indexes
+
+        agent_indexes = await _indexes(engine, "agents")
+        assert "idx_agents_lower_owner_email_active" in agent_indexes
 
     async def test_messages_seq_unique_per_conversation(self, engine: AsyncEngine) -> None:
         async with engine.connect() as conn:

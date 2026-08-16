@@ -13,7 +13,11 @@ source live at [redesignhealth/agent-comms-mcp](https://github.com/redesignhealt
    diff <(ls /tmp/acm-inspect/migrations/versions/) <(ls migrations/versions/)
    ```
    The diff must be empty. If the wheel adds new migration files that are not yet
-   in this repo, add them here too before proceeding.
+   in this repo, add them here too before proceeding. A filename diff only
+   confirms the *set* of migrations matches — also diff each new file's full
+   content against the unpacked wheel (`diff /tmp/acm-inspect/migrations/versions/<f> migrations/versions/<f>`)
+   to catch an amended migration body or a corrected `down_revision` that a
+   filename-only comparison would miss.
 
    This diff is against the target version's *final* wheel state, not an
    incremental version-by-version comparison, so it's safe to skip
