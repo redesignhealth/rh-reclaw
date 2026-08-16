@@ -78,3 +78,26 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
         "'task_complete', 'task_decline', 'task_report']::text[], "
         "updated_at = now();" in result.stdout
     )
+    # bb1ea7d2a0cf: case-insensitive active-agent email lookup index
+    assert (
+        "CREATE INDEX IF NOT EXISTS idx_agents_lower_owner_email_active ON agents "
+        "(lower(owner_email), bound_at DESC NULLS LAST) WHERE status = 'active';" in result.stdout
+    )
+    # 2cc5185360c7: agents min/max schema_version range
+    assert (
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS min_schema_version INTEGER "
+        "DEFAULT 1 NOT NULL;" in result.stdout
+    )
+    assert (
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS max_schema_version INTEGER "
+        "DEFAULT 1 NOT NULL;" in result.stdout
+    )
+    assert (
+        "ALTER TABLE agents ADD CONSTRAINT ck_agents_schema_version_range CHECK "
+        "(min_schema_version >= 1 AND min_schema_version <= max_schema_version);" in result.stdout
+    )
+    # a1b2c3d4e5f6: is_shared column
+    assert (
+        "ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_shared BOOLEAN "
+        "DEFAULT false NOT NULL;" in result.stdout
+    )

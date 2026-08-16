@@ -96,6 +96,24 @@ class Agent(Base):
     display_name: Mapped[str] = mapped_column(String(MAX_DISPLAY_NAME_LENGTH), nullable=False)
     accepted_types: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False)
+    # Added by migrations 2cc5185360c7/a1b2c3d4e5f6 (agent-comms-mcp 0.1.5).
+    # Declared here so `Base.metadata` matches the DB schema those
+    # migrations produce -- without these, `alembic revision --autogenerate`
+    # would see them as extra DB columns and propose spurious DROP COLUMNs,
+    # and any ORM code touching `agent.is_shared`/`min_schema_version`/
+    # `max_schema_version` would raise AttributeError instead of reading the
+    # DB value. The business logic that reads/writes these (schema-version
+    # negotiation, shared-agent authorization) is not ported here -- it
+    # lives only in the deployed agent-comms-mcp wheel; see CLAUDE.md.
+    min_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    max_schema_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default=text("1")
+    )
+    is_shared: Mapped[bool] = mapped_column(
+        nullable=False, default=False, server_default=text("false")
+    )
     # Not one of DESIGN.md §5's five listed columns, but an additive,
     # non-conflicting bookkeeping field: the idempotent `comms_register`
     # tool (§4) re-binds an existing agent row on every call, and needs a

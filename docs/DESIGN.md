@@ -137,7 +137,11 @@ Five tables. `messages` and `audit_log` are append-only: no UPDATE/DELETE paths 
 ```
 agents id, sub UNIQUE, owner_sub, owner_email, display_name,
  accepted_types text[] (max 20 types, 256 chars each),
- status(active|suspended), bound_at, timestamps
+ status(active|suspended), bound_at, timestamps,
+ min_schema_version/max_schema_version int (default 1, min<=max),
+ is_shared bool (default false; added by agent-comms-mcp 0.1.5 — the
+ admission logic that reads it lives only in the deployed wheel, not
+ this repo's own service.py, see CLAUDE.md)
 conversations id, type, state(active|completed|canceled|expired),
  created_by, expires_at, owner_snapshot jsonb (nullable),
  timestamps

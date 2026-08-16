@@ -152,11 +152,17 @@ class TestSchema:
             "status",
             "created_at",
             "updated_at",
+            "min_schema_version",
+            "max_schema_version",
+            "is_shared",
         ):
             assert expected in cols, f"agents.{expected} missing"
         assert cols["accepted_types"] == "ARRAY"
         assert cols["created_at"] == "timestamp with time zone"
         assert cols["display_name"] == "character varying"
+        assert cols["min_schema_version"] == "integer"
+        assert cols["max_schema_version"] == "integer"
+        assert cols["is_shared"] == "boolean"
         max_length = await _column_max_length(engine, "agents", "display_name")
         assert max_length == MAX_DISPLAY_NAME_LENGTH, (
             "agents.display_name character_maximum_length is None or wrong "

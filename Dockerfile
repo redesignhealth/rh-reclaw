@@ -9,9 +9,7 @@ RUN addgroup --system --gid 10001 app && adduser --system --uid 10001 --gid 1000
 
 # agent-comms-mcp is published by this team from https://github.com/redesignhealth/agent-comms-mcp
 # requirements.lock pins every transitive dep with sha256 hashes (--require-hashes).
-# Supply-chain policy: pin only versions published >7 days ago (mirrors uv's exclude-newer
-# in the source repo). Enforced by process: wait ≥7 days after the PyPI release before
-# bumping the pin here. Migration continuity: the wheel's migrations/versions/ must match
+# Migration continuity: the wheel's migrations/versions/ must match
 # this repo's (verified by unpacking the wheel and diffing filenames). See docs/RELEASING.md.
 # To upgrade: bump the version in pyproject.toml, regenerate requirements.lock
 #   (see docs/RELEASING.md), verify migration continuity, then open a PR.

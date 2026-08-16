@@ -15,6 +15,12 @@ source live at [redesignhealth/agent-comms-mcp](https://github.com/redesignhealt
    The diff must be empty. If the wheel adds new migration files that are not yet
    in this repo, add them here too before proceeding.
 
+   This diff is against the target version's *final* wheel state, not an
+   incremental version-by-version comparison, so it's safe to skip
+   intermediate versions (e.g. bumping straight from 0.1.1 to 0.1.5): whatever
+   migrations exist in the 0.1.5 wheel are exactly the ones this repo needs,
+   regardless of how many releases were skipped to get there.
+
 2. **Bump the version** in `pyproject.toml`:
    ```toml
    version = "X.Y.Z"
