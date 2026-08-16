@@ -202,6 +202,9 @@ class TestSchema:
         assert constraint_def is not None, "ck_agents_schema_version_range constraint missing"
         assert "min_schema_version" in constraint_def
         assert "max_schema_version" in constraint_def
+        assert "1" in constraint_def, (
+            "security-relevant min_schema_version >= 1 lower bound missing from constraint"
+        )
 
     async def test_conversations_columns(self, engine: AsyncEngine) -> None:
         cols = await _columns(engine, "conversations")

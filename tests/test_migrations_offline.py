@@ -96,6 +96,10 @@ def test_alembic_offline_mode_emits_sql_without_a_live_connection() -> None:
         "ALTER TABLE agents ADD CONSTRAINT ck_agents_schema_version_range CHECK "
         "(min_schema_version >= 1 AND min_schema_version <= max_schema_version);" in result.stdout
     )
+    assert (
+        "CREATE INDEX IF NOT EXISTS idx_messages_sender_id_created_at ON messages "
+        "(sender_id, created_at);" in result.stdout
+    )
     # a1b2c3d4e5f6: is_shared column
     assert (
         "ALTER TABLE agents ADD COLUMN IF NOT EXISTS is_shared BOOLEAN "

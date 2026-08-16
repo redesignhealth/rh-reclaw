@@ -33,7 +33,6 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
-    column,
     text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP, UUID
@@ -103,7 +102,7 @@ class Agent(Base):
         Index(
             "idx_agents_lower_owner_email_active",
             text("lower(owner_email)"),
-            column("bound_at").desc().nullslast(),
+            text("bound_at DESC NULLS LAST"),
             postgresql_where=text("status = 'active'"),
         ),
     )
@@ -123,7 +122,9 @@ class Agent(Base):
     # `max_schema_version` would raise AttributeError instead of reading the
     # DB value. The business logic that reads/writes these (schema-version
     # negotiation, shared-agent authorization) is not ported here -- it
-    # lives only in the deployed agent-comms-mcp wheel; see CLAUDE.md.
+    # lives only in the deployed agent-comms-mcp wheel; this repo's own
+    # service.py is a dev baseline for local testing and does not
+    # implement it (see README.md).
     min_schema_version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )

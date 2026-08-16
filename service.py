@@ -2198,13 +2198,16 @@ class AgentTableOwnershipClient:
     endpoint ships.
 
     Wraps the existing ``agents.owner_sub`` column as a single-element
-    owner set; ``is_shared`` is always ``False`` since no shared-agent
-    concept exists in this schema yet. This is exactly correct for every
-    agent registered today: two agents bound to the same ``owner_sub``
+    owner set; ``is_shared`` is always ``False`` here regardless of the
+    ``agents.is_shared`` DB column (added in agent-comms-mcp 0.1.5) --
+    this dev-baseline ``service.py`` deliberately does not read that
+    column, since the admission logic that would act on it lives only in
+    the deployed wheel. This is exactly correct for every agent
+    registered today: two agents bound to the same ``owner_sub``
     (e.g. two agents belonging to one person) intersect via ``may_assign``
     precisely as they should, and unrelated agents correctly do not. Swap
     this for a real platform-backed client the moment shared agents exist
-    — the ``OwnershipClient`` protocol is the seam, not this class.
+    -- the ``OwnershipClient`` protocol is the seam, not this class.
 
     Safe to use as an authorization input specifically because
     ``register_agent`` freezes ``owner_sub`` at first registration and
