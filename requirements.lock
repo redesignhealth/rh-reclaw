@@ -1,10 +1,10 @@
 # Hashed requirements for the agent-comms-mcp container image.
 # Generated via: uv export --no-dev --format requirements-txt (workspace root)
-# with agent-comms-mcp==0.1.1 PyPI wheel hashes prepended.
+# with agent-comms-mcp==0.1.5 PyPI wheel hashes prepended.
 # Regenerate: see docs/RELEASING.md
-agent-comms-mcp==0.1.1 \
-    --hash=sha256:5ef5c03e50e2182aa08d159f1255fcdab18b5612302e23fa3566492cc45e6035 \
-    --hash=sha256:a214674e0c0e21099831ff0f2ada08e681ae15292f672daf9622b252f5cf933d
+agent-comms-mcp==0.1.5 \
+    --hash=sha256:fbf1ece2c350a49d17ce69596a63c36ed95854fcc94c0a45acec4fd38b708286 \
+    --hash=sha256:049361f55220b4225ca009b2f4d5371a4dab02db7f4dde6b352f26b243a88c86
 aiofile==3.12.0 \
     --hash=sha256:22606b25c9c3343d0bb8ac28c434de25ae6de4b1d1cb4aee2c06ed77dd874744 \
     --hash=sha256:451ec755398f749b90333a16a3000194c53437c1f9cb2dc9b812d9317281dffc
